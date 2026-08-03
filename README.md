@@ -54,7 +54,7 @@ Serialized EDB decoding itself does not depend on executable addresses.
 
 ### 🗺️ Maps, triggers, scripts & entities
 
-<img src="docs/Img/img2.png" align="right" width="360" alt="Maps viewer with lighting, NavMesh and particle controls" />
+<img src="docs/Img/img1.png" align="right" width="360" alt="Maps viewer with lighting, NavMesh and particle controls" />
 
 * Maps are split into logical modules: native trigger behavior, specialised
   entity resolution and script behavior live in their own modules instead of
@@ -137,7 +137,7 @@ Serialized EDB decoding itself does not depend on executable addresses.
 
 ### 🎬 Animation
 
-<img src="docs/Img/img1.png" align="right" width="360" alt="Animations tab with native full-bone playback and pose diagnostics" />
+<img src="docs/Img/img3.png" align="right" width="360" alt="Animations tab with native full-bone playback and pose diagnostics" />
 
 * Full native skeletal playback: complete active-bone decoding, hierarchy,
   bind poses, serialized one-to-four bone weights, position/quaternion
