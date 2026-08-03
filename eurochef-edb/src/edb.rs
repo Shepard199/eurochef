@@ -88,7 +88,9 @@ impl EdbFile {
             "Loaded EDB {:08x} v{} (build date {}, size 0x{:x}, platform {})",
             header.hashcode,
             header.version,
-            chrono::NaiveDateTime::from_timestamp_opt(header.time as _, 0).unwrap(),
+            chrono::DateTime::from_timestamp(header.time as _, 0)
+                .unwrap()
+                .naive_utc(),
             header.file_size,
             platform
         );

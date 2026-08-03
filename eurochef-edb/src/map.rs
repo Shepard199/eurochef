@@ -53,19 +53,20 @@ pub struct EXGeoMap {
 pub struct EXGeoMapZone {
     pub entity_refptr: u32,                    // 0x0
     pub identifier: EXRelPtr<EXGeoIdentifier>, // 0x4
-    // TODO(cohae): Inaccurate big time
-    pub light_array: EXGeoHashArray<()>, // 0x8
-    pub sound_array: EXGeoHashArray<()>, // 0x10
+    /// Robots v248 stores exact u16 indices into EXGeoMap::lights for this zone.
+    /// The runtime renderer applies only this set instead of searching every map light.
+    pub light_array: EXGeoHashArray<u16>, // 0x8
+    pub sound_array: EXGeoHashArray<u16>,      // 0x10
     #[br(if(version.ne(&205)))]
     pub unk18: Option<EXRelArray<()>>, // ???, 0x18 (u16?)
     #[br(if(version.ne(&205)))]
     pub unk20: Option<EXRelArray<()>>, // ???, 0x20
     #[br(if(version.ne(&205)))]
     pub unk28: Option<EXRelPtr<()>>, // PlacementInfo?, 0x28
-    pub unk2c: EXRelPtr<()>,             // ???, 0x2c
-    pub hash_ref: u32,                   // 0x30
-    pub section: u32,                    // 0x34
-    pub unk38: [u32; 10],                // 0x38
+    pub unk2c: EXRelPtr<()>,                   // ???, 0x2c
+    pub hash_ref: u32,                         // 0x30
+    pub section: u32,                          // 0x34
+    pub unk38: [u32; 10],                      // 0x38
     #[br(if(version.ne(&213) && version.ne(&221) && version.ne(&177) && version.ne(&240)))]
     pub unk60: [u32; 2],
     pub bounds_box: [EXVector3; 2], // 0x60

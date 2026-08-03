@@ -143,6 +143,24 @@ pub fn execute_command(filename: String, output_folder: Option<String>) -> anyho
                                         let v: Hashcode = edb.read_type(edb.endian)?;
                                         row.push(format_hashcode(&hashcodes, v));
                                     }
+                                    // ROBOTS_PATCH_0027_PICKUP_CLI_EXPORT
+                                    DefinitionDataType::Pickup => {
+                                        let v: u32 = edb.read_type(edb.endian)?;
+                                        let pickup_hashcode = if (v & 0xFF000000) == 0x47000000 {
+                                            v
+                                        } else {
+                                            0x47000000 | v
+                                        };
+                                        row.push(format!(
+                                            "{} ({})",
+                                            format_hashcode(&hashcodes, pickup_hashcode),
+                                            v
+                                        ));
+                                    }
+                                    DefinitionDataType::ScriptCreateFlags => {
+                                        let v: u32 = edb.read_type(edb.endian)?;
+                                        row.push(c.dtype.to_string(&hashcodes, v));
+                                    }
                                 }
                             }
 

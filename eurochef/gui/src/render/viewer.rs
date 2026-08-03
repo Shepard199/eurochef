@@ -28,6 +28,7 @@ impl Display for CameraType {
 pub struct RenderContext<'r> {
     pub shaders: &'r Shaders,
     pub uniforms: &'r RenderUniforms,
+    pub lighting_key: u64,
 }
 
 pub struct BaseViewer {
@@ -52,7 +53,10 @@ impl BaseViewer {
             show_grid: true,
             orthographic: false,
             grid: GridRenderer::new(gl, 30),
-            uniforms: RenderUniforms::default(),
+            uniforms: RenderUniforms {
+                native_light_strength: 1.0,
+                ..Default::default()
+            },
             shaders: Arc::new(Shaders::load_shaders(gl)),
             last_frame: Instant::now(),
         }
@@ -146,10 +150,11 @@ impl BaseViewer {
         self.camera_mut().focus_on_point(point, dist_scale);
     }
 
-    pub fn render_context(&self) -> RenderContext {
+    pub fn render_context(&self) -> RenderContext<'_> {
         RenderContext {
             shaders: &self.shaders,
             uniforms: &self.uniforms,
+            lighting_key: 0,
         }
     }
 }

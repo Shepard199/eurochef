@@ -1,32 +1,61 @@
-use std::{fs::File, io::Cursor, sync::Arc};
+use std::{io::Cursor, sync::Arc};
 
 use anyhow::Context;
 use egui::{
-    emath,
     mutex::{Mutex, RwLock},
     Pos2, Rect, Vec2,
 };
 use eurochef_edb::{Hashcode, HashcodeUtils};
-use eurochef_shared::maps::{DefinitionDataType, TriggerInformation};
+use eurochef_shared::{
+    maps::{DefinitionDataType, TriggerInformation},
+    script::UXGeoScript,
+};
 use fxhash::FxHashMap;
 use glam::{Quat, Vec3};
 use glow::HasContext;
 use nohash_hasher::IntMap;
 
+use crate::map_runtime::{
+    apply_vehicle_steering_wheel_angle, apply_vehicle_wheel_roll, apply_vehicle_wheel_roll_angle,
+    map_trigger_by_link, map_trigger_path_matches, map_trigger_runtime_path,
+    robots_vehicle_steering_wheel_angle, robots_vehicle_wheel_roll_angle,
+    runtime_path_node_dispatches_between, runtime_path_preview_position_with_event,
+    runtime_path_segments, runtime_platform_contact_linear_velocity,
+    runtime_trigger_preview_rotation_with_event, RuntimeEventPreviewSnapshot,
+    RuntimeEventPreviewState, RuntimePathNodeEvent, ROBOTS_EVENT_ACTIVATE, ROBOTS_EVENT_DEACTIVATE,
+};
 use crate::{
-    maps::{ProcessedMap, ProcessedTrigger},
+    maps::{
+        robots_camera_flags, robots_camera_marker_scaled_data0, robots_camera_mode,
+        robots_camera_scaled_data4, robots_camera_scaled_data5, robots_dev_map_info,
+        robots_monster_data15_value, robots_monster_data4_value, robots_monster_flags,
+        robots_monster_is_family, robots_monster_proximity_radius, robots_monster_runtime_selector,
+        robots_monster_test_runtime_value, robots_monster_transporter_secondary_path_hash,
+        robots_native_light_colour, robots_native_light_type_description,
+        robots_npc_alternate_cutscenes, robots_npc_cutscene_is_null, robots_npc_flags,
+        robots_npc_runtime_selector, robots_npc_runtime_uid, robots_npc_text_group,
+        robots_pickup_visual, robots_trigger_path_data_slot, robots_trigger_path_hash,
+        robots_trigger_path_is_proven, robots_trigger_platform_angular_velocity,
+        robots_trigger_runtime_path_acceleration, robots_trigger_runtime_path_speed,
+        robots_watchbot_enter_distance, robots_watchbot_flags, robots_watchbot_leave_distance,
+        robots_watchbot_mode, ProcessedMap, ProcessedTrigger,
+    },
     render::{
         billboard::BillboardRenderer,
         blend::{set_blending_mode, BlendMode},
         entity::EntityRenderer,
         gl_helper,
-        pickbuffer::{PickBuffer, PickBufferType},
-        script::render_script,
+        particle::{ParticlePreviewSettings, ParticleRenderer},
+        pickbuffer::{decode_pick_value, PickBuffer, PickBufferType},
+        robots_global_lighting,
+        script::{collect_script_particles, render_script, render_static_script},
         trigger::{CollisionDatumRenderer, LinkLineRenderer, SelectCubeRenderer},
         tweeny::{self, Tweeny3D},
-        viewer::BaseViewer,
-        RenderStore,
+        viewer::{BaseViewer, RenderContext},
+        NativeLight, NativeLightZone, RenderStore,
     },
+    scripts::fan::{advance_native_fan_angle, apply_native_fan_rotation},
+    sound_preview::{SharedSoundPreview, SoundVoiceGroup},
 };
 
 bitflags::bitflags! {
@@ -47,10 +76,14 @@ pub struct MapFrame {
     render_store: Arc<RwLock<RenderStore>>,
 
     billboard_renderer: Arc<BillboardRenderer>,
+    particle_renderer: Arc<ParticleRenderer>,
+    particle_settings: ParticlePreviewSettings,
     collision_renderer: Arc<CollisionDatumRenderer>,
     default_trigger_icon: glow::Texture,
     link_renderer: Arc<LinkLineRenderer>,
     selected_trigger: Option<usize>,
+    selected_sound: Option<usize>,
+    sound_preview: SharedSoundPreview,
     selected_link: Option<i32>,
     select_renderer: Arc<SelectCubeRenderer>,
 
@@ -61,11 +94,28 @@ pub struct MapFrame {
     textfield_focused: bool,
 
     vertex_lighting: bool,
+    global_lighting: bool,
+    native_lights: bool,
+    native_light_strength: f32,
+    show_navmesh: bool,
+    navmesh_texture_scale: f32,
     show_triggers: bool,
+    show_sounds: bool,
+    show_runtime_path: bool,
+    animate_runtime_paths: bool,
+    native_runtime_event_gate: bool,
+    runtime_event_states: FxHashMap<u64, RuntimeEventPreviewState>,
+    runtime_path_playback_speed: f32,
+    platform_rotation_speed_scale: f32,
+    runtime_motion_start_time: Option<f64>,
+    script_animation_start_time: Option<f64>,
+    animate_scripts: bool,
+    script_playback_speed: f32,
     pickbuffer: PickBuffer,
 
     selected_map: usize,
     trigger_scale: f32,
+    sound_scale: f32,
     trigger_focus_tween: Option<Tweeny3D>,
 
     trigger_info: Arc<TriggerInformation>,
@@ -75,20 +125,114 @@ pub struct MapFrame {
     hashcodes: Arc<IntMap<u32, String>>,
     trigger_icons: Arc<FxHashMap<String, glow::Texture>>,
     render_filter: RenderFilter,
+    global_lightmap:
+        Arc<Mutex<Option<(u32, Arc<crate::render::global_lightmap::GpuGlobalLightmap>)>>>,
 }
 
-const DEFAULT_ICON_DATA: &[u8] = include_bytes!("../../../assets/icons/triggers/default.png");
+const TRIGGER_ICON_DATA: &[(&str, &[u8])] = &[
+    (
+        "default",
+        include_bytes!("../../../assets/icons/triggers/default.png"),
+    ),
+    (
+        "tr_timer",
+        include_bytes!("../../../assets/icons/triggers/TR_timer.png"),
+    ),
+    (
+        "tr_link",
+        include_bytes!("../../../assets/icons/triggers/TR_Link.png"),
+    ),
+    (
+        "tr_killzone",
+        include_bytes!("../../../assets/icons/triggers/TR_KillZone.png"),
+    ),
+    (
+        "tr_counter",
+        include_bytes!("../../../assets/icons/triggers/TR_Counter.png"),
+    ),
+    (
+        "pl_startpoint",
+        include_bytes!("../../../assets/icons/triggers/PL_StartPoint.png"),
+    ),
+    (
+        "pl_checkpoint",
+        include_bytes!("../../../assets/icons/triggers/PL_CheckPoint.png"),
+    ),
+    (
+        "ob_static",
+        include_bytes!("../../../assets/icons/triggers/OB_Static.png"),
+    ),
+    (
+        "ob_container",
+        include_bytes!("../../../assets/icons/triggers/OB_Container.png"),
+    ),
+    (
+        "navigation",
+        include_bytes!("../../../assets/icons/triggers/navigation.png"),
+    ),
+    (
+        "fx_lensflare",
+        include_bytes!("../../../assets/icons/triggers/FX_LensFlare.png"),
+    ),
+    (
+        "sound",
+        include_bytes!("../../../assets/icons/triggers/Sound.png"),
+    ),
+];
+const ROBOTS_TRIGGER_INFO: &str = include_str!("../../../assets/triggers_robots.yml");
+
+fn map_sky_objects(sky_override: &str, skies: &[Hashcode]) -> Vec<Hashcode> {
+    u32::from_str_radix(sky_override.trim(), 16)
+        .map(|sky| vec![sky])
+        .unwrap_or_else(|_| skies.to_vec())
+}
+
+fn map_script_time(
+    script: &UXGeoScript,
+    global_time: f32,
+    animate: bool,
+    playback_speed: f32,
+) -> f32 {
+    if animate {
+        let duration = script.duration_seconds().max(1.0 / 60.0);
+        (global_time * playback_speed.max(0.0)).rem_euclid(duration)
+    } else {
+        script.time_at_frame(script.first_geometry_frame().unwrap_or(0).max(0) as f32)
+    }
+}
+
+fn pickbuffer_pixel_position(rect: Rect, pointer: Pos2) -> Option<(i32, i32)> {
+    let width = rect.width().floor() as i32;
+    let height = rect.height().floor() as i32;
+    let x = (pointer.x - rect.min.x).floor() as i32;
+    let y = height - 1 - (pointer.y - rect.min.y).floor() as i32;
+    (x >= 0 && x < width && y >= 0 && y < height).then_some((x, y))
+}
 
 fn load_png_frame(data: &[u8]) -> (Vec<u8>, png::OutputInfo) {
     let mut cursor = Cursor::new(data);
-    let mut decoder = png::Decoder::new(&mut cursor);
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(&mut cursor));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().unwrap();
-    let mut img_data = vec![0; reader.output_buffer_size()];
+    let mut img_data = vec![0; reader.output_buffer_size().unwrap()];
     let info = reader.next_frame(&mut img_data).unwrap();
     (img_data[..info.buffer_size()].to_vec(), info)
 }
 
+// ROBOTS_PATCH_0022_TRIGGER_VISUAL_OBJECT_RESOLUTION
+// Local visual-object hashes belong to the current EDB namespace.
+// The serialized visual_object_file field is not authoritative for local hashes.
+fn trigger_visual_file(
+    current_file: Hashcode,
+    visual_object: Hashcode,
+    visual_object_file: Option<Hashcode>,
+) -> Hashcode {
+    if visual_object.is_local() {
+        current_file
+    } else {
+        visual_object_file.unwrap_or(current_file)
+    }
+}
 pub struct QueuedEntityRender {
     pub entity: (Hashcode, Hashcode),
     pub entity_alt: Option<Arc<Mutex<EntityRenderer>>>,
@@ -96,6 +240,12 @@ pub struct QueuedEntityRender {
     pub rotation: Quat,
     pub scale: Vec3,
 }
+
+mod canvas;
+mod controls;
+mod inspector;
+mod runtime_events;
+mod sound;
 
 impl MapFrame {
     pub fn new(
@@ -105,9 +255,8 @@ impl MapFrame {
         render_store: Arc<RwLock<RenderStore>>,
         hashcodes: Arc<IntMap<u32, String>>,
         game: &str,
+        sound_preview: SharedSoundPreview,
     ) -> Self {
-        let (default_icon_data, default_icon_info) = load_png_frame(DEFAULT_ICON_DATA);
-
         let mut available_triginfo_paths = vec![];
         let exe_path = std::env::current_exe().unwrap();
         let exe_dir = exe_path.parent().unwrap();
@@ -135,39 +284,18 @@ impl MapFrame {
         }
 
         let mut trigger_icons = FxHashMap::default();
-        if let Ok(d) = exe_dir.join("./assets/icons/triggers").read_dir() {
-            for p in d
-                .filter(|d| d.as_ref().unwrap().file_type().unwrap().is_file())
-                .map(|d| {
-                    d.as_ref()
-                        .unwrap()
-                        .file_name()
-                        .as_os_str()
-                        .to_string_lossy()
-                        .to_string()
-                })
-                .filter(|d| d.to_lowercase().ends_with(".png"))
-            {
-                let mut file =
-                    File::open(exe_dir.join("./assets/icons/triggers").join(&p)).unwrap();
-                let mut decoder = png::Decoder::new(&mut file);
-                decoder.set_transformations(png::Transformations::normalize_to_color8());
-                let mut reader = decoder.read_info().unwrap();
-                let mut img_data = vec![0; reader.output_buffer_size()];
-                let info = reader.next_frame(&mut img_data).unwrap();
-
-                let name = p.trim_end_matches(".png");
-                trigger_icons.insert(name.to_lowercase(), unsafe {
-                    gl_helper::load_texture(
-                        &gl,
-                        info.width as i32,
-                        info.height as i32,
-                        &img_data[..info.buffer_size()],
-                        glow::RGBA,
-                        0,
-                    )
-                });
-            }
+        for (name, data) in TRIGGER_ICON_DATA {
+            let (img_data, info) = load_png_frame(data);
+            trigger_icons.insert((*name).to_string(), unsafe {
+                gl_helper::load_texture(
+                    &gl,
+                    info.width as i32,
+                    info.height as i32,
+                    &img_data,
+                    glow::RGBA,
+                    0,
+                )
+            });
         }
 
         let mut s = Self {
@@ -178,26 +306,38 @@ impl MapFrame {
             sky_ent: String::new(),
             textfield_focused: false,
             vertex_lighting: true,
+            global_lighting: true,
+            native_lights: true,
+            native_light_strength: 1.0,
+            show_navmesh: true,
+            navmesh_texture_scale: 1.0 / 16.0,
             show_triggers: true,
+            show_sounds: true,
+            show_runtime_path: true,
+            animate_runtime_paths: true,
+            native_runtime_event_gate: false,
+            runtime_event_states: FxHashMap::default(),
+            runtime_path_playback_speed: 1.0,
+            platform_rotation_speed_scale: 1.0,
+            runtime_motion_start_time: None,
+            script_animation_start_time: None,
+            animate_scripts: true,
+            script_playback_speed: 1.0,
             billboard_renderer: Arc::new(BillboardRenderer::new(&gl).unwrap()),
+            particle_renderer: Arc::new(ParticleRenderer::new(&gl).unwrap()),
+            particle_settings: ParticlePreviewSettings::default(),
             link_renderer: Arc::new(LinkLineRenderer::new(&gl).unwrap()),
             select_renderer: Arc::new(SelectCubeRenderer::new(&gl).unwrap()),
-            default_trigger_icon: unsafe {
-                gl_helper::load_texture(
-                    &gl,
-                    default_icon_info.width as i32,
-                    default_icon_info.height as i32,
-                    &default_icon_data,
-                    glow::RGBA,
-                    0,
-                )
-            },
+            default_trigger_icon: *trigger_icons.get("default").unwrap(),
             selected_trigger: None,
+            selected_sound: None,
+            sound_preview,
             pickbuffer: PickBuffer::new(&gl),
             collision_renderer: Arc::new(CollisionDatumRenderer::new(&gl).unwrap()),
             gl: gl.clone(),
             selected_map: 0,
             trigger_scale: 0.5,
+            sound_scale: 0.4,
             trigger_focus_tween: None,
             selected_link: None,
             trigger_info: Default::default(),
@@ -206,6 +346,7 @@ impl MapFrame {
             hashcodes,
             trigger_icons: Arc::new(trigger_icons),
             render_filter: RenderFilter::all(),
+            global_lightmap: Arc::new(Mutex::new(None)),
         };
 
         if s.reload_trigger_defs().is_err() {
@@ -220,7 +361,8 @@ impl MapFrame {
         let exe_dir = exe_path.parent().unwrap();
         let v = std::fs::read_to_string(
             exe_dir.join(format!("./assets/{}", self.selected_triginfo_path)),
-        )?;
+        )
+        .unwrap_or_else(|_| ROBOTS_TRIGGER_INFO.to_string());
         self.trigger_info =
             serde_yaml::from_str(&v).context("Failed to load trigger definition file")?;
         self.trigger_scale = self.trigger_info.icon_scale;
@@ -234,6 +376,19 @@ impl MapFrame {
         Ok(())
     }
 
+    fn apply_entity_render_options(&self) {
+        for (_, renderer) in &self.ref_renderers {
+            let mut renderer = renderer.lock();
+            renderer.vertex_lighting = self.vertex_lighting;
+            renderer.navmesh_visible = self.show_navmesh;
+            renderer.navmesh_texture_scale = self.navmesh_texture_scale;
+        }
+
+        let mut render_store = self.render_store.write();
+        render_store.set_vertex_lighting(self.vertex_lighting);
+        render_store.set_navmesh_options(self.show_navmesh, self.navmesh_texture_scale);
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -241,6 +396,7 @@ impl MapFrame {
         maps: &[ProcessedMap],
     ) -> anyhow::Result<()> {
         self.selected_link = None;
+        let previous_map = self.selected_map;
         ui.horizontal(|ui| -> anyhow::Result<()> {
             egui::ComboBox::from_label("Map")
                 .selected_text({
@@ -258,98 +414,22 @@ impl MapFrame {
                 });
 
             self.viewer.lock().show_toolbar(ui);
-
-            ui.label("  |  ");
-
-            let response = egui::TextEdit::singleline(&mut self.sky_ent)
-                .desired_width(76.0)
-                .show(ui)
-                .response;
-
-            self.textfield_focused = response.has_focus();
-
-            if let Ok(hashcode) = u32::from_str_radix(&self.sky_ent, 16) {
-                if self
-                    .render_store
-                    .read()
-                    .get_entity(self.file, hashcode)
-                    .is_none()
-                {
-                    ui.strong(font_awesome::EXCLAMATION_TRIANGLE.to_string())
-                        .on_hover_ui(|ui| {
-                            ui.label("Entity was not found");
-                        });
-                }
-            } else {
-                ui.strong(font_awesome::EXCLAMATION_TRIANGLE.to_string())
-                    .on_hover_ui(|ui| {
-                        ui.label("String is not formatted as a valid hashcode");
-                    });
-            }
-            ui.label("Sky ent");
-
-            ui.add_enabled(
-                false,
-                egui::Checkbox::new(&mut self.vertex_lighting, "Vertex Lighting"),
-            );
-            // if ui
-            //     .checkbox(&mut self.vertex_lighting, "Vertex Lighting")
-            //     .changed()
-            // {
-            //     for r in self
-            //         .ref_renderers
-            //         .iter()
-            //         .map(|(_, v)| v)
-            //         .chain(self.placement_renderers.iter().map(|r| &r.2))
-            //     {
-            //         r.lock().vertex_lighting = self.vertex_lighting;
-            //     }
-            // }
-
-            ui.checkbox(&mut self.show_triggers, "Show Triggers");
-
-            ui.add(
-                egui::DragValue::new(&mut self.trigger_scale)
-                    .clamp_range(0.1..=2.0)
-                    .max_decimals(2)
-                    .speed(0.05),
-            );
-            ui.label("Trigger scale");
-
-            let trig_resp = egui::ComboBox::from_label("Triggers")
-                .selected_text(&self.selected_triginfo_path)
-                .width(164.0)
-                .show_ui(ui, |ui| {
-                    let mut resp = ui.selectable_value(
-                        &mut self.selected_triginfo_path,
-                        "None".to_string(),
-                        "None",
-                    );
-                    for p in &self.available_triginfo_paths {
-                        resp = resp.union(ui.selectable_value(
-                            &mut self.selected_triginfo_path,
-                            p.to_string(),
-                            p,
-                        ));
-                    }
-                    resp
-                });
-
-            let trig_reload_resp = ui.button("\u{f2f1}");
-
-            if trig_resp.inner.map(|i| i.changed()).unwrap_or_default()
-                || trig_reload_resp.clicked()
-            {
-                if self.selected_triginfo_path.is_empty() {
-                    self.trigger_info = Default::default();
-                } else {
-                    self.reload_trigger_defs()?;
-                }
-            }
-
             Ok(())
         })
         .inner?;
+
+        self.draw_map_controls(context, maps)?;
+
+        if self.selected_map != previous_map {
+            self.runtime_motion_start_time = None;
+            self.runtime_event_states.clear();
+            self.script_animation_start_time = None;
+            self.selected_trigger = None;
+            self.selected_sound = None;
+            self.sound_preview
+                .lock()
+                .reset_group(SoundVoiceGroup::MapAmbient);
+        }
         let map = &maps[self.selected_map];
 
         egui::Frame::canvas(ui.style()).show(ui, |ui| self.show_canvas(ui, context, map));
@@ -358,742 +438,506 @@ impl MapFrame {
             self.viewer.lock().show_statusbar(ui);
             if let Some(trig_id) = self.selected_trigger {
                 ui.strong("Selected trigger:");
-                ui.label(format!("{}", trig_id));
+                if let Some(trigger) = map.triggers.get(trig_id) {
+                    let type_name = self
+                        .trigger_info
+                        .triggers
+                        .get(&trigger.ttype)
+                        .map(|definition| definition.name.as_str())
+                        .unwrap_or("Unknown trigger type");
+                    ui.label(format!(
+                        "#{trig_id} · {type_name} · type {}",
+                        trigger.ttype
+                    ));
+                } else {
+                    ui.label(format!("#{trig_id} · invalid index"));
+                }
+            }
+            if let Some(sound_id) = self.selected_sound {
+                ui.strong("Selected sound:");
+                ui.label(format!("{}", sound_id));
             }
         });
 
         Ok(())
     }
+}
 
-    fn show_canvas(&mut self, ui: &mut egui::Ui, context: &egui::Context, map: &ProcessedMap) {
-        let (rect, response) = ui.allocate_exact_size(
-            ui.available_size() - egui::vec2(0., 16.),
-            egui::Sense::click_and_drag(),
+#[cfg(test)]
+mod tests {
+    use super::{
+        map_script_time, map_sky_objects, pickbuffer_pixel_position, QueuedEntityRender,
+        ROBOTS_TRIGGER_INFO, TRIGGER_ICON_DATA,
+    };
+    use crate::map_runtime::{
+        apply_vehicle_steering_wheel_angle, closest_route_phase, map_trigger_link_index,
+        robots_vehicle_wheel_roll_angle, robots_vehicle_yaw_from_tangent,
+        runtime_path_node_dispatches_between, runtime_path_route, runtime_path_segments,
+        runtime_path_segments_for_motion, runtime_path_travel_distance, sample_route,
+        RuntimeEventPreviewState, RuntimePathNodeEvent, ROBOTS_EVENT_ACTIVATE,
+        ROBOTS_EVENT_DEACTIVATE,
+    };
+    use crate::render::{entity::EntityRenderer, RenderStore};
+    use crate::maps::{ProcessedMap, ProcessedPath, ProcessedPathNode, ProcessedTrigger};
+    use egui::{Pos2, Rect};
+    use eurochef_edb::{map::EXGeoTriggerEngineOptions, versions::Platform};
+    use eurochef_shared::{
+        maps::TriggerInformation,
+        script::{UXGeoScript, UXGeoScriptCommand, UXGeoScriptCommandData},
+    };
+    use glam::{Quat, Vec2, Vec3};
+
+    fn path_node(position: Vec3) -> ProcessedPathNode {
+        ProcessedPathNode {
+            position,
+            size: Vec2::ZERO,
+            value: [0; 4],
+            flags: 0,
+            distance: 0.0,
+            num_links: 0,
+        }
+    }
+
+    fn runtime_trigger(trigger_type: u32, data: Vec<Option<u32>>) -> ProcessedTrigger {
+        ProcessedTrigger {
+            file_offset: 0,
+            link_ref: -1,
+            type_index: 0,
+            ttype: trigger_type,
+            tsubtype: None,
+            debug: 0,
+            game_flags: 0,
+            trig_flags: 0,
+            position: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            scale: Vec3::ONE,
+            data,
+            links: vec![-1; 8],
+            engine_options: EXGeoTriggerEngineOptions::default(),
+            trigger_script: None,
+            incoming_links: vec![],
+        }
+    }
+
+    #[test]
+    fn pickbuffer_coordinates_are_in_bounds_and_flip_y_without_an_off_by_one() {
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), egui::vec2(100.0, 50.0));
+        assert_eq!(
+            pickbuffer_pixel_position(rect, Pos2::new(10.0, 20.0)),
+            Some((0, 49))
+        );
+        assert_eq!(
+            pickbuffer_pixel_position(rect, Pos2::new(109.9, 69.9)),
+            Some((99, 0))
+        );
+        assert_eq!(
+            pickbuffer_pixel_position(rect, Pos2::new(110.0, 30.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_path_segments_use_links_or_serialized_node_order() {
+        let linked = ProcessedPath {
+            hashcode: 0x0B00_0001,
+            position: Vec3::new(10.0, 0.0, 0.0),
+            flags: 0,
+            path_type: 0,
+            nodes: vec![
+                path_node(Vec3::ZERO),
+                path_node(Vec3::X),
+                path_node(Vec3::Y),
+            ],
+            links: vec![(2, 0)],
+        };
+        assert_eq!(
+            runtime_path_segments(&linked),
+            vec![(Vec3::new(10.0, 1.0, 0.0), Vec3::new(10.0, 0.0, 0.0))]
+        );
+        assert_eq!(
+            runtime_path_route(&linked),
+            vec![Vec3::new(10.0, 1.0, 0.0), Vec3::new(10.0, 0.0, 0.0)]
         );
 
-        if response.clicked() && self.show_triggers {
-            if let Some(pointer_pos) = response.interact_pointer_pos() {
-                self.render_pickbuffer(rect.size(), map);
-                let to_screen = emath::RectTransform::from_to(
-                    Rect::from_min_size(Pos2::ZERO, rect.size()),
-                    response.rect,
-                );
-                let from_screen = to_screen.inverse();
-
-                let viewport_pos = from_screen * pointer_pos;
-                let viewport_pos = egui::pos2(viewport_pos.x, rect.height() - viewport_pos.y);
-                let mut pixel = [0u8; 4];
-                unsafe {
-                    self.gl
-                        .bind_framebuffer(glow::FRAMEBUFFER, self.pickbuffer.framebuffer);
-                    self.gl.read_pixels(
-                        viewport_pos.x as i32,
-                        viewport_pos.y as i32,
-                        1,
-                        1,
-                        glow::RGB,
-                        glow::UNSIGNED_BYTE,
-                        glow::PixelPackData::Slice(&mut pixel),
-                    );
-                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                }
-
-                let id = u32::from_le_bytes(pixel);
-                let ty = (id >> 20) & 0x0f;
-                let id = id & 0x0fffff;
-
-                if ty == 1 {
-                    self.selected_trigger = Some(id as usize);
-                } else {
-                    self.selected_trigger = None;
-                }
-            }
-        }
-
-        self.draw_trigger_inspector(context, map);
-
-        let time: f64 = ui.input(|t| t.time);
-
-        let viewer = self.viewer.clone();
-        let camera_pos = {
-            let mut v = viewer.lock();
-            if !self.textfield_focused {
-                v.update(ui, &response);
-            }
-
-            let camera = v.camera_mut();
-            let camera_pos = camera.position();
-
-            if let Some(tween) = &mut self.trigger_focus_tween {
-                if tween.is_finished() {
-                    self.trigger_focus_tween = None;
-                } else {
-                    let p = tween.update();
-                    v.focus_on_point(p, self.trigger_scale);
-                }
-            }
-
-            camera_pos
+        let ordered = ProcessedPath {
+            links: vec![],
+            ..linked
         };
-
-        // TODO(cohae): How do we get out of this situation
-        let map = map.clone(); // FIXME(cohae): ugh.
-        let sky_ent = u32::from_str_radix(&self.sky_ent, 16).unwrap_or(u32::MAX);
-        let default_trigger_icon = self.default_trigger_icon;
-        let billboard_renderer = self.billboard_renderer.clone();
-        let link_renderer = self.link_renderer.clone();
-        let selected_trigger = self.selected_trigger;
-        let select_renderer = self.select_renderer.clone();
-        let show_triggers = self.show_triggers;
-        let trigger_scale = self.trigger_scale;
-        let hovered_link = self.selected_link;
-        let trigger_info = self.trigger_info.clone();
-        let trigger_icons = self.trigger_icons.clone();
-        let render_filter = self.render_filter;
-
-        let render_store = self.render_store.clone();
-        let current_file = self.file;
-
-        let collision_renderer = self.collision_renderer.clone();
-        let renderers = self.ref_renderers.clone();
-        let cb = egui_glow::CallbackFn::new(move |info, painter| unsafe {
-            let mut v = viewer.lock();
-            v.start_render(painter.gl(), info.viewport.aspect_ratio(), time as f32);
-            let render_context = v.render_context();
-
-            let mut render_queue = Vec::<QueuedEntityRender>::new();
-            if let Some(sky_renderer) = render_store.read().get_entity(current_file, sky_ent) {
-                painter.gl().depth_mask(false);
-
-                sky_renderer.draw_both(
-                    painter.gl(),
-                    &render_context,
-                    camera_pos,
-                    Quat::IDENTITY,
-                    Vec3::ONE,
-                    time,
-                    &render_store.read(),
-                );
-
-                painter.gl().depth_mask(true);
-            }
-            match sky_ent.base() {
-                0x02000000 => render_queue.push(QueuedEntityRender {
-                    entity: (current_file, sky_ent),
-                    entity_alt: None,
-                    position: Vec3::ZERO,
-                    rotation: Quat::IDENTITY,
-                    scale: Vec3::ONE,
-                }),
-                0x04000000 => {
-                    // TODO(cohae): Hack for scripts with fucked starting frames
-                    let (framerate, length) = render_store
-                        .read()
-                        .get_script(current_file, sky_ent)
-                        .map(|s| (s.framerate, s.length))
-                        .unwrap_or((30.0, 1));
-
-                    render_script(
-                        camera_pos,
-                        Quat::IDENTITY,
-                        Vec3::ONE,
-                        current_file,
-                        sky_ent,
-                        // Animate if the trigger is selected
-                        time as f32 % (length as f32 / framerate),
-                        &render_store.read(),
-                        &mut |q| render_queue.push(q),
-                        vec![],
-                    )
-                }
-                _ => {}
-            }
-
-            // Render base (ref) entities
-            if render_filter.contains(RenderFilter::MapZone) {
-                for (_, r) in renderers.iter().filter(|(i, _)| *i == map.hashcode) {
-                    render_queue.push(QueuedEntityRender {
-                        entity: (current_file, 0),
-                        entity_alt: Some(r.clone()), // TODO(cohae): Find an alternative for rendering ref-entities with the new system
-                        position: Vec3::ZERO,
-                        rotation: Quat::IDENTITY,
-                        scale: Vec3::ONE,
-                    })
-                }
-            }
-
-            if render_filter.contains(RenderFilter::Placements) {
-                for p in &map.placements {
-                    let rotation: Quat = Quat::from_euler(
-                        glam::EulerRot::ZXY,
-                        p.rotation[2],
-                        p.rotation[0],
-                        p.rotation[1],
-                    );
-
-                    render_queue.push(QueuedEntityRender {
-                        entity: (current_file, p.object_ref),
-                        entity_alt: None,
-                        position: p.position.into(),
-                        rotation,
-                        scale: p.scale.into(),
-                    })
-                }
-            }
-
-            if render_filter.contains(RenderFilter::Triggers) {
-                for (i, t) in map.triggers.iter().enumerate() {
-                    if let Some(v) = t.engine_options.visual_object {
-                        let rotation: Quat = Quat::from_euler(
-                            glam::EulerRot::ZXY,
-                            t.rotation[2],
-                            t.rotation[0],
-                            t.rotation[1],
-                        );
-
-                        match v.base() {
-                            0x02000000 => render_queue.push(QueuedEntityRender {
-                                entity: (
-                                    t.engine_options.visual_object_file.unwrap_or(current_file),
-                                    v,
-                                ),
-                                entity_alt: None,
-                                position: t.position,
-                                rotation,
-                                scale: t.scale,
-                            }),
-                            0x04000000 => {
-                                // TODO(cohae): Hack for scripts with fucked starting frames
-                                let (framerate, length) = render_store
-                                    .read()
-                                    .get_script(
-                                        t.engine_options.visual_object_file.unwrap_or(current_file),
-                                        v,
-                                    )
-                                    .map(|s| (s.framerate, s.length))
-                                    .unwrap_or((30.0, 1));
-
-                                render_script(
-                                    t.position,
-                                    rotation,
-                                    t.scale,
-                                    t.engine_options.visual_object_file.unwrap_or(current_file),
-                                    v,
-                                    // Animate if the trigger is selected
-                                    if Some(i) == selected_trigger {
-                                        time as f32 % (length as f32 / framerate)
-                                    } else {
-                                        1. / framerate
-                                    },
-                                    &render_store.read(),
-                                    &mut |q| render_queue.push(q),
-                                    vec![],
-                                )
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-
-            if render_filter.contains(RenderFilter::Opaque) {
-                for r in render_queue.iter() {
-                    if let Some(e) = r.entity_alt.as_ref().map(|v| v.lock()) {
-                        e.draw_opaque(
-                            painter.gl(),
-                            &render_context,
-                            r.position,
-                            r.rotation,
-                            r.scale,
-                            time,
-                            &render_store.read(),
-                        );
-                        continue;
-                    }
-                    if let Some(e) = render_store.read().get_entity(r.entity.0, r.entity.1) {
-                        e.draw_opaque(
-                            painter.gl(),
-                            &render_context,
-                            r.position,
-                            r.rotation,
-                            r.scale,
-                            time,
-                            &render_store.read(),
-                        )
-                    }
-                }
-            }
-
-            painter.gl().depth_mask(false);
-
-            if render_filter.contains(RenderFilter::Transparent) {
-                for r in render_queue.iter() {
-                    if let Some(e) = r.entity_alt.as_ref().map(|v| v.lock()) {
-                        e.draw_transparent(
-                            painter.gl(),
-                            &render_context,
-                            r.position,
-                            r.rotation,
-                            r.scale,
-                            time,
-                            &render_store.read(),
-                        );
-                        continue;
-                    }
-
-                    if let Some(e) = render_store.read().get_entity(r.entity.0, r.entity.1) {
-                        e.draw_transparent(
-                            painter.gl(),
-                            &render_context,
-                            r.position,
-                            r.rotation,
-                            r.scale,
-                            time,
-                            &render_store.read(),
-                        )
-                    }
-                }
-            }
-
-            if show_triggers {
-                painter.gl().depth_mask(true);
-                if let Some(Some(trig)) = selected_trigger.map(|v| map.triggers.get(v)) {
-                    for l in &trig.links {
-                        if *l != -1 {
-                            if *l >= map.triggers.len() as i32 {
-                                warn!("Trigger doesnt exist! ({l})");
-                                continue;
-                            }
-
-                            let end = map.triggers[*l as usize].position;
-                            link_renderer.render(
-                                painter.gl(),
-                                &render_context,
-                                trig.position,
-                                end,
-                                if hovered_link.map(|v| v == *l).unwrap_or_default() {
-                                    Vec3::ONE
-                                } else {
-                                    Vec3::new(0.913, 0.547, 0.125)
-                                },
-                                trigger_scale,
-                            );
-                        }
-                    }
-
-                    for l in &trig.incoming_links {
-                        if *l != -1 {
-                            if *l >= map.triggers.len() as i32 {
-                                warn!("Trigger doesnt exist! ({l})");
-                                continue;
-                            }
-
-                            let end = map.triggers[*l as usize].position;
-                            link_renderer.render(
-                                painter.gl(),
-                                &render_context,
-                                end,
-                                trig.position,
-                                if hovered_link.map(|v| v == *l).unwrap_or_default() {
-                                    Vec3::ONE
-                                } else {
-                                    Vec3::new(0.169, 0.554, 0.953)
-                                },
-                                trigger_scale,
-                            );
-                        }
-                    }
-
-                    select_renderer.render(
-                        painter.gl(),
-                        &render_context,
-                        trig.position,
-                        Quat::from_euler(
-                            glam::EulerRot::ZXY,
-                            trig.rotation.z,
-                            trig.rotation.x,
-                            trig.rotation.y,
-                        ),
-                        trigger_scale,
-                    );
-                }
-
-                for t in map.triggers.iter() {
-                    let trigger_texture_path = trigger_info
-                        .triggers
-                        .get(&t.ttype)
-                        .and_then(|m| m.icon.as_ref().map(|v| v.to_lowercase()));
-
-                    let trigger_texture = *trigger_texture_path
-                        .and_then(|p| trigger_icons.get(&p))
-                        .unwrap_or(&default_trigger_icon);
-
-                    billboard_renderer.render(
-                        painter.gl(),
-                        &render_context,
-                        trigger_texture,
-                        t.position,
-                        trigger_scale,
-                    );
-                }
-
-                // Trigger collisions
-                set_blending_mode(painter.gl(), BlendMode::Blend);
-                // for t in map.triggers.iter() {
-                if let Some(t) = selected_trigger.and_then(|t| map.triggers.get(t)) {
-                    if let Some(coll) = t
-                        .engine_options
-                        .collision_index
-                        .and_then(|c| map.trigger_collisions.get(c as usize))
-                    {
-                        if coll.dtype == 0 || coll.dtype == 3 {
-                            collision_renderer.render(
-                                painter.gl(),
-                                &render_context,
-                                t.position + Vec3::from(coll.position),
-                                Quat::from_euler(
-                                    glam::EulerRot::ZXY,
-                                    t.rotation.z,
-                                    t.rotation.x,
-                                    t.rotation.y,
-                                ),
-                                coll,
-                            );
-                        }
-                    }
-                }
-            }
-        });
-
-        let callback = egui::PaintCallback {
-            rect,
-            callback: Arc::new(cb),
-        };
-        ui.painter().add(callback);
+        assert_eq!(runtime_path_segments(&ordered).len(), 2);
     }
 
-    fn render_pickbuffer(&mut self, res: Vec2, map: &ProcessedMap) {
-        self.pickbuffer
-            .init_draw(&self.gl, glam::ivec2(res.x as i32, res.y as i32));
-        for (i, t) in map.triggers.iter().enumerate() {
-            self.billboard_renderer.render_pickbuffer(
-                &self.gl,
-                &self.viewer.lock().render_context(),
-                t.position,
-                self.trigger_scale,
-                (PickBufferType::Trigger, i as u32),
-                &self.pickbuffer,
+    #[test]
+    fn runtime_motion_starts_at_nearest_route_phase_and_vehicle_yaw_follows_tangent() {
+        let route = vec![
+            Vec3::ZERO,
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(10.0, 0.0, 10.0),
+        ];
+        let segments = runtime_path_segments_for_motion(&route, false);
+        let initial = Vec3::new(5.0, 2.0, 1.0);
+        let (phase, root_offset) = closest_route_phase(&segments, initial);
+        assert!((phase - 5.0).abs() < f32::EPSILON);
+
+        let sample = sample_route(&segments, phase, false, root_offset).unwrap();
+        assert!(sample.position.distance(initial) < 0.0001);
+        assert_eq!(sample.tangent, Vec3::X);
+
+        let yaw = robots_vehicle_yaw_from_tangent(Vec3::Z).unwrap();
+        assert!((yaw.abs() - std::f32::consts::PI).abs() < 0.0001);
+        assert_eq!(robots_vehicle_yaw_from_tangent(Vec3::Y), None);
+    }
+
+    #[test]
+    fn runtime_motion_distance_matches_controller_update() {
+        let accelerated = runtime_path_travel_distance(2.0 / 60.0, 4.0, 0.5, 1.0);
+        assert!((accelerated - (2.0 / 60.0)).abs() < 0.0001);
+
+        let default_start = runtime_path_travel_distance(2.0 / 60.0, 7.0, 0.0, 1.0);
+        assert!((default_start - (8.0 / 60.0)).abs() < 0.0001);
+        assert_eq!(runtime_path_travel_distance(0.0, 4.0, 0.5, 1.0), 0.0);
+    }
+
+    #[test]
+    fn native_path_node_events_fire_only_when_the_node_is_crossed() {
+        let path_hash = 0x0B00_0042;
+        let mut stop_node = path_node(Vec3::new(5.0, 0.0, 0.0));
+        stop_node.value = [4, 0, 0, 0];
+        let mut linked_node = path_node(Vec3::new(10.0, 0.0, 0.0));
+        linked_node.value = [8, 0x0100, 0b0000_0101, 0];
+        let path = ProcessedPath {
+            hashcode: path_hash,
+            position: Vec3::ZERO,
+            flags: 0,
+            path_type: 0,
+            nodes: vec![path_node(Vec3::ZERO), stop_node, linked_node],
+            links: vec![],
+        };
+        let mut data = vec![None; 16];
+        data[2] = Some(path_hash);
+        data[5] = Some(10.0f32.to_bits());
+        let platform = runtime_trigger(8, data);
+        let map = ProcessedMap {
+            hashcode: 1,
+            mapzone_entities: vec![],
+            zones: vec![],
+            skies: vec![],
+            placements: vec![],
+            lights: vec![],
+            sounds: vec![],
+            lighting_triangles: vec![],
+            paths: vec![path],
+            triggers: vec![platform.clone()],
+            trigger_collisions: vec![],
+        };
+
+        assert!(runtime_path_node_dispatches_between(&map, &platform, 0.0, 4.9).is_empty());
+        assert_eq!(
+            runtime_path_node_dispatches_between(&map, &platform, 4.9, 5.1)[0].event,
+            RuntimePathNodeEvent::DeactivateSelf
+        );
+        assert_eq!(
+            runtime_path_node_dispatches_between(&map, &platform, 9.9, 10.1)[0].event,
+            RuntimePathNodeEvent::DispatchLinked {
+                event_mask: 0x100,
+                link_mask: 0b0000_0101,
+            }
+        );
+        assert!(runtime_path_node_dispatches_between(&map, &platform, 5.1, 9.9).is_empty());
+    }
+
+    #[test]
+    fn native_path_node_events_handle_ping_pong_reverse_arrival_once() {
+        let path_hash = 0x0B00_0043;
+        let mut event_node = path_node(Vec3::new(5.0, 0.0, 0.0));
+        event_node.value = [4, 0, 0, 0];
+        let path = ProcessedPath {
+            hashcode: path_hash,
+            position: Vec3::ZERO,
+            flags: 0,
+            path_type: 0,
+            nodes: vec![
+                path_node(Vec3::ZERO),
+                event_node,
+                path_node(Vec3::new(10.0, 0.0, 0.0)),
+            ],
+            links: vec![],
+        };
+        let mut data = vec![None; 16];
+        data[2] = Some(path_hash);
+        data[5] = Some(10.0f32.to_bits());
+        let platform = runtime_trigger(8, data);
+        let map = ProcessedMap {
+            hashcode: 2,
+            mapzone_entities: vec![],
+            zones: vec![],
+            skies: vec![],
+            placements: vec![],
+            lights: vec![],
+            sounds: vec![],
+            lighting_triangles: vec![],
+            paths: vec![path],
+            triggers: vec![platform.clone()],
+            trigger_collisions: vec![],
+        };
+
+        assert_eq!(
+            runtime_path_node_dispatches_between(&map, &platform, 4.9, 5.1).len(),
+            1
+        );
+        assert_eq!(
+            runtime_path_node_dispatches_between(&map, &platform, 14.9, 15.1).len(),
+            1
+        );
+        assert!(runtime_path_node_dispatches_between(&map, &platform, 15.1, 15.2).is_empty());
+    }
+
+    #[test]
+    fn native_runtime_event_gate_preserves_pause_and_platform_retrigger_continuity() {
+        let mut data = vec![None; 16];
+        data[5] = Some(10.0f32.to_bits());
+        data[6] = Some(0.0f32.to_bits());
+        data[7] = Some(0x200);
+        let platform = runtime_trigger(8, data);
+        let mut state = RuntimeEventPreviewState::default();
+
+        assert!(!state.snapshot(&platform, 1.0).active);
+        state.dispatch(&platform, ROBOTS_EVENT_ACTIVATE, 0.0, 1.0);
+        state.advance(1.0);
+        let running = state.snapshot(&platform, 1.0);
+        assert!(running.active);
+        assert!((running.elapsed_seconds - 1.0).abs() < 0.0001);
+        assert!((running.path_distance - 1.0).abs() < 0.0001);
+
+        state.dispatch(&platform, ROBOTS_EVENT_DEACTIVATE, 1.0, 1.0);
+        state.advance(2.0);
+        let paused = state.snapshot(&platform, 1.0);
+        assert!(!paused.active);
+        assert!((paused.elapsed_seconds - 1.0).abs() < 0.0001);
+        assert!((paused.path_distance - running.path_distance).abs() < 0.0001);
+
+        state.dispatch(&platform, ROBOTS_EVENT_ACTIVATE, 2.0, 1.0);
+        state.advance(3.0);
+        let before_reverse = state.snapshot(&platform, 1.0);
+        state.dispatch(&platform, ROBOTS_EVENT_ACTIVATE, 3.0, 1.0);
+        let after_reverse = state.snapshot(&platform, 1.0);
+        assert!(after_reverse.direction_reversed);
+        assert!((after_reverse.path_distance - before_reverse.path_distance).abs() < 0.0001);
+
+        state.advance(4.0);
+        let reversed_motion = state.snapshot(&platform, 1.0);
+        assert!(reversed_motion.path_distance < after_reverse.path_distance);
+    }
+
+    #[test]
+    fn native_runtime_event_activate_branch_wins_for_combined_mask() {
+        let mut data = vec![None; 16];
+        data[4] = Some(10);
+        let lift = runtime_trigger(37, data);
+        let mut state = RuntimeEventPreviewState::default();
+        state.dispatch(
+            &lift,
+            ROBOTS_EVENT_ACTIVATE | ROBOTS_EVENT_DEACTIVATE,
+            10.0,
+            1.0,
+        );
+        assert!(state.snapshot(&lift, 1.0).active);
+    }
+
+    #[test]
+    fn vehicle_wheel_roll_matches_runtime_sixty_hz_update() {
+        let first_frame = robots_vehicle_wheel_roll_angle(1.0 / 60.0, 7.0, 0.0, 1.0);
+        let expected_first = (-2.0 * (0.02f32).asin()).rem_euclid(std::f32::consts::TAU);
+        assert!((first_frame - expected_first).abs() < 0.0001);
+
+        let second_frame = robots_vehicle_wheel_roll_angle(2.0 / 60.0, 7.0, 0.0, 1.0);
+        let expected_second =
+            (-2.0 * (0.02f32).asin() - 2.0 * (0.14f32).asin()).rem_euclid(std::f32::consts::TAU);
+        assert!((second_frame - expected_second).abs() < 0.0001);
+        assert_eq!(robots_vehicle_wheel_roll_angle(0.0, 7.0, 0.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn vehicle_steering_applies_to_drive_and_passive_wheel_records() {
+        let file = 0x0100_00C1;
+        let mut store = RenderStore::new();
+        for (hashcode, index) in [
+            (0x0200_017A, 0usize),
+            (0x0200_017B, 1usize),
+            (0x0200_01AE, 2usize),
+        ] {
+            store.insert_entity(
+                file,
+                hashcode,
+                index,
+                EntityRenderer::new(file, Platform::Pc),
             );
         }
+        let mut queue = [
+            QueuedEntityRender {
+                entity: (file, 0x8200_0000),
+                entity_alt: None,
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            QueuedEntityRender {
+                entity: (file, 0x8200_0001),
+                entity_alt: None,
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            QueuedEntityRender {
+                entity: (file, 0x8200_0002),
+                entity_alt: None,
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+        ];
+        let angle = 0.35;
+        apply_vehicle_steering_wheel_angle(&mut queue, &store, angle);
+        let expected = Quat::from_rotation_y(angle);
+        assert!(queue[0].rotation.dot(expected).abs() > 0.99999);
+        assert!(queue[1].rotation.dot(expected).abs() > 0.99999);
+        assert!(queue[2].rotation.dot(Quat::IDENTITY).abs() > 0.99999);
     }
 
-    fn draw_trigger_inspector(&mut self, ctx: &egui::Context, map: &ProcessedMap) {
-        let screen_space = ctx.screen_rect();
-        egui::Window::new("Inspector")
-            .scroll2([false, true])
-            .show(ctx, |ui| {
-                if self.selected_trigger.is_none() || !self.show_triggers {
-                    ui.heading("No object selected");
-                    return;
-                }
+    #[test]
+    fn vehicle_steering_wheel_uses_fixed_step_heading_delta_and_recenters_when_stopped() {
+        let path_hash = 0x0B00_0080;
+        let path = ProcessedPath {
+            hashcode: path_hash,
+            position: Vec3::ZERO,
+            flags: 0,
+            path_type: 0,
+            nodes: vec![
+                path_node(Vec3::ZERO),
+                path_node(Vec3::new(0.0, 0.0, -0.75)),
+                path_node(Vec3::new(-2.0, 0.0, -0.75)),
+            ],
+            links: vec![],
+        };
+        let mut data = vec![None; 16];
+        data[1] = Some(path_hash);
+        data[2] = Some(300.0f32.to_bits());
+        data[3] = Some(10.0f32.to_bits());
+        let vehicle = runtime_trigger(80, data);
+        let map = ProcessedMap {
+            hashcode: 80,
+            mapzone_entities: vec![],
+            zones: vec![],
+            skies: vec![],
+            placements: vec![],
+            lights: vec![],
+            sounds: vec![],
+            lighting_triangles: vec![],
+            paths: vec![path],
+            triggers: vec![vehicle.clone()],
+            trigger_collisions: vec![],
+        };
+        let mut state = RuntimeEventPreviewState::default();
 
-                macro_rules! readonly_input {
-                    ($ui:expr, $string:expr) => {
-                        let mut tmp = $string;
-                        $ui.add_enabled(false, egui::TextEdit::singleline(&mut tmp));
-                    };
-                    ($ui:expr, $label:expr, $string:expr) => {
-                        // $ui.horizontal(|ui| {
-                        $ui.label($label);
-                        let mut tmp = $string;
-                        $ui.add_enabled(
-                            false,
-                            egui::TextEdit::singleline(&mut tmp), // .desired_width(f32::INFINITY),
-                        );
-                        // })
-                    };
-                }
+        state.advance_runtime(&map, &vehicle, 0.0, 1.0);
+        state.advance_runtime(&map, &vehicle, 2.0, 1.0);
+        state.dispatch(&vehicle, ROBOTS_EVENT_ACTIVATE, 2.0, 1.0);
+        state.advance_runtime(&map, &vehicle, 2.0 + 3.0 / 60.0, 1.0);
 
-                macro_rules! ttype_or_hex {
-                    ($v:expr) => {
-                        if let Some(ti) = self.trigger_info.triggers.get(&$v) {
-                            format!("{} (0x{:x})", ti.name, $v)
-                        } else {
-                            format!("0x{:x}", $v)
-                        }
-                    };
-                }
+        let turning_snapshot = state.snapshot(&vehicle, 1.0);
+        let turning = turning_snapshot.vehicle_steering_angle.unwrap();
+        assert!(
+            (turning - std::f32::consts::FRAC_PI_2).abs() < 0.001,
+            "turning={turning}"
+        );
+        let carry = turning_snapshot.platform_contact_linear_velocity.unwrap();
+        assert!(
+            (carry - Vec3::new(-15.0, 0.0, -15.0)).length() < 0.001,
+            "carry={carry:?}"
+        );
 
-                macro_rules! quick_grid {
-                    ($ui:expr, $label:expr, $contents:expr) => {
-                        egui::Grid::new($label)
-                            .num_columns(2)
-                            .spacing([40.0, 4.0])
-                            .striped(true)
-                            .show($ui, $contents);
-                    };
-                }
-
-                egui::ScrollArea::vertical()
-                    .max_height(screen_space.height() - 100.0)
-                    .show(ui, |ui| {
-                        if let Some(Some(trig)) = self.selected_trigger.map(|v| map.triggers.get(v))
-                        {
-                            quick_grid!(ui, "t_info", |ui| {
-                                readonly_input!(ui, "Type ", ttype_or_hex!(trig.ttype));
-                                ui.end_row();
-                                readonly_input!(
-                                    ui,
-                                    "Subtype ",
-                                    if let Some(subtype) = trig.tsubtype {
-                                        ttype_or_hex!(subtype)
-                                    } else {
-                                        "None".to_string()
-                                    }
-                                );
-                                ui.end_row();
-                                readonly_input!(ui, "Flags ", format!("0x{:x}", trig.game_flags));
-                                ui.end_row();
-
-                                ui.label("Position");
-                                ui.horizontal(|ui| {
-                                    ui.label(format!(
-                                        "{:.3}, {:.3},  {:.3}",
-                                        trig.position.x, trig.position.y, trig.position.z
-                                    ));
-                                });
-                                ui.end_row();
-
-                                ui.label("Rotation");
-                                ui.horizontal(|ui| {
-                                    ui.label(format!(
-                                        "{:.3}, {:.3},  {:.3}",
-                                        trig.rotation.x.to_degrees(),
-                                        trig.rotation.y.to_degrees(),
-                                        trig.rotation.z.to_degrees()
-                                    ));
-                                });
-                                ui.end_row();
-
-                                ui.label("Scale");
-                                ui.horizontal(|ui| {
-                                    ui.label(format!(
-                                        "{:.2}, {:.2},  {:.2}",
-                                        trig.scale.x, trig.scale.y, trig.scale.z
-                                    ));
-                                });
-                                ui.end_row();
-
-                                if let Some(coll) = trig
-                                    .engine_options
-                                    .collision_index
-                                    .and_then(|c| map.trigger_collisions.get(c as usize))
-                                {
-                                    ui.label("Collision");
-                                    match coll.dtype {
-                                        0 => ui.label("Box"),
-                                        3 => ui.label("Cylinder"),
-                                        u => ui.label(format!(
-                                            "{} Unknown collision type {}",
-                                            font_awesome::EXCLAMATION_TRIANGLE,
-                                            u
-                                        )),
-                                    };
-                                    ui.end_row();
-                                }
-                            });
-
-                            if !trig.data.is_empty() {
-                                ui.separator();
-                                ui.strong("Values");
-                                quick_grid!(ui, "t_values", |ui| {
-                                    for (i, v) in trig.data.iter().enumerate() {
-                                        if let Some(v) = v {
-                                            let (name, dtype) = if let Some(Some(ti)) = self
-                                                .trigger_info
-                                                .triggers
-                                                .get(&trig.ttype)
-                                                .map(|v| v.values.get(&(i as u32)))
-                                            {
-                                                (ti.name.clone(), ti.dtype)
-                                            } else {
-                                                (None, DefinitionDataType::default())
-                                            };
-
-                                            readonly_input!(
-                                                ui,
-                                                name.unwrap_or(format!("#{i} ")),
-                                                dtype.to_string(&self.hashcodes, *v)
-                                            );
-                                            ui.end_row();
-                                        }
-                                    }
-                                });
-                            }
-
-                            let any_engine_options = {
-                                let e = &trig.engine_options;
-                                e.visual_object.is_some()
-                                    || e.visual_object_file.is_some()
-                                    || e.gamescript_index.is_some()
-                                    || e.collision_index.is_some()
-                                    || e.trigger_color.is_some()
-                                    || e._unk5.is_some()
-                                    || e._unk6.is_some()
-                                    || e._unk7.is_some()
-                            };
-
-                            if any_engine_options {
-                                ui.separator();
-                                ui.strong("Engine values");
-                                quick_grid!(ui, "t_extravalues", |ui| {
-                                    if let Some(v) = trig.engine_options.visual_object {
-                                        readonly_input!(
-                                            ui,
-                                            "Visual Object",
-                                            DefinitionDataType::Hashcode.to_string(&self.hashcodes, v)
-                                        );
-                                        ui.end_row();
-                                    }
-                                    if let Some(v) = trig.engine_options.visual_object_file {
-                                        readonly_input!(
-                                            ui,
-                                            "Visual Object File",
-                                            DefinitionDataType::Hashcode.to_string(&self.hashcodes, v)
-                                        );
-                                        ui.end_row();
-                                    }
-                                    if let Some(v) = trig.engine_options.gamescript_index {
-                                        readonly_input!(
-                                            ui,
-                                            "GameScript Index",
-                                            DefinitionDataType::U32.to_string(&self.hashcodes, v)
-                                        );
-                                        ui.end_row();
-                                    }
-                                    if let Some(v) = trig.engine_options.collision_index {
-                                        readonly_input!(
-                                            ui,
-                                            "Collision Index",
-                                            DefinitionDataType::U32.to_string(&self.hashcodes, v)
-                                        );
-                                        ui.end_row();
-                                    }
-                                    if let Some(v) = trig.engine_options.trigger_color {
-                                        ui.label("Trigger Color");
-                                        ui.horizontal(|ui| {
-                                            let (_, color_rect) = ui.allocate_painter(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                                            color_rect.rect_filled(color_rect.clip_rect(), 2.0, egui::Color32::from_rgba_premultiplied(v[0], v[1], v[2], v[3]));
-
-                                            ui.label(format!("rgba({0}, {1}, {2}, {3}) / #{0:02x}{1:02x}{2:02x}{3:02x}", v[0], v[1], v[2], v[3]));
-                                        });
-                                        ui.end_row();
-                                    }
-                                    if let Some(v) = trig.engine_options._unk5 {
-                                        readonly_input!(
-                                            ui,
-                                            "Unk5",
-                                            DefinitionDataType::Unknown32.to_string(&self.hashcodes, v)
-                                        );
-                                        ui.end_row();
-                                    }
-                                    if let Some(v) = trig.engine_options._unk6 {
-                                        readonly_input!(
-                                            ui,
-                                            "Unk6",
-                                            DefinitionDataType::Unknown32.to_string(&self.hashcodes, v)
-                                        );
-                                        ui.end_row();
-                                    }
-                                    if let Some(v) = trig.engine_options._unk7 {
-                                        readonly_input!(
-                                            ui,
-                                            "Unk7",
-                                            DefinitionDataType::Unknown32.to_string(&self.hashcodes, v)
-                                        );
-                                        ui.end_row();
-                                    }
-                                });
-                            }
-
-                            if trig.links.iter().any(|v| *v != -1) {
-                                ui.separator();
-                                ui.strong("Outgoing Links");
-
-                                quick_grid!(ui, "t_outlinks", |ui| {
-                                    for (i, l) in
-                                        trig.links.iter().enumerate().filter(|(_, v)| **v != -1)
-                                    {
-                                        let ltrig = &map.triggers[*l as usize];
-                                        let resp = ui.horizontal(|ui| {
-                                            readonly_input!(
-                                                ui,
-                                                format!("#{i} "),
-                                                format!(
-                                                    "{} (type {})",
-                                                    l,
-                                                    ttype_or_hex!(ltrig.ttype)
-                                                )
-                                            );
-
-                                            if ui
-                                                .button(font_awesome::BULLSEYE.to_string())
-                                                .clicked()
-                                            {
-                                                self.go_to_trigger(*l as usize, ltrig)
-                                            }
-                                        });
-
-                                        if resp.response.hovered() {
-                                            self.selected_link = Some(*l);
-                                        }
-
-                                        ui.end_row();
-                                    }
-                                });
-                            }
-
-                            if !trig.incoming_links.is_empty() {
-                                ui.separator();
-                                ui.strong(format!(
-                                    "Incoming Links ({} links)",
-                                    trig.incoming_links.len()
-                                ));
-
-                                for l in trig.incoming_links.iter() {
-                                    let ltrig = &map.triggers[*l as usize];
-                                    let resp = ui.horizontal(|ui| {
-                                        readonly_input!(
-                                            ui,
-                                            format!("{} (type {})", l, ttype_or_hex!(ltrig.ttype))
-                                        );
-
-                                        if ui.button(font_awesome::BULLSEYE.to_string()).clicked() {
-                                            self.go_to_trigger(*l as usize, ltrig)
-                                        }
-                                    });
-
-                                    if resp.response.hovered() {
-                                        self.selected_link = Some(*l);
-                                    }
-                                }
-                            }
-                        }
-                    });
-            });
+        state.dispatch(&vehicle, ROBOTS_EVENT_DEACTIVATE, 2.0 + 3.0 / 60.0, 1.0);
+        state.advance_runtime(&map, &vehicle, 3.0 + 3.0 / 60.0, 1.0);
+        let stopped_snapshot = state.snapshot(&vehicle, 1.0);
+        let stopped = stopped_snapshot.vehicle_steering_angle.unwrap();
+        assert!(stopped.abs() < 0.01);
+        assert_eq!(
+            stopped_snapshot.platform_contact_linear_velocity,
+            Some(Vec3::ZERO)
+        );
     }
 
-    fn go_to_trigger(&mut self, index: usize, trig: &ProcessedTrigger) {
-        self.selected_trigger = Some(index);
+    #[test]
+    fn trigger_link_indices_reject_negative_and_out_of_range_values() {
+        assert_eq!(map_trigger_link_index(-1, 10), None);
+        assert_eq!(map_trigger_link_index(-2, 10), None);
+        assert_eq!(map_trigger_link_index(9, 10), Some(9));
+        assert_eq!(map_trigger_link_index(10, 10), None);
+    }
 
-        let mut v = self.viewer.lock();
-        let camera = v.camera_mut();
+    #[test]
+    fn map_sky_list_is_used_until_an_override_is_supplied() {
+        let skies = [0x0200_017D, 0x0400_0123];
 
-        self.trigger_focus_tween = Some(Tweeny3D::new(
-            tweeny::ease_out_exponential,
-            camera.position() + camera.focus_offset(self.trigger_scale),
-            trig.position,
-            0.5,
-        ))
+        assert_eq!(map_sky_objects("", &skies), skies);
+        assert_eq!(map_sky_objects("not-hex", &skies), skies);
+        assert_eq!(map_sky_objects("0200017e", &skies), [0x0200_017E]);
+    }
+
+    #[test]
+    fn robots_trigger_icons_are_embedded_and_referenced_by_the_type_map() {
+        let info: TriggerInformation = serde_yaml::from_str(ROBOTS_TRIGGER_INFO).unwrap();
+
+        for definition in info.triggers.values() {
+            if let Some(icon) = &definition.icon {
+                assert!(
+                    TRIGGER_ICON_DATA.iter().any(|(name, _)| name == icon),
+                    "missing embedded icon {icon}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn map_script_8400000a_loops_and_pauses_on_its_first_geometry_frame() {
+        let script = UXGeoScript {
+            hashcode: 0x8400_000A,
+            framerate: 30.0,
+            length: 7,
+            num_threads: 1,
+            commands: vec![UXGeoScriptCommand {
+                opcode: 3,
+                start: 2,
+                length: 5,
+                controller_header_index: 0,
+                controller_index: 2,
+                parent_controller_index: u8::MAX,
+                data: UXGeoScriptCommandData::Entity {
+                    hashcode: 0x8200_0001,
+                    file: u32::MAX,
+                },
+            }],
+            serialized_controller_count: 1,
+            controller_record_metadata: vec![[0, 0]],
+            controllers: vec![],
+            controller_group_indices: vec![],
+            controller_groups: vec![],
+        };
+
+        let paused = map_script_time(&script, 100.0, false, 1.0);
+        assert!((paused - 2.0 / 30.0).abs() < f32::EPSILON);
+
+        let duration = 7.0 / 30.0;
+        let looped = map_script_time(&script, duration, true, 1.0);
+        assert!(looped.abs() < f32::EPSILON);
+
+        let half_speed = map_script_time(&script, 0.2, true, 0.5);
+        assert!((half_speed - 0.1).abs() < f32::EPSILON);
+
+        let mut sixty_fps = script.clone();
+        sixty_fps.framerate = 60.0;
+        sixty_fps.length = 120;
+        assert!((map_script_time(&sixty_fps, 1.0, true, 1.0) - 1.0).abs() < f32::EPSILON);
+        assert_eq!(sixty_fps.frame_at_time(1.0), 60.0);
+        assert_eq!(sixty_fps.duration_seconds(), 2.0);
     }
 }

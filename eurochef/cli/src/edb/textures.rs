@@ -68,15 +68,14 @@ pub fn execute_command(
                             .frames
                             .into_iter()
                             .map(|data| {
-                                apng::load_dynamic_image(
-                                    image::RgbaImage::from_vec(
+                                apng::load_dynamic_image(image_024::DynamicImage::ImageRgba8(
+                                    image_024::RgbaImage::from_vec(
                                         t.width as u32,
                                         t.height as u32,
                                         data,
                                     )
-                                    .unwrap()
-                                    .into(),
-                                )
+                                    .unwrap(),
+                                ))
                                 .unwrap()
                             })
                             .collect();

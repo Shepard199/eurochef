@@ -10,6 +10,8 @@ out vec2 f_uv;
 out vec2 f_normalUv;
 out vec4 f_color;
 out vec3 f_eye;
+out vec3 f_worldPos;
+out vec3 f_worldNormal;
 
 // TODO?
 // vec4 unpackRGBA(uint packedValue) {
@@ -22,12 +24,14 @@ out vec3 f_eye;
 // }
 
 uniform vec2 u_scroll;
+uniform float u_uv_scale;
 uniform mat4 u_view;
 uniform mat4 u_model;
 uniform mat4 u_normal;
+uniform mat4 u_world_normal;
 void main()
 {
-    f_uv = a_uv + u_scroll;
+    f_uv = a_uv * u_uv_scale + u_scroll;
     f_color = vec4(a_col.xyz * 2.0, a_col.a);
 
 #ifdef EC_MATCAP
@@ -44,8 +48,12 @@ void main()
     f_normalUv = (r.xy / m + .5) * 2.0;
 #endif
 
+    vec4 world_pos = u_model * vec4(a_pos, 1.0);
+    f_worldPos = world_pos.xyz;
+    f_worldNormal = normalize((u_world_normal * vec4(a_normal, 0.0)).xyz);
+
     // vec4 mv_pos = (u_view * u_model) * vec4(a_pos, 1.0 );
     // f_eye = normalize(mv_pos.xyz);
 
-    gl_Position = u_view * u_model * vec4(a_pos, 1.0);
+    gl_Position = u_view * world_pos;
 }

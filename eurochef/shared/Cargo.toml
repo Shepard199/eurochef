@@ -3,22 +3,22 @@ name = "eurochef-shared"
 version = "0.1.0"
 authors = ["cohaereo <cohaereo@protonmail.com>"]
 edition = "2021"
-rust-version = "1.65"
+rust-version = "1.97"
 
 [dependencies]
 eurochef-edb = { path = "../../eurochef-edb" }
 eurochef-filelist = { path = "../../eurochef-filelist" }
 
-anyhow = { version = "1", features = ["backtrace"] }
-bytemuck = { version = "1.13", features = ["derive"] }
-enumn = "0.1"
-image = { version = "0.24", default-features = false, features = ["png", "tga"] }
-serde = { version =  "1", features = ["derive"] }
+anyhow = { version = "1.0.104", features = ["backtrace"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+enumn = "0.1.14"
+image = { version = "0.25.10", default-features = false, features = ["png", "tga"] }
+serde = { version =  "1.0.229", features = ["derive"] }
 serde_yaml = "0.9"
 squish = "1.0"
-tracing = "0.1.37"
-bitflags = "2.3.1"
+tracing = "0.1.44"
+bitflags = "2.13.1"
 nohash-hasher = "0.2.0"
-thiserror = "1.0.40"
-chrono = "0.4.26"
-parse_int = "0.6.0"
+thiserror = "2.0.19"
+chrono = "0.4.45"
+parse_int = "0.9.0"

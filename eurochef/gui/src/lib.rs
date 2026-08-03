@@ -7,13 +7,17 @@ pub use app::EurochefApp;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod panic_dialog;
 
+mod animations;
 mod entities;
 mod entity_frame;
 mod fileinfo;
 mod map_frame;
+mod map_runtime;
 mod maps;
 mod render;
 mod scripts;
+mod sound_native;
+mod sound_preview;
 mod spreadsheet;
 mod textures;
 
@@ -35,3 +39,5 @@ pub fn strip_ansi_codes(input: &str) -> String {
 
     output
 }
+
+pub mod robots_tools;

@@ -9,6 +9,10 @@ members = [
   "eurochef-filelist"
 ]
 
+[workspace.package]
+edition = "2021"
+rust-version = "1.97"
+
 [profile.dev.package.image]
 opt-level = 3
 

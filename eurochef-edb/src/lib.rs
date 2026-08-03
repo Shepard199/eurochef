@@ -7,6 +7,8 @@ pub mod entity_mesh;
 pub mod error;
 pub mod header;
 pub mod map;
+pub mod particle;
+pub mod robots_provenance;
 pub mod script;
 pub mod text;
 pub mod texture;
@@ -41,3 +43,4 @@ impl HashcodeUtils for Hashcode {
         *self & 0x0000ffff
     }
 }
+pub mod robots_hashdb;

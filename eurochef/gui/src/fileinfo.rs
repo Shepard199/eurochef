@@ -59,7 +59,7 @@ impl FileInfoPanel {
             ui.strong("Hashcode:");
             ui.label(format!("{:x}", self.header.hashcode));
             if ui.button(font_awesome::CLIPBOARD.to_string()).clicked() {
-                ui.output_mut(|o| o.copied_text = format!("{:x}", self.header.hashcode));
+                ui.ctx().copy_text(format!("{:x}", self.header.hashcode));
             }
         });
 
@@ -69,7 +69,9 @@ impl FileInfoPanel {
             "Build timestamp",
             format!(
                 "{}",
-                chrono::NaiveDateTime::from_timestamp_opt(self.header.time as i64, 0).unwrap()
+                chrono::DateTime::from_timestamp(self.header.time as i64, 0)
+                    .unwrap()
+                    .naive_utc()
             )
         );
         quick_info!(
@@ -99,6 +101,8 @@ impl FileInfoPanel {
         quick_array!("unk_c0", unk_c0);
 
         ui.add_space(16.0);
+        crate::robots_tools::draw_navmesh_controls(ui);
+
         ui.label(egui::RichText::new(format!("{} External references", fa::LINK)).heading());
         egui::ScrollArea::vertical().show(ui, |ui| {
             let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
@@ -124,49 +128,42 @@ impl FileInfoPanel {
                     });
                 })
                 .body(|body| {
-                    body.rows(
-                        text_height,
-                        self.external_references.len(),
-                        |row_index, mut row| {
-                            let (file_hashcode, object_hashcode) =
-                                &self.external_references[row_index];
-                            row.col(|ui| {
-                                ui.label(format_hashcode(hashcodes, *file_hashcode));
-                            });
+                    body.rows(text_height, self.external_references.len(), |mut row| {
+                        let row_index = row.index();
+                        let (file_hashcode, object_hashcode) = &self.external_references[row_index];
+                        row.col(|ui| {
+                            ui.label(format_hashcode(hashcodes, *file_hashcode));
+                        });
 
-                            row.col(|ui| {
-                                ui.label(format_hashcode(hashcodes, *object_hashcode));
-                            });
+                        row.col(|ui| {
+                            ui.label(format_hashcode(hashcodes, *object_hashcode));
+                        });
 
-                            row.col(|ui| {
-                                if format_hashcode(hashcodes, *object_hashcode)
-                                    .starts_with("HT_Animation")
-                                {
-                                    ui.label(
-                                        RichText::new(font_awesome::MINUS)
-                                            .color(egui::Color32::GOLD),
-                                    );
-                                } else {
-                                    let loaded = render_store
-                                        .is_object_loaded(*file_hashcode, *object_hashcode);
-                                    ui.label(
-                                        RichText::new(if loaded {
-                                            font_awesome::CHECK
-                                        } else {
-                                            '\u{f00d}'
-                                        })
-                                        .color(
-                                            if loaded {
-                                                egui::Color32::GREEN
-                                            } else {
-                                                egui::Color32::RED
-                                            },
-                                        ),
-                                    );
-                                }
-                            });
-                        },
-                    )
+                        row.col(|ui| {
+                            if format_hashcode(hashcodes, *object_hashcode)
+                                .starts_with("HT_Animation")
+                            {
+                                ui.label(
+                                    RichText::new(font_awesome::MINUS).color(egui::Color32::GOLD),
+                                );
+                            } else {
+                                let loaded =
+                                    render_store.is_object_loaded(*file_hashcode, *object_hashcode);
+                                ui.label(
+                                    RichText::new(if loaded {
+                                        font_awesome::CHECK
+                                    } else {
+                                        '\u{f00d}'
+                                    })
+                                    .color(if loaded {
+                                        egui::Color32::GREEN
+                                    } else {
+                                        egui::Color32::RED
+                                    }),
+                                );
+                            }
+                        });
+                    })
                 });
         });
     }

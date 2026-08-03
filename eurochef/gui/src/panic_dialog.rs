@@ -1,7 +1,7 @@
 use std::{
     backtrace::{Backtrace, BacktraceStatus},
     io::Write,
-    panic::PanicInfo,
+    panic::PanicHookInfo,
 };
 
 use crate::strip_ansi_codes;
@@ -25,14 +25,15 @@ pub fn setup() {
 
         // Finally, show a dialog
         let panic_message_stripped = &strip_ansi_codes(&format!("{info}"));
-        if let Err(e) = native_dialog::MessageDialog::new()
-            .set_type(native_dialog::MessageType::Error)
+        if let Err(e) = native_dialog::DialogBuilder::message()
+            .set_level(native_dialog::MessageLevel::Error)
             .set_title("Panic!")
             .set_text(&format!(
                 "{}\n\nThe panic has been written to panic.log",
                 panic_message_stripped
             ))
-            .show_alert()
+            .alert()
+            .show()
         {
             eprintln!("Failed to show error dialog: {e}")
         }
@@ -42,7 +43,7 @@ pub fn setup() {
     }))
 }
 
-fn write_panic_to_file(info: &PanicInfo<'_>, bt: Backtrace) -> std::io::Result<()> {
+fn write_panic_to_file(info: &PanicHookInfo<'_>, bt: Backtrace) -> std::io::Result<()> {
     let mut f = std::fs::File::create("panic.log")?;
 
     writeln!(f, "{}", info)?;

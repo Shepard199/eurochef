@@ -86,7 +86,7 @@ impl TextureList {
         ui.separator();
 
         egui::ScrollArea::vertical()
-            .id_source("section_scroll_area")
+            .id_salt("section_scroll_area")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -118,7 +118,7 @@ impl TextureList {
 
                                 let diagnostics = t.diagnostics.to_strings();
 
-                                let response = egui::Image::new(current, egui::vec2(128., 128.) * self.zoom).sense(egui::Sense::click()).ui(ui)
+                                let response = egui::Image::new((current.id(), egui::vec2(128., 128.) * self.zoom)).sense(egui::Sense::click()).ui(ui)
                                 .on_hover_ui(|ui| {
                                     ui.label(format!(
                                         "Hashcode: {:08x}\nFormat (internal): 0x{:x}\nDimensions: {}x{}{}\nScroll: {} {}\nFlags: 0x{:x}\nGameflags: 0x{:x}\nIndex: {i}\n",
@@ -164,7 +164,7 @@ impl TextureList {
                                 ui.allocate_exact_size(egui::vec2(128., 128.) * self.zoom, egui::Sense::click());
                                 ui.painter().rect_filled(
                                     rect,
-                                    egui::Rounding::none(),
+                            egui::CornerRadius::ZERO,
                                     Color32::BLACK,
                                 );
 
@@ -190,7 +190,7 @@ impl TextureList {
 
                                 let (rect, response) = ui.allocate_exact_size(egui::vec2(128., 128.) * self.zoom, egui::Sense::click());
                                 ui.painter().rect_filled(rect,
-                                    egui::Rounding::none(),
+                            egui::CornerRadius::ZERO,
                                     Color32::BLACK,
                                 );
 
@@ -227,7 +227,7 @@ impl TextureList {
                 egui::Window::new("Texture Viewer")
                     .open(&mut window_open)
                     .collapsible(false)
-                    .default_height(ctx.available_rect().height() * 0.70_f32)
+                    .default_height(ctx.content_rect().height() * 0.70_f32)
                     .show(ctx, |ui| {
                         let time = self.start_time.elapsed().as_secs_f32();
                         let frametime_scale = t.frame_count as f32 / t.frames.len() as f32;
@@ -242,7 +242,8 @@ impl TextureList {
 
                         self.enlarged_zoom *= ctx.input(|i| i.zoom_delta());
 
-                        egui::Image::new(current, current.size_vec2() * self.enlarged_zoom).ui(ui);
+                        egui::Image::new((current.id(), current.size_vec2() * self.enlarged_zoom))
+                            .ui(ui);
 
                         // TODO(cohae): Animation checkbox, when unticked, show frame slider
                     });

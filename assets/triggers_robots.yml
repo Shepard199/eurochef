@@ -1,186 +1,362 @@
+# ROBOTS_PATCH_0021_COMPLETE_TRIGGER_TYPEMAP
+# ROBOTS_PATCH_0021_REV2_SERIALIZED_MAP_TYPEMAP
+# ROBOTS_PATCH_0021_REV3_BLUEPRINT_PICKUP_FIELDS
+# IMPORTANT: these are serialized EXGeoTriggerType.trig_type IDs used in map EDBs.
+# They are NOT the 94-entry runtime XTrigger factory-registration order.
+# 92 known serialized IDs; 52 and 93 remain unmapped rather than fabricated.
 icon_scale: 0.75
 triggers:
   0:
-    name: XTrigger_Player
+    name: "XTrigger_Player"
+    icon: "pl_startpoint"
   1:
-    name: XTrigger_Camera
+    name: "XTrigger_Camera"
   2:
-    name: XTrigger_Distance
+    name: "XTrigger_Distance"
   3:
-    name: XTrigger_Monster_Test
+    name: "XTrigger_Monster_Test"
+    values:
+      0:
+        name: "Monster Config Record Index"
+        type: u32
+      7:
+        name: "Monster Flags"
+        type: u32
   4:
-    name: XTrigger_Script
+    name: "XTrigger_Script"
+    values:
+      0:
+        name: "XItem Creation Flags"
+        type: scriptflags
   5:
-    name: XTrigger_Timer
+    name: "XTrigger_Timer"
+    icon: "tr_timer"
   6:
-    name: XTrigger_Counter
+    name: "XTrigger_Counter"
+    icon: "tr_counter"
   7:
-    name: XTrigger_Fan
+    name: "XTrigger_Fan"
   8:
-    name: XTrigger_Platform
+    name: "XTrigger_Platform"
+    values:
+      1:
+        name: "Angular Velocity Z (deg/s)"
+        type: float
+      2:
+        name: "Runtime Path"
+        type: hashcode
+      3:
+        name: "Angular Velocity X (deg/s)"
+        type: float
+      4:
+        name: "Angular Velocity Y (deg/s)"
+        type: float
+      5:
+        name: "Path Speed Source (x0.1 units/s)"
+        type: float
+      6:
+        name: "Path Acceleration Source (x0.1)"
+        type: float
+      7:
+        name: "Controller Flags"
+        type: u32
   9:
-    name: XTrigger_FanBooster
+    name: "XTrigger_FanBooster"
   10:
-    name: XTrigger_Monster
+    name: "XTrigger_Monster"
+    values:
+      0:
+        name: "Monster Config Record Index"
+        type: u32
+      1:
+        name: "Proximity Radius x10 (Signed)"
+        type: u32
+      2:
+        name: "Path"
+        type: hashcode
+      7:
+        name: "Monster Flags"
+        type: u32
   11:
-    name: XTrigger_Monster
+    name: "XTrigger_Monster"
+    values:
+      0:
+        name: "Monster Config Record Index"
+        type: u32
+      1:
+        name: "Proximity Radius x10 (Signed)"
+        type: u32
+      2:
+        name: "Path"
+        type: hashcode
+      7:
+        name: "Monster Flags"
+        type: u32
   12:
-    name: XTrigger_SwitchPath
+    name: "XTrigger_SwitchPath"
   13:
-    name: XTrigger_MessageRelay
+    name: "XTrigger_MessageRelay"
+    icon: "tr_link"
   14:
-    name: XTrigger_Group
+    name: "XTrigger_Group"
   15:
-    name: XTrigger_ChangeLevel
+    name: "XTrigger_ChangeLevel"
   16:
-    name: XTrigger_Load
+    name: "XTrigger_Load"
   17:
-    name: XTrigger_Deload
+    name: "XTrigger_Deload"
   18:
-    name: XTrigger_Monster
+    name: "XTrigger_Monster"
+    values:
+      0:
+        name: "Monster Config Record Index"
+        type: u32
+      1:
+        name: "Proximity Radius x10 (Signed)"
+        type: u32
+      2:
+        name: "Path"
+        type: hashcode
+      7:
+        name: "Monster Flags"
+        type: u32
   19:
-    name: XTrigger_Cutscene
+    name: "XTrigger_Cutscene"
   20:
-    name: XTrigger_Camera_Marker
+    name: "XTrigger_Camera_Marker"
   21:
-    name: XTrigger_Door
+    name: "XTrigger_Door"
   22:
-    name: XTrigger_Interact
+    name: "XTrigger_Interact"
   23:
-    name: XTrigger_Interact
+    name: "XTrigger_Interact"
   24:
-    name: XTrigger_Interact
+    name: "XTrigger_Interact"
   25:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
+    values:
+      0:
+        name: "Pickup Type"
+        type: pickup
   26:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   27:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   28:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   29:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
+    values:
+      0:
+        name: "Blueprint Family Index"
+        type: u32
+      1:
+        name: "Blueprint Piece Index"
+        type: u32
   30:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   31:
-    name: XTrigger_FixSwitch
+    name: "XTrigger_FixSwitch"
   32:
-    name: XTrigger_Hazard
+    name: "XTrigger_Hazard"
+    icon: "tr_killzone"
   33:
-    name: XTrigger_Monster
+    name: "XTrigger_Monster"
+    values:
+      0:
+        name: "Monster Config Record Index"
+        type: u32
+      1:
+        name: "Proximity Radius x10 (Signed)"
+        type: u32
+      2:
+        name: "Path"
+        type: hashcode
+      7:
+        name: "Monster Flags"
+        type: u32
   34:
-    name: XTrigger_FanHorizontal
+    name: "XTrigger_FanHorizontal"
   35:
-    name: XTrigger_Camera_Values
+    name: "XTrigger_Camera_Values"
   36:
-    name: XTrigger_ActivationPad
+    name: "XTrigger_ActivationPad"
   37:
-    name: XTrigger_Lift
+    name: "XTrigger_Lift"
+    values:
+      1:
+        name: "Runtime Path"
+        type: hashcode
+      2:
+        name: "Controller Flags"
+        type: u32
+      3:
+        name: "Path Acceleration Source (x0.1)"
+        type: float
+      4:
+        name: "Path Speed Source (x0.1 units/s)"
+        type: u32
   38:
-    name: XTrigger_Sequence
+    name: "XTrigger_Sequence"
   39:
-    name: XTrigger_DisplayMessage
+    name: "XTrigger_DisplayMessage"
   40:
-    name: XTrigger_BallTrack
+    name: "XTrigger_BallTrack"
   41:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   42:
-    name: XTrigger_InventoryCheck
+    name: "XTrigger_InventoryCheck"
   43:
-    name: XTrigger_Pattern
+    name: "XTrigger_Pattern"
   44:
-    name: XTrigger_Shop
+    name: "XTrigger_Shop"
   45:
-    name: XTrigger_MagneticBox
+    name: "XTrigger_MagneticBox"
   46:
-    name: XTrigger_AmmoPoint
+    name: "XTrigger_AmmoPoint"
   47:
-    name: XTrigger_Boss
+    name: "XTrigger_Boss"
   48:
-    name: XTrigger_NPC
+    name: "XTrigger_NPC"
+    values:
+      0:
+        name: "NPC Runtime Selector"
+        type: u32
+      1:
+        name: "Native Runtime UID"
+        type: hashcode
+      2:
+        name: "NPC Flags"
+        type: u32
+      3:
+        name: "Text Group"
+        type: hashcode
+      4:
+        name: "Alternate Cutscene 0"
+        type: hashcode
+      5:
+        name: "Alternate Cutscene 1"
+        type: hashcode
+      6:
+        name: "Alternate Cutscene 2"
+        type: hashcode
+      7:
+        name: "Alternate Cutscene 3"
+        type: hashcode
   49:
-    name: XTrigger_Interact
+    name: "XTrigger_Interact"
   50:
-    name: XTrigger_Fluid
+    name: "XTrigger_Fluid"
   51:
-    name: XTrigger_Marker_AreaOfInterest
+    name: "XTrigger_Marker_AreaOfInterest"
   53:
-    name: XTrigger_Mission
+    name: "XTrigger_Mission"
   54:
-    name: XTrigger_BallBoost
+    name: "XTrigger_BallBoost"
   55:
-    name: XTrigger_Clock
+    name: "XTrigger_Clock"
   56:
-    name: XTrigger_ArcadeMachine
+    name: "XTrigger_ArcadeMachine"
   57:
-    name: XTrigger_FloorReflection
+    name: "XTrigger_FloorReflection"
   58:
-    name: XTrigger_MagneticScript
+    name: "XTrigger_MagneticScript"
   59:
-    name: XTrigger_SlideUnder
+    name: "XTrigger_SlideUnder"
   60:
-    name: XTrigger_Watchbot
+    name: "XTrigger_Watchbot"
   61:
-    name: XTrigger_AlertIcon
+    name: "XTrigger_AlertIcon"
   62:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   63:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   64:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   65:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   66:
-    name: XTrigger_Switch_Watchbot
+    name: "XTrigger_Switch_Watchbot"
   67:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   68:
-    name: XTrigger_BossExecutive
+    name: "XTrigger_BossExecutive"
   69:
-    name: XTrigger_BossExecController
+    name: "XTrigger_BossExecController"
   70:
-    name: XTrigger_Monster_Fish
+    name: "XTrigger_Monster_Fish"
+    values:
+      0:
+        name: "Monster Config Record Index"
+        type: u32
+      1:
+        name: "Proximity Radius x10 (Signed)"
+        type: u32
   71:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   72:
-    name: XTrigger_BossRatchet
+    name: "XTrigger_BossRatchet"
   73:
-    name: XTrigger_Monster_Transporter
+    name: "XTrigger_Monster_Transporter"
   74:
-    name: XTrigger_Monster
+    name: "XTrigger_Monster"
+    values:
+      0:
+        name: "Monster Config Record Index"
+        type: u32
+      1:
+        name: "Proximity Radius x10 (Signed)"
+        type: u32
+      2:
+        name: "Path"
+        type: hashcode
+      7:
+        name: "Monster Flags"
+        type: u32
   75:
-    name: XTrigger_BossSewer
+    name: "XTrigger_BossSewer"
   76:
-    name: XTrigger_BossSewerCanon
+    name: "XTrigger_BossSewerCanon"
   77:
-    name: XTrigger_Light
+    name: "XTrigger_Light"
+    icon: "fx_lensflare"
   78:
-    name: XTrigger_Tutorial
+    name: "XTrigger_Tutorial"
   79:
-    name: XTrigger_ObjectAudio
+    name: "XTrigger_ObjectAudio"
   80:
-    name: XTrigger_Vehicle
+    name: "XTrigger_Vehicle"
+    values:
+      1:
+        name: "Runtime Path"
+        type: hashcode
+      2:
+        name: "Path Speed Source (x0.1 units/s)"
+        type: float
+      3:
+        name: "Path Acceleration Source (x0.1)"
+        type: float
   81:
-    name: XTrigger_MonsterCollision
+    name: "XTrigger_MonsterCollision"
   82:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   83:
-    name: XTrigger_Pickup
+    name: "XTrigger_Pickup"
   84:
-    name: XTrigger_Pickup_Generator
+    name: "XTrigger_Pickup_Generator"
   85:
-    name: XTrigger_Camera_Sequence
+    name: "XTrigger_Camera_Sequence"
   86:
-    name: XTrigger_Sweeper_Boss
+    name: "XTrigger_Sweeper_Boss"
   87:
-    name: XTrigger_Sweeper_Boss_Controller
+    name: "XTrigger_Sweeper_Boss_Controller"
   88:
-    name: XTrigger_Distance_Object
+    name: "XTrigger_Distance_Object"
   89:
-    name: XTrigger_Deload_Subfile
+    name: "XTrigger_Deload_Subfile"
   90:
-    name: XTrigger_Load_Subfile
+    name: "XTrigger_Load_Subfile"
   91:
-    name: XTrigger_AvoidRadius
+    name: "XTrigger_AvoidRadius"
   92:
-    name: XTrigger_MapHighlight
+    name: "XTrigger_MapHighlight"

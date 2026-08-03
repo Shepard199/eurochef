@@ -3,7 +3,7 @@ name = "eurochef-gui"
 version = "0.1.0"
 authors = ["cohaereo <cohaereo@protonmail.com>"]
 edition = "2021"
-rust-version = "1.65"
+rust-version = "1.97"
 
 [[bin]]
 name = "eurochef"
@@ -14,49 +14,49 @@ eurochef-edb = { path = "../../eurochef-edb" }
 eurochef-filelist = { path = "../../eurochef-filelist" }
 eurochef-shared = { path = "../shared" }
 
-anyhow = { version = "1", features = ["backtrace"] }
-bytemuck = { version = "1.13", features = ["derive"] }
+anyhow = { version = "1.0.104", features = ["backtrace"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
 serde_json = "1"
-tracing = "0.1.37"
+tracing = "0.1.44"
 
 # GUI
-egui = "0.22.0"
-egui_extras = "0.22.0"
-eframe = { version = "0.22.0", default-features = false, features = [
+egui = "0.35.0"
+egui_extras = "0.35.0"
+eframe = { version = "0.35.0", default-features = false, features = [
     "default_fonts",
     "glow",
     "persistence",
 ] }
 fnv = "1.0"
 instant = "0.1"
-rfd = "0.12.1" # TODO: Can this be replaced by native-dialog?
-color-eyre = { version = "0.6.2", features = ["issue-url"] }
-crossbeam = "0.8.2"
+rfd = "0.17.2" # TODO: Can this be replaced by native-dialog?
+color-eyre = { version = "0.6.5", features = ["issue-url"] }
+crossbeam = "0.8.4"
 font-awesome = "0.2"
-glow = "0.12"
-egui_glow = "0.22.0"
-glam = { version = "0.24.0", features = ["mint"] }
-chrono = "0.4.26"
-png = "0.17.9"
+glow = "0.17.0"
+egui_glow = "0.35.0"
+glam = { version = "0.33.2", features = ["mint"] }
+chrono = "0.4.45"
+png = "0.18.1"
 serde_yaml = "0.9"
-parse_int = "0.6.0"
+parse_int = "0.9.0"
 nohash-hasher = "0.2.0"
-clap = { version = "4.3.4", features = ["derive"] }
+clap = { version = "4.6.4", features = ["derive"] }
 fxhash = "0.2.1"
 genmesh = "0.6.2"
-bitflags = "2.3.3"
+bitflags = "2.13.1"
 glob = "0.3.1"
 hex = "0.4.3"
-puffin = "0.16.0"
-puffin_egui = "0.22.0"
+puffin = "0.20.0"
 
 [build-dependencies]
-chrono = "0.4.26"
+chrono = "0.4.45"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-native-dialog = "0.7.0"
-tracing-subscriber = "0.3"
+native-dialog = "0.9.7"
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "hound"] }
+tracing-subscriber = "0.3.23"
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]

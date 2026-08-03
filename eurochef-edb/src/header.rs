@@ -26,7 +26,7 @@ pub type EXGeoMaterialHeader = EXGeoCommonArrayElement;
 pub struct EXGeoHeader {
     pub hashcode: u32,
 
-    #[brw(assert(version.ge(&182) || version.le(&263), "Unsupported version {version}"))]
+    #[brw(assert(version.ge(&182) && version.le(&263), "Unsupported version {version}"))]
     pub version: u32,
 
     pub flags: u32,

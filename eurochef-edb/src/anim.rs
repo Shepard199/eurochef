@@ -1,4 +1,6 @@
-use binrw::{binrw, BinRead, BinResult, VecArgs};
+use std::io::{Read, Seek};
+
+use binrw::{binrw, BinRead, BinReaderExt, BinResult, VecArgs};
 use serde::Serialize;
 
 use crate::{
@@ -21,9 +23,9 @@ pub struct EXGeoBaseAnimSkin {
     pub _unk30: [u32; 4], // 0x30
 
     #[br(count = bone_count)]
-    pub rot_data: EXRelPtr<Vec<EXVector>>, // 0x40
+    pub absolute_bind_positions: EXRelPtr<Vec<EXVector>>, // 0x40
     #[br(count = bone_count)]
-    pub rot_data_relative: EXRelPtr<Vec<EXVector>>, // 0x44
+    pub relative_bind_positions: EXRelPtr<Vec<EXVector>>, // 0x44
 
     #[br(count = bone_count)]
     pub hier_data: EXRelPtr<Vec<EXGeoAnimSkinHierData>>, // 0x48
@@ -47,7 +49,7 @@ pub struct EXGeoAnimSkinEntity {
 
     #[bw(assert(false), ignore)]
     #[br(parse_with(parse_late_skindata), args(&skin_data_ptr, parts_count))]
-    pub skin_data: EXRelPtr<Vec<EXRelPtr<EXGeoAnimSkinUnkWeightData>>>,
+    pub skin_data: EXRelPtr<Vec<EXRelPtr<EXGeoAnimSkinPartWeights>>>,
 
     pub section_index: u32,
     pub entity_index: u32, // TODO(cohae): Add to reference list
@@ -56,12 +58,67 @@ pub struct EXGeoAnimSkinEntity {
 
 #[binrw]
 #[derive(Debug, Serialize, Clone)]
-pub struct EXGeoAnimSkinUnkWeightData {
-    unk0_count: u32,
-    #[br(count = unk0_count)]
+pub struct EXGeoAnimSkinPartWeights {
+    /// Number of bones retained by this mesh part's local skinning palette.
+    pub palette_count: u32,
+    #[br(count = palette_count)]
     #[bw(assert(false), ignore)]
-    pub unk0: EXRelPtr<Vec<u8>>,
-    pub unk1: EXRelPtr,
+    pub bone_palette: EXRelPtr<Vec<u8>>,
+    /// Relative pointer to `mesh_vertex_count` consecutive 20-byte influence records.
+    pub vertex_influence_data: EXRelPtr,
+}
+
+/// One PC Robots skinning record per mesh vertex.
+///
+/// Each selector is stored as `palette_slot * 3`, matching the three vec4 rows
+/// used by the native affine skin matrix. The four weights are finite and sum
+/// to one throughout the shipped PC corpus.
+#[binrw]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq)]
+pub struct EXGeoAnimSkinVertexInfluence {
+    pub palette_slot_offsets_x3: [u8; 4],
+    pub weights: [f32; 4],
+}
+
+impl EXGeoAnimSkinVertexInfluence {
+    pub fn palette_slots(&self) -> Option<[u8; 4]> {
+        self.palette_slot_offsets_x3
+            .iter()
+            .all(|value| value % 3 == 0)
+            .then(|| self.palette_slot_offsets_x3.map(|value| value / 3))
+    }
+
+    pub fn bone_indices(&self, palette: &[u8]) -> Option<[u8; 4]> {
+        let slots = self.palette_slots()?;
+        let mut bones = [0u8; 4];
+        for (lane, slot) in slots.into_iter().enumerate() {
+            bones[lane] = *palette.get(slot as usize)?;
+        }
+        Some(bones)
+    }
+}
+
+impl EXGeoAnimSkinPartWeights {
+    pub fn read_vertex_influences<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        endian: binrw::Endian,
+        vertex_count: usize,
+    ) -> BinResult<Vec<EXGeoAnimSkinVertexInfluence>> {
+        let saved_position = reader.stream_position()?;
+        reader.seek(std::io::SeekFrom::Start(
+            self.vertex_influence_data.offset_absolute(),
+        ))?;
+        let result = reader.read_type_args::<Vec<EXGeoAnimSkinVertexInfluence>>(
+            endian,
+            VecArgs {
+                count: vertex_count,
+                inner: (),
+            },
+        );
+        reader.seek(std::io::SeekFrom::Start(saved_position))?;
+        result
+    }
 }
 
 #[binrw]
@@ -77,7 +134,7 @@ pub struct EXGeoAnimSkinHierData {
 fn parse_late_skindata(
     ptr: &EXRelPtr,
     length: u32,
-) -> BinResult<EXRelPtr<Vec<EXRelPtr<EXGeoAnimSkinUnkWeightData>>>> {
+) -> BinResult<EXRelPtr<Vec<EXRelPtr<EXGeoAnimSkinPartWeights>>>> {
     let pos_saved = reader.stream_position()?;
     reader.seek(std::io::SeekFrom::Start(ptr.offset_absolute()))?;
 

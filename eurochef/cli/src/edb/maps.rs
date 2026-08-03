@@ -9,11 +9,21 @@ use eurochef_edb::{
     binrw::BinReaderExt,
     edb::EdbFile,
     entity::{EXGeoEntity, EXGeoMapZoneEntity},
-    map::{EXGeoLight, EXGeoMap, EXGeoPath, EXGeoPlacement},
+    map::{
+        EXGeoLight, EXGeoMap, EXGeoPath, EXGeoPlacement, EXGeoSound, EXGeoTriggerEngineOptions,
+    },
+    robots_provenance::{
+        decode_script_create_flags, RobotsScriptCreateFlags, RobotsScriptCreatorProvenance,
+        RobotsScriptSpawnFunctionProvenance, ROBOTS_PC_EXE_SHA256,
+        ROBOTS_SCRIPT_CREATOR_PROVENANCE, ROBOTS_SCRIPT_SPAWN_CHAIN,
+    },
     versions::Platform,
 };
 
-use eurochef_shared::maps::{TriggerInformation, UXGeoTrigger};
+use eurochef_shared::{
+    maps::{TriggerInformation, UXGeoTrigger},
+    script::UXGeoScript,
+};
 use serde::Serialize;
 
 use crate::PlatformArg;
@@ -46,8 +56,43 @@ pub fn execute_command(
     let mut edb = EdbFile::new(Box::new(reader), platform)?;
     let header = edb.header.clone();
 
+    let output_folder = Path::new(&output_folder);
+    std::fs::create_dir_all(output_folder)?;
+
+    let scripts = UXGeoScript::read_all(&mut edb)?;
+    let scripts_path = output_folder.join(format!("{:08X}.scripts.json", header.hashcode));
+    std::fs::write(&scripts_path, serde_json::to_string_pretty(&scripts)?)?;
+    info!(
+        "Wrote {} decoded scripts to {}",
+        scripts.len(),
+        scripts_path.display()
+    );
+
+    let creators: Vec<&'static RobotsScriptCreatorProvenance> = ROBOTS_SCRIPT_CREATOR_PROVENANCE
+        .iter()
+        .filter(|entry| {
+            scripts
+                .iter()
+                .any(|script| script.hashcode == entry.script_hashcode.0)
+        })
+        .collect();
+    if !creators.is_empty() {
+        let provenance_path =
+            output_folder.join(format!("{:08X}.script-provenance.json", header.hashcode));
+        let provenance = RobotsScriptProvenanceExport {
+            target_executable_sha256: ROBOTS_PC_EXE_SHA256,
+            generic_spawn_chain: ROBOTS_SCRIPT_SPAWN_CHAIN,
+            creators,
+        };
+        std::fs::write(&provenance_path, serde_json::to_string_pretty(&provenance)?)?;
+        info!(
+            "Wrote known Robots script creator provenance to {}",
+            provenance_path.display()
+        );
+    }
+
     if header.map_list.len() == 0 {
-        warn!("File does not contain any maps!");
+        warn!("File does not contain any maps; decoded script export was still written.");
         return Ok(());
     }
 
@@ -55,13 +100,10 @@ pub fn execute_command(
     crate::edb::entities::execute_command(
         filename.clone(),
         platform_arg.clone(),
-        Some(output_folder.clone()),
+        Some(output_folder.to_string_lossy().to_string()),
         false,
         false,
     )?;
-
-    let output_folder = Path::new(&output_folder);
-    std::fs::create_dir_all(output_folder)?;
 
     for m in &header.map_list {
         edb.seek(std::io::SeekFrom::Start(m.address as u64))?;
@@ -74,8 +116,23 @@ pub fn execute_command(
             paths: map.paths.data().clone(),
             placements: map.placements.data().clone(),
             lights: map.lights.data().clone(),
+            sounds: map.sounds.data().clone(),
+            skies: map.skies.iter().map(|sky| sky.hashcode).collect(),
             mapzone_entities: vec![],
             triggers: vec![],
+            scripts: scripts.clone(),
+            trigger_forensics: vec![],
+            trigger_scripts: map
+                .trigger_header
+                .trigger_scripts
+                .iter()
+                .enumerate()
+                .map(|(index, (script, aux))| EurochefTriggerScriptExport {
+                    index,
+                    script_file_offset: script.offset_absolute(),
+                    aux: *aux,
+                })
+                .collect(),
         };
 
         for z in &map.zones {
@@ -92,7 +149,7 @@ pub fn execute_command(
             }
         }
 
-        for t in map.trigger_header.triggers.iter() {
+        for (index, t) in map.trigger_header.triggers.iter().enumerate() {
             let trig = &t.trigger;
             let (ttype, tsubtype) = {
                 let t = &map.trigger_header.trigger_types[trig.type_index as usize];
@@ -135,6 +192,36 @@ pub fn execute_command(
             }
 
             export.triggers.push(trigger);
+            export
+                .trigger_forensics
+                .push(EurochefTriggerForensicExport {
+                    index,
+                    trigger_file_offset: t.trigger.offset_absolute(),
+                    link_ref: t.link_ref,
+                    type_index: trig.type_index,
+                    trig_type: ttype,
+                    trig_subtype: tsubtype,
+                    engine_options: trig.engine_options.clone(),
+                    script_create_flags: if ttype == 4 {
+                        trig.data[0].map(decode_script_create_flags)
+                    } else {
+                        None
+                    },
+                    incoming_links: map
+                        .trigger_header
+                        .triggers
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(source_index, source)| {
+                            source
+                                .trigger
+                                .links
+                                .iter()
+                                .any(|target| *target == index as i32)
+                                .then_some(source_index)
+                        })
+                        .collect(),
+                });
         }
 
         let mut outfile = File::create(output_folder.join(format!("{:x}.ecm", m.hashcode)))?;
@@ -155,8 +242,40 @@ pub struct EurochefMapExport {
     pub paths: Vec<EXGeoPath>,
     pub placements: Vec<EXGeoPlacement>,
     pub lights: Vec<EXGeoLight>,
+    pub sounds: Vec<EXGeoSound>,
+    pub skies: Vec<u32>,
     pub mapzone_entities: Vec<EXGeoMapZoneEntity>,
     pub triggers: Vec<UXGeoTrigger>,
+    pub scripts: Vec<UXGeoScript>,
+    pub trigger_forensics: Vec<EurochefTriggerForensicExport>,
+    pub trigger_scripts: Vec<EurochefTriggerScriptExport>,
+}
+
+#[derive(Serialize)]
+pub struct EurochefTriggerForensicExport {
+    pub index: usize,
+    pub trigger_file_offset: u64,
+    pub link_ref: i32,
+    pub type_index: u16,
+    pub trig_type: u32,
+    pub trig_subtype: u32,
+    pub engine_options: EXGeoTriggerEngineOptions,
+    pub script_create_flags: Option<RobotsScriptCreateFlags>,
+    pub incoming_links: Vec<usize>,
+}
+
+#[derive(Serialize)]
+pub struct EurochefTriggerScriptExport {
+    pub index: usize,
+    pub script_file_offset: u64,
+    pub aux: u32,
+}
+
+#[derive(Serialize)]
+pub struct RobotsScriptProvenanceExport {
+    pub target_executable_sha256: &'static str,
+    pub generic_spawn_chain: &'static [RobotsScriptSpawnFunctionProvenance],
+    pub creators: Vec<&'static RobotsScriptCreatorProvenance>,
 }
 
 fn load_trigger_types<P: AsRef<Path>>(path: P) -> anyhow::Result<TriggerInformation> {

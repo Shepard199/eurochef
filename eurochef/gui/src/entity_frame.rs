@@ -19,6 +19,7 @@ pub struct EntityFrame {
 
     mesh_center: Vec3,
     vertex_lighting: bool,
+    opaque_effect_preview: bool,
 }
 
 #[derive(Clone)]
@@ -48,18 +49,27 @@ impl EntityFrame {
             mesh_center: Vec3::ZERO,
             viewer: Arc::new(Mutex::new(BaseViewer::new(gl))),
             vertex_lighting: true,
+            opaque_effect_preview: true,
         };
 
         unsafe {
             if meshes.len() > 1 {
                 for m in meshes {
                     let r = Arc::new(Mutex::new(EntityRenderer::new(file, platform)));
-                    r.lock().load_mesh(gl, m);
+                    {
+                        let mut renderer = r.lock();
+                        renderer.opaque_effect_preview = true;
+                        renderer.load_mesh(gl, m);
+                    }
                     s.renderers.push(r);
                 }
             } else {
                 let r = Arc::new(Mutex::new(EntityRenderer::new(file, platform)));
-                s.mesh_center = r.lock().load_mesh(gl, meshes[0]);
+                {
+                    let mut renderer = r.lock();
+                    renderer.opaque_effect_preview = true;
+                    s.mesh_center = renderer.load_mesh(gl, meshes[0]);
+                }
                 s.renderers.push(r);
             }
         }
@@ -78,6 +88,18 @@ impl EntityFrame {
                 // TODO(cohae): Global shaders will make this less painful
                 for r in self.renderers.iter() {
                     r.lock().vertex_lighting = self.vertex_lighting;
+                }
+            }
+
+            if ui
+                .checkbox(&mut self.opaque_effect_preview, "Opaque effect preview")
+                .on_hover_text(
+                    "Shows additive/reverse-subtract effect geometry as opaque in the Entities preview only. Maps keeps the original blend mode.",
+                )
+                .changed()
+            {
+                for r in &self.renderers {
+                    r.lock().opaque_effect_preview = self.opaque_effect_preview;
                 }
             }
         });

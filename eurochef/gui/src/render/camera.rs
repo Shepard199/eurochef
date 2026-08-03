@@ -90,7 +90,7 @@ impl Camera3D for ArcBallCamera {
 
         if let Some(response) = &response {
             if response.hover_pos().is_some() {
-                self.zoom += -ui.input(|i| i.scroll_delta).y * 0.005;
+                self.zoom += -ui.input(|i| i.smooth_scroll_delta).y * 0.005;
             }
 
             if response.dragged_by(egui::PointerButton::Secondary) {
@@ -219,7 +219,7 @@ impl Camera3D for FpsCamera {
     fn update(&mut self, ui: &egui::Ui, response: Option<&egui::Response>, delta: f32) {
         if let Some(response) = response {
             if response.hover_pos().is_some() {
-                let scroll = ui.input(|i| i.scroll_delta);
+                let scroll = ui.input(|i| i.smooth_scroll_delta);
                 self.speed_mul = (self.speed_mul + scroll.y * 0.005).clamp(0.0, 5.0);
             }
 
@@ -265,7 +265,7 @@ impl Camera3D for FpsCamera {
     }
 
     fn calculate_matrix(&mut self) -> Mat4 {
-        Mat4::look_at_rh(self.position, self.position + self.front, Vec3::Y)
+        glam::camera::rh::view::look_at_mat4(self.position, self.position + self.front, Vec3::Y)
     }
 
     fn rotation(&self) -> Quat {

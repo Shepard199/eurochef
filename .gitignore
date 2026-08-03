@@ -1,10 +1,18 @@
 **/target
+.cargo-local/
 extract/
 data/
 xroot/
 
 .idea
 .vscode
+.venv
+.cache/
+reports/re-agent/
+re-agent-progress.json
+ghidra-bridge.yaml
+.ghidra-exports/
+ghidra-projects/
 
 *.edb
 *.sfx

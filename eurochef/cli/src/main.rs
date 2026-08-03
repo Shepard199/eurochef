@@ -107,6 +107,50 @@ enum EdbCommand {
         #[arg(short, long)]
         trigger_defs: Option<String>,
     },
+    /// Build a shipped-corpus EXGeoParticle structural report from a pipeline manifest
+    ParticleReport {
+        /// Pipeline manifest.tsv containing EDB UID and source path columns
+        manifest: String,
+
+        /// Output folder (default: "./particle_corpus_report/")
+        output_folder: Option<String>,
+    },
+    /// Build a shipped-corpus AnimScript health report from a pipeline manifest
+    ScriptHealth {
+        /// Pipeline manifest.tsv containing EDB UID and source path columns
+        manifest: String,
+
+        /// Output folder (default: "./script_health_report/")
+        output_folder: Option<String>,
+    },
+    /// Build a shipped-corpus XTrigger report from a pipeline manifest
+    TriggerReport {
+        /// Pipeline manifest.tsv containing EDB UID and source path columns
+        manifest: String,
+
+        /// Output folder (default: "./xtrigger_corpus_report/")
+        output_folder: Option<String>,
+
+        /// File with trigger definitions (assets/triggers_*.yml)
+        #[arg(short, long)]
+        trigger_defs: Option<String>,
+    },
+    /// Build a shipped-corpus HT_Entity structural report from a pipeline manifest
+    EntityReport {
+        /// Pipeline manifest.tsv containing EDB UID and source path columns
+        manifest: String,
+
+        /// Output folder (default: "./ht_entity_corpus_report/")
+        output_folder: Option<String>,
+    },
+    /// Build a shipped-corpus Animation -> AnimSkin -> Entity binding report
+    AnimBindingReport {
+        /// Pipeline manifest.tsv containing EDB UID and source path columns
+        manifest: String,
+
+        /// Output folder (default: "./anim_binding_corpus_report/")
+        output_folder: Option<String>,
+    },
     /// Extract textures
     Textures {
         /// .edb file to read
@@ -227,6 +271,27 @@ fn handle_edb(cmd: EdbCommand) -> anyhow::Result<()> {
             output_folder,
             trigger_defs,
         } => edb::maps::execute_command(filename, platform, output_folder, trigger_defs),
+        EdbCommand::ParticleReport {
+            manifest,
+            output_folder,
+        } => edb::particle_report::execute_command(manifest, output_folder),
+        EdbCommand::ScriptHealth {
+            manifest,
+            output_folder,
+        } => edb::script_health::execute_command(manifest, output_folder),
+        EdbCommand::TriggerReport {
+            manifest,
+            output_folder,
+            trigger_defs,
+        } => edb::trigger_report::execute_command(manifest, output_folder, trigger_defs),
+        EdbCommand::EntityReport {
+            manifest,
+            output_folder,
+        } => edb::entity_report::execute_command(manifest, output_folder),
+        EdbCommand::AnimBindingReport {
+            manifest,
+            output_folder,
+        } => edb::anim_binding_report::execute_command(manifest, output_folder),
         EdbCommand::Spreadsheets {
             filename,
             output_folder,

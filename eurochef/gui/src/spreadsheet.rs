@@ -75,7 +75,7 @@ impl TextItemList {
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 egui::ScrollArea::vertical()
-                    .id_source("section_scroll_area")
+                    .id_salt("section_scroll_area")
                     .show(ui, |ui| {
                         let mut current_set = 0;
                         for (i, s) in match spreadsheet {
@@ -130,18 +130,17 @@ impl TextItemList {
                         body.rows(
                             text_height,
                             filtered_items[self.selected_section].len(),
-                            |row_index, mut row| {
+                            |mut row| {
+                                let row_index = row.index();
                                 let item = filtered_items[self.selected_section][row_index];
                                 let context_menu = |ui: &mut egui::Ui| {
                                     if ui.button("Copy hashcode").clicked() {
-                                        ui.output_mut(|o| {
-                                            o.copied_text = format!("{:08x}", item.hashcode)
-                                        });
-                                        ui.close_menu()
+                                        ui.ctx().copy_text(format!("{:08x}", item.hashcode));
+                                        ui.close()
                                     }
                                     if ui.button("Copy text").clicked() {
-                                        ui.output_mut(|o| o.copied_text = item.text.clone());
-                                        ui.close_menu()
+                                        ui.ctx().copy_text(item.text.clone());
+                                        ui.close()
                                     }
                                 };
 
@@ -162,7 +161,7 @@ impl TextItemList {
                                 .context_menu(context_menu);
 
                                 row.col(|ui| {
-                                    ui.style_mut().wrap = Some(false);
+                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                                     ui.label(&item.text.replace('\n', "\\n"));
                                 })
                                 .1

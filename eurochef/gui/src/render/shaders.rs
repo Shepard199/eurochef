@@ -10,6 +10,8 @@ pub struct Shaders {
     pub grid: Program,
     pub pickbuffer: Program,
     pub sprite3d: Program,
+    pub particle: Program,
+    pub global_lightmap: Program,
 
     pub select_cube: Program,
     pub trigger_link: Program,
@@ -47,6 +49,8 @@ impl Shaders {
             grid: compile_shader!("grid"),
             pickbuffer: compile_shader!("pickbuffer"),
             sprite3d: compile_shader!("sprite3d"),
+            particle: compile_shader!("particle"),
+            global_lightmap: compile_shader!("global_lightmap"),
             select_cube: compile_shader!("select_cube"),
             trigger_link: compile_shader!("trigger_link"),
         }

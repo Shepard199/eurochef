@@ -12,7 +12,7 @@ use eurochef_edb::{
     versions::Platform,
 };
 use eurochef_shared::{entities::read_entity, textures::UXGeoTexture};
-use image::ImageOutputFormat;
+use image::ImageFormat;
 use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
 
 use crate::PlatformArg;
@@ -97,7 +97,7 @@ pub fn execute_command(
                 t.width as u32,
                 t.height as u32,
                 image::ColorType::Rgba8,
-                ImageOutputFormat::Png,
+                ImageFormat::Png,
             )?;
 
             let mut uri = "data:image/png;base64,".to_string();

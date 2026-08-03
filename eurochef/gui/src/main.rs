@@ -29,7 +29,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let native_options = eframe::NativeOptions {
-        initial_window_size: Some([1280., 1024.].into()),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1280., 1024.]),
         depth_buffer: 24,
         multisampling: 0,
         ..Default::default()
@@ -38,11 +38,11 @@ fn main() -> Result<()> {
         "Eurochef",
         native_options,
         Box::new(|cc| {
-            Box::new(eurochef_gui::EurochefApp::new(
+            Ok(Box::new(eurochef_gui::EurochefApp::new(
                 args.file,
                 args.hashcodes,
                 cc,
-            ))
+            )))
         }),
     );
 

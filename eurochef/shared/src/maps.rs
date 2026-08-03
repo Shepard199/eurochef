@@ -1,8 +1,7 @@
-use std::{collections::BTreeMap, mem::transmute};
-
 use eurochef_edb::Hashcode;
 use nohash_hasher::IntMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Serialize, Clone)]
 pub struct UXGeoTrigger {
@@ -105,6 +104,10 @@ pub enum DefinitionDataType {
     U32,
     Float,
     Hashcode,
+    // ROBOTS_PATCH_0027_PICKUP_DATATYPE
+    Pickup,
+    #[serde(rename = "scriptflags")]
+    ScriptCreateFlags,
 }
 
 impl DefinitionDataType {
@@ -125,8 +128,42 @@ impl DefinitionDataType {
                     format!("{v}")
                 }
             }
-            DefinitionDataType::Float => unsafe { format!("{:.5}", transmute::<u32, f32>(v)) },
+            DefinitionDataType::Float => format!("{:.5}", f32::from_bits(v)),
             DefinitionDataType::Hashcode => format_hashcode(hashcodes, v),
+            DefinitionDataType::Pickup => {
+                let pickup_hashcode = if (v & 0xFF000000) == 0x47000000 {
+                    v
+                } else {
+                    0x47000000 | v
+                };
+                format!("{} ({})", format_hashcode(hashcodes, pickup_hashcode), v)
+            }
+            DefinitionDataType::ScriptCreateFlags => {
+                let decoded = eurochef_edb::robots_provenance::decode_script_create_flags(v);
+                let mut parts = Vec::new();
+                if decoded.bit0_xitem_state_list {
+                    parts.push(format!(
+                        "XItem+0x268=0x{:x}",
+                        decoded.created_xitem_state_mask
+                    ));
+                }
+                if decoded.bit1_deferred_trigger_flag {
+                    parts.push(format!(
+                        "deferred XTrigger+0x4C|=0x{:x}",
+                        decoded.deferred_trigger_flag_or_mask
+                    ));
+                }
+                if decoded.bit8_registration_mask {
+                    parts.push(format!(
+                        "XItem+0x100=0x{:x}",
+                        decoded.created_xitem_registration_mask
+                    ));
+                }
+                if decoded.unknown_bits != 0 {
+                    parts.push(format!("unknown=0x{:x}", decoded.unknown_bits));
+                }
+                format!("0x{v:08x} [{}]", parts.join(", "))
+            }
         }
     }
 
@@ -136,6 +173,8 @@ impl DefinitionDataType {
             DefinitionDataType::U32 => 4,
             DefinitionDataType::Float => 4,
             DefinitionDataType::Hashcode => 4,
+            DefinitionDataType::Pickup => 4,
+            DefinitionDataType::ScriptCreateFlags => 4,
         }
     }
 }
@@ -169,7 +208,7 @@ pub fn format_hashcode(hashcodes: &IntMap<Hashcode, String>, hc: Hashcode) -> St
         } else if is_local {
             format!("HT_Local_Invalid_{hc:08x}")
         } else {
-            format!("HT_Invalid_{hc:08x}")
+            eurochef_edb::robots_hashdb::format_or_invalid(hc)
         }
     }
 }
@@ -177,7 +216,7 @@ pub fn format_hashcode(hashcodes: &IntMap<Hashcode, String>, hc: Hashcode) -> St
 // https://github.com/Swyter/poptools/blob/9a22651d7cb16a1edb7894c36e9695138b25b2c1/pop_djinn_sav.bt#L32
 fn human_num(v: u32) -> String {
     let i = v as i32;
-    let f: f32 = unsafe { transmute(v) };
+    let f = f32::from_bits(v);
 
     if i > -9999 && i < 9999 {
         return i.to_string();
