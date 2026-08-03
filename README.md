@@ -13,9 +13,9 @@ See [docs/CLI_FAQ.md](docs/CLI_FAQ.md) for supported CLI commands and common
 Robots workflows.
 
 <p align="center">
-  <img src="docs/Img/img2.png" width="32%" alt="Native Maps: lighting, NavMesh, particles and the Map Controls panel" />
-  <img src="docs/Img/img3.png" width="32%" alt="Scripts: native AnimScript/Sound timeline with resolved local entity names" />
-  <img src="docs/Img/img1.png" width="32%" alt="Animations tab: native full-bone skeletal playback with pose diagnostics" />
+  <img src="docs/Img/img1.png" width="32%" alt="Native Maps: lighting, NavMesh, particles and the Map Controls panel" />
+  <img src="docs/Img/img2.png" width="32%" alt="Scripts: native AnimScript/Sound timeline with resolved local entity names" />
+  <img src="docs/Img/img3.png" width="32%" alt="Animations tab: native full-bone skeletal playback with pose diagnostics" />
 </p>
 <p align="center">
   <sub><b>Maps</b> — native lighting & particles &nbsp;•&nbsp; <b>Scripts</b> — AnimScript/Sound timeline &nbsp;•&nbsp; <b>Animations</b> — native skeletal playback</sub>
