@@ -11,7 +11,7 @@ use eurochef_edb::{
     edb::EdbFile,
     map::{EXGeoBaseDatum, EXGeoMap},
     versions::Platform,
-    HashcodeUtils,
+    HashcodeUtils, HC_BASE_ENTITY, HC_BASE_SCRIPT,
 };
 use eurochef_shared::maps::{TriggerDefinition, TriggerInformation};
 use serde::Serialize;
@@ -25,6 +25,7 @@ struct ManifestEntry {
 #[derive(Debug, Clone)]
 struct FileCatalogEntry {
     entities: Vec<u32>,
+    scripts: Vec<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,6 +111,8 @@ pub struct TriggerVisualBinding {
     object: Option<u32>,
     file: Option<u32>,
     resolved_entity: Option<u32>,
+    resolved_script: Option<u32>,
+    object_kind: Option<String>,
     status: String,
 }
 
@@ -401,10 +404,7 @@ fn scan_file(
                 trigger.engine_options.visual_object_file,
                 catalog,
             );
-            if !matches!(
-                visual.status.as_str(),
-                "none" | "resolved_global" | "resolved_local"
-            ) {
+            if visual.status != "none" && !visual.status.starts_with("resolved_") {
                 summary.unresolved_visual_objects += 1;
             }
             increment(&mut summary.visual_status_counts, visual.status.clone());
@@ -467,6 +467,12 @@ fn build_file_catalog(
                         .entity_list
                         .iter()
                         .map(|entity| entity.common.hashcode)
+                        .collect(),
+                    scripts: edb
+                        .header
+                        .animscript_list
+                        .iter()
+                        .map(|script| script.hashcode)
                         .collect(),
                 },
             ))
@@ -769,6 +775,8 @@ fn resolve_visual(
             object: None,
             file,
             resolved_entity: None,
+            resolved_script: None,
+            object_kind: None,
             status: "none".to_string(),
         };
     };
@@ -778,41 +786,75 @@ fn resolve_visual(
             object: Some(object),
             file: Some(source_file),
             resolved_entity: None,
+            resolved_script: None,
+            object_kind: visual_object_kind(object).map(str::to_owned),
             status: "missing_source_file".to_string(),
         };
     };
 
+    let Some(kind) = visual_object_kind(object) else {
+        return TriggerVisualBinding {
+            object: Some(object),
+            file: Some(source_file),
+            resolved_entity: None,
+            resolved_script: None,
+            object_kind: None,
+            status: format!("unsupported_visual_type_0x{:08X}", object.base()),
+        };
+    };
+    let resources = match object.base() {
+        HC_BASE_ENTITY => &source.entities,
+        HC_BASE_SCRIPT => &source.scripts,
+        _ => unreachable!(),
+    };
+
     if object.is_local() {
         let index = object.index() as usize;
-        if let Some(resolved) = source.entities.get(index) {
+        if let Some(resolved) = resources.get(index) {
             TriggerVisualBinding {
                 object: Some(object),
                 file: Some(source_file),
-                resolved_entity: Some(*resolved),
-                status: "resolved_local".to_string(),
+                resolved_entity: (kind == "entity").then_some(*resolved),
+                resolved_script: (kind == "script").then_some(*resolved),
+                object_kind: Some(kind.to_string()),
+                status: format!("resolved_local_{kind}"),
             }
         } else {
             TriggerVisualBinding {
                 object: Some(object),
                 file: Some(source_file),
                 resolved_entity: None,
-                status: "local_index_out_of_range".to_string(),
+                resolved_script: None,
+                object_kind: Some(kind.to_string()),
+                status: format!("local_{kind}_index_out_of_range"),
             }
         }
-    } else if source.entities.contains(&object) {
+    } else if resources.contains(&object) {
         TriggerVisualBinding {
             object: Some(object),
             file: Some(source_file),
-            resolved_entity: Some(object),
-            status: "resolved_global".to_string(),
+            resolved_entity: (kind == "entity").then_some(object),
+            resolved_script: (kind == "script").then_some(object),
+            object_kind: Some(kind.to_string()),
+            status: format!("resolved_global_{kind}"),
         }
     } else {
         TriggerVisualBinding {
             object: Some(object),
             file: Some(source_file),
             resolved_entity: None,
-            status: "entity_missing".to_string(),
+            resolved_script: None,
+            object_kind: Some(kind.to_string()),
+            status: format!("{kind}_missing"),
         }
+    }
+}
+
+fn visual_object_kind(object: u32) -> Option<&'static str> {
+    match object.base() {
+        HC_BASE_ENTITY => Some("entity"),
+        HC_BASE_SCRIPT => Some("script"),
+        _ => None,
     }
 }
 
@@ -824,13 +866,13 @@ fn write_rows_tsv(path: &Path, rows: &[TriggerReportRow]) -> Result<()> {
     let mut file = File::create(path)?;
     writeln!(
         file,
-        "edb_uid\tedb_path\tmap_uid\tmap_index\ttrigger_index\ttrigger_file_offset\tlink_ref\ttype_index\ttrig_type\ttrig_type_name\ttrig_subtype\ttrig_subtype_name\tdebug\tgame_flags\ttrig_flags\tposition\trotation\tscale\tdata\toutgoing_links\tinvalid_outgoing_links\tincoming_links\tpath_hash_matches\tvisual_object\tvisual_file\tvisual_resolved_entity\tvisual_status\tgamescript_index\tgamescript_offset\tgamescript_aux\tgamescript_status\tcollision_index\tcollision_status\tcollision_type\tcollision_hashref\tcollision_extents\tcollision_position\tcollision_quaternion"
+        "edb_uid\tedb_path\tmap_uid\tmap_index\ttrigger_index\ttrigger_file_offset\tlink_ref\ttype_index\ttrig_type\ttrig_type_name\ttrig_subtype\ttrig_subtype_name\tdebug\tgame_flags\ttrig_flags\tposition\trotation\tscale\tdata\toutgoing_links\tinvalid_outgoing_links\tincoming_links\tpath_hash_matches\tvisual_object\tvisual_file\tvisual_resolved_entity\tvisual_resolved_script\tvisual_object_kind\tvisual_status\tgamescript_index\tgamescript_offset\tgamescript_aux\tgamescript_status\tcollision_index\tcollision_status\tcollision_type\tcollision_hashref\tcollision_extents\tcollision_position\tcollision_quaternion"
     )?;
     for row in rows {
         let collision = row.collision.datum.as_ref();
         writeln!(
             file,
-            "0x{edb_uid:08X}\t{edb_path}\t0x{map_uid:08X}\t{map_index}\t{trigger_index}\t0x{trigger_file_offset:08X}\t{link_ref}\t{type_index}\t{trig_type}\t{trig_type_name}\t{trig_subtype}\t{trig_subtype_name}\t{debug}\t0x{game_flags:08X}\t0x{trig_flags:08X}\t{position}\t{rotation}\t{scale}\t{data}\t{outgoing}\t{invalid}\t{incoming}\t{path_matches}\t{visual_object}\t{visual_file}\t{visual_resolved}\t{visual_status}\t{script_index}\t{script_offset}\t{script_aux}\t{script_status}\t{collision_index}\t{collision_status}\t{collision_type}\t{collision_hashref}\t{collision_extents}\t{collision_position}\t{collision_quaternion}",
+            "0x{edb_uid:08X}\t{edb_path}\t0x{map_uid:08X}\t{map_index}\t{trigger_index}\t0x{trigger_file_offset:08X}\t{link_ref}\t{type_index}\t{trig_type}\t{trig_type_name}\t{trig_subtype}\t{trig_subtype_name}\t{debug}\t0x{game_flags:08X}\t0x{trig_flags:08X}\t{position}\t{rotation}\t{scale}\t{data}\t{outgoing}\t{invalid}\t{incoming}\t{path_matches}\t{visual_object}\t{visual_file}\t{visual_resolved_entity}\t{visual_resolved_script}\t{visual_kind}\t{visual_status}\t{script_index}\t{script_offset}\t{script_aux}\t{script_status}\t{collision_index}\t{collision_status}\t{collision_type}\t{collision_hashref}\t{collision_extents}\t{collision_position}\t{collision_quaternion}",
             edb_uid = row.edb_uid,
             edb_path = escape_tsv(&row.edb_path),
             map_uid = row.map_uid,
@@ -856,7 +898,9 @@ fn write_rows_tsv(path: &Path, rows: &[TriggerReportRow]) -> Result<()> {
             path_matches = json_cell(&row.path_hash_matches)?,
             visual_object = optional_hex(row.visual.object),
             visual_file = optional_hex(row.visual.file),
-            visual_resolved = optional_hex(row.visual.resolved_entity),
+            visual_resolved_entity = optional_hex(row.visual.resolved_entity),
+            visual_resolved_script = optional_hex(row.visual.resolved_script),
+            visual_kind = row.visual.object_kind.as_deref().unwrap_or_default(),
             visual_status = row.visual.status,
             script_index = optional_decimal(row.trigger_script.index),
             script_offset = row
@@ -1083,7 +1127,8 @@ fn optional_decimal(value: Option<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_runtime_preview, invalid_links, parse_u32, valid_link_index, TriggerPathMatch,
+        classify_runtime_preview, invalid_links, parse_u32, resolve_visual, valid_link_index,
+        FileCatalogEntry, TriggerPathMatch,
     };
 
     #[test]
@@ -1091,6 +1136,32 @@ mod tests {
         assert_eq!(parse_u32("0x01000071"), Some(0x0100_0071));
         assert_eq!(parse_u32("01000071"), Some(0x0100_0071));
         assert_eq!(parse_u32("113"), Some(113));
+    }
+
+    #[test]
+    fn visual_binding_resolves_entity_and_script_namespaces() {
+        let file = 0x0100_001D;
+        let catalog = std::collections::HashMap::from([(
+            file,
+            FileCatalogEntry {
+                entities: vec![0x0200_0100],
+                scripts: vec![0x0400_0200],
+            },
+        )]);
+
+        let local_entity = resolve_visual(file, Some(0x8200_0000), None, &catalog);
+        assert_eq!(local_entity.status, "resolved_local_entity");
+        assert_eq!(local_entity.resolved_entity, Some(0x0200_0100));
+        assert_eq!(local_entity.resolved_script, None);
+
+        let local_script = resolve_visual(file, Some(0x8400_0000), None, &catalog);
+        assert_eq!(local_script.status, "resolved_local_script");
+        assert_eq!(local_script.resolved_entity, None);
+        assert_eq!(local_script.resolved_script, Some(0x0400_0200));
+
+        let global_script = resolve_visual(file, Some(0x0400_0200), None, &catalog);
+        assert_eq!(global_script.status, "resolved_global_script");
+        assert_eq!(global_script.resolved_script, Some(0x0400_0200));
     }
 
     #[test]

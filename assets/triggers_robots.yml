@@ -8,13 +8,16 @@ icon_scale: 0.75
 triggers:
   0:
     name: "XTrigger_Player"
-    icon: "pl_startpoint"
+    icon: "xtrigger_player"
   1:
     name: "XTrigger_Camera"
+    icon: "xtrigger_camera"
   2:
     name: "XTrigger_Distance"
+    icon: "xtrigger_distance"
   3:
     name: "XTrigger_Monster_Test"
+    icon: "xtrigger_monster"
     values:
       0:
         name: "Monster Config Record Index"
@@ -24,6 +27,7 @@ triggers:
         type: u32
   4:
     name: "XTrigger_Script"
+    icon: "xtrigger_script"
     values:
       0:
         name: "XItem Creation Flags"
@@ -64,6 +68,7 @@ triggers:
     name: "XTrigger_FanBooster"
   10:
     name: "XTrigger_Monster"
+    icon: "xtrigger_monster"
     values:
       0:
         name: "Monster Config Record Index"
@@ -79,6 +84,7 @@ triggers:
         type: u32
   11:
     name: "XTrigger_Monster"
+    icon: "xtrigger_monster"
     values:
       0:
         name: "Monster Config Record Index"
@@ -101,12 +107,15 @@ triggers:
     name: "XTrigger_Group"
   15:
     name: "XTrigger_ChangeLevel"
+    icon: "xtrigger_changelevel"
   16:
     name: "XTrigger_Load"
+    icon: "xtrigger_load"
   17:
     name: "XTrigger_Deload"
   18:
     name: "XTrigger_Monster"
+    icon: "xtrigger_monster"
     values:
       0:
         name: "Monster Config Record Index"
@@ -122,22 +131,28 @@ triggers:
         type: u32
   19:
     name: "XTrigger_Cutscene"
+    icon: "xtrigger_cutscene"
   20:
     name: "XTrigger_Camera_Marker"
+    icon: "xtrigger_camera_marker"
   21:
     name: "XTrigger_Door"
+    icon: "xtrigger_door"
   22:
     name: "XTrigger_Interact"
+    icon: "xtrigger_interact"
   23:
     name: "XTrigger_Interact"
+    icon: "xtrigger_interact"
   24:
     name: "XTrigger_Interact"
+    icon: "xtrigger_interact"
   25:
     name: "XTrigger_Pickup"
     values:
       0:
-        name: "Pickup Type"
-        type: pickup
+        name: "Scrap Runtime Datum"
+        type: u32
   26:
     name: "XTrigger_Pickup"
   27:
@@ -162,6 +177,7 @@ triggers:
     icon: "tr_killzone"
   33:
     name: "XTrigger_Monster"
+    icon: "xtrigger_monster"
     values:
       0:
         name: "Monster Config Record Index"
@@ -179,6 +195,7 @@ triggers:
     name: "XTrigger_FanHorizontal"
   35:
     name: "XTrigger_Camera_Values"
+    icon: "xtrigger_camera_values"
   36:
     name: "XTrigger_ActivationPad"
   37:
@@ -200,6 +217,7 @@ triggers:
     name: "XTrigger_Sequence"
   39:
     name: "XTrigger_DisplayMessage"
+    icon: "xtrigger_displaymessage"
   40:
     name: "XTrigger_BallTrack"
   41:
@@ -218,6 +236,7 @@ triggers:
     name: "XTrigger_Boss"
   48:
     name: "XTrigger_NPC"
+    icon: "xtrigger_npc"
     values:
       0:
         name: "NPC Runtime Selector"
@@ -245,12 +264,14 @@ triggers:
         type: hashcode
   49:
     name: "XTrigger_Interact"
+    icon: "xtrigger_interact"
   50:
     name: "XTrigger_Fluid"
   51:
     name: "XTrigger_Marker_AreaOfInterest"
   53:
     name: "XTrigger_Mission"
+    icon: "xtrigger_mission"
   54:
     name: "XTrigger_BallBoost"
   55:
@@ -263,10 +284,12 @@ triggers:
     name: "XTrigger_MagneticScript"
   59:
     name: "XTrigger_SlideUnder"
+    icon: "xtrigger_slideunder"
   60:
     name: "XTrigger_Watchbot"
   61:
     name: "XTrigger_AlertIcon"
+    icon: "xtrigger_alerticon"
   62:
     name: "XTrigger_Pickup"
   63:
@@ -285,6 +308,7 @@ triggers:
     name: "XTrigger_BossExecController"
   70:
     name: "XTrigger_Monster_Fish"
+    icon: "xtrigger_monster"
     values:
       0:
         name: "Monster Config Record Index"
@@ -298,8 +322,10 @@ triggers:
     name: "XTrigger_BossRatchet"
   73:
     name: "XTrigger_Monster_Transporter"
+    icon: "xtrigger_monster"
   74:
     name: "XTrigger_Monster"
+    icon: "xtrigger_monster"
     values:
       0:
         name: "Monster Config Record Index"
@@ -322,8 +348,23 @@ triggers:
     icon: "fx_lensflare"
   78:
     name: "XTrigger_Tutorial"
+    icon: "xtrigger_tutorial"
   79:
     name: "XTrigger_ObjectAudio"
+    icon: "xtrigger_objectaudio"
+    values:
+      0:
+        name: "Activate One-Shot"
+        type: hashcode
+      1:
+        name: "Deactivate One-Shot"
+        type: hashcode
+      2:
+        name: "Active Loop"
+        type: hashcode
+      3:
+        name: "Inactive Loop"
+        type: hashcode
   80:
     name: "XTrigger_Vehicle"
     values:
@@ -356,6 +397,7 @@ triggers:
     name: "XTrigger_Deload_Subfile"
   90:
     name: "XTrigger_Load_Subfile"
+    icon: "xtrigger_load"
   91:
     name: "XTrigger_AvoidRadius"
   92:

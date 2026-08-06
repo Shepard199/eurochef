@@ -16,7 +16,10 @@ use glam::{Mat4, Quat};
 use glow::HasContext;
 use nohash_hasher::IntMap;
 
-use crate::{animations::AnimationRuntime, entity_frame::RenderableTexture};
+use crate::{
+    animations::AnimationRuntime, entity_frame::RenderableTexture,
+    map_zone::robots_map_zone_index_by_bounds,
+};
 
 use self::{camera::Camera3D, entity::EntityRenderer};
 
@@ -60,17 +63,6 @@ pub struct NativeLightZone {
     pub bounds_max: glam::Vec3,
     pub light_indices: Vec<usize>,
     pub ambience: f32,
-}
-
-impl NativeLightZone {
-    pub fn contains(&self, point: glam::Vec3) -> bool {
-        point.cmpge(self.bounds_min).all() && point.cmple(self.bounds_max).all()
-    }
-
-    pub fn volume(&self) -> f32 {
-        let size = (self.bounds_max - self.bounds_min).max(glam::Vec3::ZERO);
-        size.x * size.y * size.z
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -122,14 +114,13 @@ pub fn robots_world_light_sample(
     zone_override: Option<usize>,
     point: glam::Vec3,
 ) -> glam::Vec3 {
-    let preferred_zone = zone_override.or_else(|| {
-        zones
-            .iter()
-            .enumerate()
-            .filter(|(_, zone)| zone.contains(point))
-            .min_by(|(_, a), (_, b)| a.volume().total_cmp(&b.volume()))
-            .map(|(index, _)| index)
-    });
+    let preferred_zone = zone_override
+        .filter(|index| *index < zones.len())
+        .or_else(|| {
+            robots_map_zone_index_by_bounds(zones.len(), point, |index| {
+                (zones[index].bounds_min, zones[index].bounds_max)
+            })
+        });
 
     fn barycentric_xz(point: glam::Vec3, tri: &NativeLightingTriangle) -> Option<[f32; 3]> {
         let a = tri.positions[0];
@@ -331,11 +322,7 @@ impl RenderStore {
         }
     }
 
-    pub fn insert_animation_runtime(
-        &mut self,
-        file: Hashcode,
-        runtime: Arc<AnimationRuntime>,
-    ) {
+    pub fn insert_animation_runtime(&mut self, file: Hashcode, runtime: Arc<AnimationRuntime>) {
         self.animation_runtimes.insert(file, runtime);
     }
 
@@ -352,6 +339,14 @@ impl RenderStore {
         for file in self.files.values_mut() {
             for (_, renderer) in file.0.values_mut() {
                 renderer.vertex_lighting = enabled;
+            }
+        }
+    }
+
+    pub fn set_flag_0x10_geometry_visible(&mut self, visible: bool) {
+        for file in self.files.values_mut() {
+            for (_, renderer) in file.0.values_mut() {
+                renderer.show_hidden_geometry = visible;
             }
         }
     }

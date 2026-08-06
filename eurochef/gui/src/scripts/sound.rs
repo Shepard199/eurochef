@@ -127,6 +127,20 @@ fn script_sound_events(
     events
 }
 
+pub(crate) fn script_sound_hashes(
+    render_store: &RenderStore,
+    file: Hashcode,
+    script_hashcode: Hashcode,
+) -> Vec<u32> {
+    let mut hashes = script_sound_events(render_store, file, script_hashcode)
+        .into_iter()
+        .map(|event| event.hashcode)
+        .collect::<Vec<_>>();
+    hashes.sort_unstable();
+    hashes.dedup();
+    hashes
+}
+
 pub(crate) fn active_script_sound_events(
     render_store: &RenderStore,
     file: Hashcode,
@@ -229,6 +243,58 @@ impl ScriptListPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eurochef_shared::script::UXGeoScriptCommand;
+
+    #[test]
+    fn prefetch_lists_inactive_sound_commands_before_their_frame() {
+        let file = 0x0100_0071;
+        let script_hashcode = 0x0400_0123;
+        let script = UXGeoScript {
+            hashcode: script_hashcode,
+            framerate: 30.0,
+            length: 60,
+            num_threads: 2,
+            commands: vec![
+                UXGeoScriptCommand {
+                    opcode: 5,
+                    start: 2,
+                    length: 5,
+                    controller_header_index: 0,
+                    controller_index: 0,
+                    parent_controller_index: u8::MAX,
+                    data: UXGeoScriptCommandData::Sound {
+                        hashcode: 0x1AF0_0312,
+                    },
+                },
+                UXGeoScriptCommand {
+                    opcode: 5,
+                    start: 40,
+                    length: 3,
+                    controller_header_index: 1,
+                    controller_index: 1,
+                    parent_controller_index: u8::MAX,
+                    data: UXGeoScriptCommandData::Sound {
+                        hashcode: 0x1AF0_0300,
+                    },
+                },
+            ],
+            serialized_controller_count: 2,
+            controller_record_metadata: vec![[0, 0], [0, 0]],
+            controllers: vec![],
+            controller_group_indices: vec![],
+            controller_groups: vec![],
+        };
+        let mut render_store = RenderStore::new();
+        render_store.insert_script(file, script);
+
+        assert_eq!(
+            script_sound_hashes(&render_store, file, script_hashcode),
+            vec![0x1AF0_0300, 0x1AF0_0312]
+        );
+        assert!(
+            active_script_sound_events(&render_store, file, script_hashcode, 0.0, 1).is_empty()
+        );
+    }
 
     #[test]
     fn event_range_uses_start_inclusive_and_end_exclusive() {

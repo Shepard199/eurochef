@@ -27,6 +27,7 @@ try:
         assemble_pose,
         fnv1a64,
         load_requests,
+        load_script_bound_requests,
         prepare_runtime_cache_entries,
     )
 except ModuleNotFoundError as exc:
@@ -156,7 +157,12 @@ def generate_clip(
 
     output_dir = output_root / f"{request.edb_uid:08X}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{request.animation_index:04}.rapc"
+    output_name = (
+        f"{request.animation_index:04}_[0x{request.animskin_hashcode:08X}].rapc"
+        if request.variant_cache
+        else f"{request.animation_index:04}.rapc"
+    )
+    output_path = output_dir / output_name
     if not force and output_path.is_file() and validate_existing_cache(
         output_path,
         request,
@@ -168,6 +174,10 @@ def generate_clip(
             "edb_uid": f"0x{request.edb_uid:08X}",
             "animation_index": request.animation_index,
             "animation_hashcode": f"0x{request.animation_hashcode:08X}",
+            "animskin_source_edb_uid": f"0x{request.animskin_source_edb_uid:08X}",
+            "animskin_hashcode": f"0x{request.animskin_hashcode:08X}",
+            "animskin_path": str(request.animskin_path),
+            "cache_variant": request.variant_cache,
             "frames": frame_count,
             "bones": bone_count,
             "bytes": output_path.stat().st_size,
@@ -230,6 +240,10 @@ def generate_clip(
         "edb_uid": f"0x{request.edb_uid:08X}",
         "animation_index": request.animation_index,
         "animation_hashcode": f"0x{request.animation_hashcode:08X}",
+        "animskin_source_edb_uid": f"0x{request.animskin_source_edb_uid:08X}",
+        "animskin_hashcode": f"0x{request.animskin_hashcode:08X}",
+        "animskin_path": str(request.animskin_path),
+        "cache_variant": request.variant_cache,
         "frames": frame_count,
         "bones": bone_count,
         "bytes": output_path.stat().st_size,
@@ -262,6 +276,12 @@ def generate_file_job(
                     "edb_uid": f"0x{request.edb_uid:08X}",
                     "animation_index": request.animation_index,
                     "animation_hashcode": f"0x{request.animation_hashcode:08X}",
+                    "animskin_source_edb_uid": (
+                        f"0x{request.animskin_source_edb_uid:08X}"
+                    ),
+                    "animskin_hashcode": f"0x{request.animskin_hashcode:08X}",
+                    "animskin_path": str(request.animskin_path),
+                    "cache_variant": request.variant_cache,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             )
@@ -276,6 +296,16 @@ def main() -> int:
     parser.add_argument("binding_tsv", type=Path)
     parser.add_argument("animskin_tsv", type=Path)
     parser.add_argument("output_root", type=Path)
+    parser.add_argument(
+        "--script-health-report",
+        type=Path,
+        help="script_health_report.json used to add explicit cross-EDB Animation/AnimSkin pairs",
+    )
+    parser.add_argument(
+        "--script-bound-only",
+        action="store_true",
+        help="generate only Script-resolved non-native Animation/AnimSkin pairs",
+    )
     parser.add_argument("--edb-uid", type=lambda value: int(value, 0))
     parser.add_argument("--start-edb-uid", type=lambda value: int(value, 0))
     parser.add_argument("--max-files", type=int)
@@ -289,7 +319,29 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    grouped = load_requests(args.binding_tsv, args.animskin_tsv)
+    if args.script_bound_only and args.script_health_report is None:
+        parser.error("--script-bound-only requires --script-health-report")
+    grouped = (
+        {}
+        if args.script_bound_only
+        else load_requests(args.binding_tsv, args.animskin_tsv)
+    )
+    if args.script_health_report is not None:
+        script_grouped = load_script_bound_requests(
+            args.binding_tsv,
+            args.animskin_tsv,
+            args.script_health_report,
+        )
+        for edb_uid, requests in script_grouped.items():
+            grouped.setdefault(edb_uid, []).extend(requests)
+        for requests in grouped.values():
+            requests.sort(
+                key=lambda request: (
+                    request.animation_index,
+                    request.animskin_source_edb_uid,
+                    request.animskin_hashcode,
+                )
+            )
     selected_uids = sorted(grouped)
     if args.edb_uid is not None:
         selected_uids = [args.edb_uid]

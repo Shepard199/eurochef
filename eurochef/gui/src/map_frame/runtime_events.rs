@@ -1,13 +1,37 @@
 use super::*;
 
+fn active_camera_trigger_after_event(
+    current: Option<usize>,
+    trigger_index: usize,
+    trigger_type: u32,
+    event_mask: u32,
+) -> Option<usize> {
+    if trigger_type != 1 {
+        return current;
+    }
+    let mut active = current;
+    // XTrigger_Camera::Event at 0x00480630 tests 0x100 first and then
+    // independently tests 0x200. A combined 0x300 mask therefore activates
+    // and immediately deactivates the same Camera; deactivate is the final state.
+    if event_mask & ROBOTS_EVENT_ACTIVATE != 0 {
+        active = Some(trigger_index);
+    }
+    if event_mask & ROBOTS_EVENT_DEACTIVATE != 0 && active == Some(trigger_index) {
+        active = None;
+    }
+    active
+}
+
 impl MapFrame {
     fn runtime_event_key(map_hash: u32, trigger_index: usize) -> u64 {
         ((map_hash as u64) << 32) | trigger_index as u64
     }
 
-    fn runtime_event_supported(map: &ProcessedMap, trigger: &ProcessedTrigger) -> bool {
-        robots_trigger_runtime_path_speed(trigger.ttype, &trigger.data).is_some()
-            && map_trigger_runtime_path(map, trigger).is_some()
+    pub(super) fn runtime_event_supported(map: &ProcessedMap, trigger: &ProcessedTrigger) -> bool {
+        (robots_trigger_runtime_path_speed(trigger.ttype, &trigger.data).is_some()
+            && map_trigger_runtime_path(map, trigger).is_some())
+            || robots_object_audio_is_consumer(trigger.ttype)
+            || matches!(trigger.ttype, 1 | 20)
     }
 
     pub(super) fn runtime_event_snapshots(
@@ -144,21 +168,30 @@ impl MapFrame {
             return;
         }
         self.native_runtime_event_gate = true;
-        let state = self
-            .runtime_event_states
-            .entry(Self::runtime_event_key(map.hashcode, trigger_index))
-            .or_default();
-        if self.animate_runtime_paths {
-            state.advance_runtime(map, trigger, wall_time, self.runtime_path_playback_speed);
-        } else {
-            state.hold(wall_time);
+        {
+            let state = self
+                .runtime_event_states
+                .entry(Self::runtime_event_key(map.hashcode, trigger_index))
+                .or_default();
+            if self.animate_runtime_paths {
+                state.advance_runtime(map, trigger, wall_time, self.runtime_path_playback_speed);
+            } else {
+                state.hold(wall_time);
+            }
+            state.dispatch(
+                trigger,
+                event_mask,
+                wall_time,
+                self.runtime_path_playback_speed,
+            );
         }
-        state.dispatch(
-            trigger,
+        self.active_camera_trigger = active_camera_trigger_after_event(
+            self.active_camera_trigger,
+            trigger_index,
+            trigger.ttype,
             event_mask,
-            wall_time,
-            self.runtime_path_playback_speed,
         );
+        self.dispatch_object_audio_event(map, trigger_index, event_mask);
     }
 
     pub(super) fn reset_runtime_event(
@@ -174,10 +207,52 @@ impl MapFrame {
             .entry(Self::runtime_event_key(map.hashcode, trigger_index))
             .or_default()
             .reset(wall_time);
+        if self.active_camera_trigger == Some(trigger_index) {
+            self.active_camera_trigger = None;
+        }
+        self.stop_object_audio_for_trigger(map.hashcode, trigger_index);
     }
 
     pub(super) fn reset_all_runtime_events(&mut self) {
         self.runtime_event_states.clear();
+        self.active_camera_trigger = None;
         self.runtime_motion_start_time = None;
+        self.sound_preview
+            .lock()
+            .stop_group(SoundVoiceGroup::ObjectAudio, 0.03);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camera_activation_owns_one_native_camera_and_deactivate_wins_combined_masks() {
+        assert_eq!(
+            active_camera_trigger_after_event(None, 7, 1, ROBOTS_EVENT_ACTIVATE),
+            Some(7)
+        );
+        assert_eq!(
+            active_camera_trigger_after_event(
+                Some(7),
+                9,
+                1,
+                ROBOTS_EVENT_ACTIVATE | ROBOTS_EVENT_DEACTIVATE,
+            ),
+            None
+        );
+        assert_eq!(
+            active_camera_trigger_after_event(Some(9), 7, 1, ROBOTS_EVENT_DEACTIVATE),
+            Some(9)
+        );
+        assert_eq!(
+            active_camera_trigger_after_event(Some(9), 9, 1, ROBOTS_EVENT_DEACTIVATE),
+            None
+        );
+        assert_eq!(
+            active_camera_trigger_after_event(Some(9), 9, 20, ROBOTS_EVENT_DEACTIVATE),
+            Some(9)
+        );
     }
 }

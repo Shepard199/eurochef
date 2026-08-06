@@ -201,16 +201,26 @@ pub fn format_hashcode(hashcodes: &IntMap<Hashcode, String>, hc: Hashcode) -> St
                 .unwrap_or("HT_Invalid");
 
             if is_local {
-                format!("HT_Local_{}_{hc:08x}", &hc_base_stripped[3..])
+                format!("HT_Local_{}_{hc:08X}", &hc_base_stripped[3..])
             } else {
-                format!("{hc_base_stripped}_Unknown_{hc:08x}")
+                format!("{hc_base_stripped}_Unknown_{hc:08X}")
             }
         } else if is_local {
-            format!("HT_Local_Invalid_{hc:08x}")
+            format!("HT_Local_Invalid_{hc:08X}")
         } else {
             eurochef_edb::robots_hashdb::format_or_invalid(hc)
         }
     }
+}
+
+/// Formats a resource as its canonical decoded name plus the exact serialized UID.
+///
+/// The UID is deliberately retained even when the HashDB name is known. Robots can
+/// store the same globally named resource in several EDBs, while local resources are
+/// only meaningful inside their owning EDB. Keeping both pieces visible makes GUI
+/// search results and generated corpus atlases unambiguous.
+pub fn format_hashcode_with_id(hashcodes: &IntMap<Hashcode, String>, hc: Hashcode) -> String {
+    format!("{} [0x{hc:08X}]", format_hashcode(hashcodes, hc))
 }
 
 // https://github.com/Swyter/poptools/blob/9a22651d7cb16a1edb7894c36e9695138b25b2c1/pop_djinn_sav.bt#L32
@@ -228,4 +238,28 @@ fn human_num(v: u32) -> String {
         return format!("{f:.2}");
     }
     format!("0x{v:x}/{f:.2}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_resource_label_keeps_decoded_name_and_uid() {
+        let hashcodes = IntMap::default();
+        assert_eq!(
+            format_hashcode_with_id(&hashcodes, 0x0200_01B4),
+            "HT_Entity_Vehicle_Taxi_Collision [0x020001B4]"
+        );
+    }
+
+    #[test]
+    fn canonical_resource_label_keeps_local_uid_scope_visible() {
+        let mut hashcodes = IntMap::default();
+        hashcodes.insert(0x0200_0000, "HT_Entity_HASHCODE_BASE".to_string());
+        assert_eq!(
+            format_hashcode_with_id(&hashcodes, 0x8200_009A),
+            "HT_Local_Entity_8200009A [0x8200009A]"
+        );
+    }
 }

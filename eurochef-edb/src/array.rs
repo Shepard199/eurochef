@@ -160,6 +160,13 @@ impl<T: BinRead> EXRelArray<T> {
         self.data.len()
     }
 
+    /// Returns the serialized array count even when `T` is the zero-sized
+    /// placeholder `()`. This preserves unknown section cardinality without
+    /// inventing a layout for its elements.
+    pub fn serialized_len(&self) -> usize {
+        self.array_size.max(0) as usize
+    }
+
     pub fn data(&self) -> &Vec<T> {
         &self.data
     }

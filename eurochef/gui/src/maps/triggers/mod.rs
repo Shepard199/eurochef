@@ -5,9 +5,17 @@ mod lift;
 mod monster;
 mod monster_transporter;
 mod npc;
+mod object_audio;
 mod platform;
 mod vehicle;
 mod watchbot;
+
+pub use camera::controller_plan as robots_camera_controller_plan;
+pub use object_audio::{
+    direct_profile as robots_direct_object_audio_profile,
+    is_consumer as robots_object_audio_is_consumer, is_enabled as robots_object_audio_is_enabled,
+    profile_for_source as robots_object_audio_profile_for_source, ObjectAudioProfile,
+};
 
 pub fn robots_trigger_path_hash(trigger_type: u32, data: &[Option<u32>]) -> Option<u32> {
     let hash = match trigger_type {

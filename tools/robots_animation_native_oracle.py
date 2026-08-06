@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import struct
 from collections import defaultdict
 from dataclasses import dataclass
@@ -86,8 +87,11 @@ class ClipRequest:
     animation_offset: int
     motion_offset: int
     motion_size: int
+    animskin_source_edb_uid: int
+    animskin_path: Path
     animskin_hashcode: int
     animskin_offset: int
+    variant_cache: bool = False
 
 
 class RobotsAnimationOracle:
@@ -126,9 +130,14 @@ class RobotsAnimationOracle:
         )
 
     def configure(self, request: ClipRequest) -> int:
-        edb = request.edb_path.read_bytes()
-        anim = bytearray(edb[request.animation_offset : request.animation_offset + 0x9C])
-        motion = edb[request.motion_offset : request.motion_offset + request.motion_size]
+        animation_edb = request.edb_path.read_bytes()
+        animskin_edb = request.animskin_path.read_bytes()
+        anim = bytearray(
+            animation_edb[request.animation_offset : request.animation_offset + 0x9C]
+        )
+        motion = animation_edb[
+            request.motion_offset : request.motion_offset + request.motion_size
+        ]
         if len(anim) != 0x9C or len(motion) != request.motion_size:
             raise ValueError("animation object or motion payload is truncated")
 
@@ -140,15 +149,19 @@ class RobotsAnimationOracle:
                 f"invalid animation dimensions frames={self.frame_count} bones={self.bone_count}"
             )
 
-        skin_bone_count = struct.unpack_from("<I", edb, request.animskin_offset + 0x04)[0]
+        skin_bone_count = struct.unpack_from(
+            "<I", animskin_edb, request.animskin_offset + 0x04
+        )[0]
         if skin_bone_count != self.bone_count:
             raise ValueError(
                 f"animation/AnimSkin bone mismatch {self.bone_count} != {skin_bone_count}"
             )
-        relative_pointer = struct.unpack_from("<i", edb, request.animskin_offset + 0x44)[0]
+        relative_pointer = struct.unpack_from(
+            "<i", animskin_edb, request.animskin_offset + 0x44
+        )[0]
         relative_address = request.animskin_offset + 0x44 + relative_pointer
         self.relative_bind_positions = [
-            struct.unpack_from("<3f", edb, relative_address + bone_index * 16)
+            struct.unpack_from("<3f", animskin_edb, relative_address + bone_index * 16)
             for bone_index in range(self.bone_count)
         ]
 
@@ -160,11 +173,13 @@ class RobotsAnimationOracle:
 
 
 def load_requests(binding_tsv: Path, animskin_tsv: Path) -> dict[int, list[ClipRequest]]:
-    skin_offsets: dict[tuple[str, int], int] = {}
+    skin_records: dict[tuple[int, int], tuple[Path, int]] = {}
     with animskin_tsv.open(encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle, delimiter="\t"):
-            skin_offsets[(row["edb_path"], parse_hex(row["animskin_hashcode"]))] = parse_hex(
-                row["file_offset"]
+            key = (parse_hex(row["edb_uid"]), parse_hex(row["animskin_hashcode"]))
+            skin_records[key] = (
+                Path(row["edb_path"]),
+                parse_hex(row["file_offset"]),
             )
 
     grouped: dict[int, list[ClipRequest]] = defaultdict(list)
@@ -172,23 +187,129 @@ def load_requests(binding_tsv: Path, animskin_tsv: Path) -> dict[int, list[ClipR
         for row in csv.DictReader(handle, delimiter="\t"):
             if row["skin_binding_status"] != "resolved_by_base_skin_num":
                 continue
+            edb_uid = parse_hex(row["edb_uid"])
             edb_path = Path(row["edb_path"])
             animskin_hashcode = parse_hex(row["animskin_hashcode"])
-            grouped[parse_hex(row["edb_uid"])].append(
+            animskin_path, animskin_offset = skin_records[(edb_uid, animskin_hashcode)]
+            grouped[edb_uid].append(
                 ClipRequest(
-                    edb_uid=parse_hex(row["edb_uid"]),
+                    edb_uid=edb_uid,
                     edb_path=edb_path,
                     animation_index=int(row["animation_index"]),
                     animation_hashcode=parse_hex(row["animation_hashcode"]),
                     animation_offset=parse_hex(row["file_offset"]),
                     motion_offset=parse_hex(row["motiondata_info_addr"]),
                     motion_size=int(row["data_size"]),
+                    animskin_source_edb_uid=edb_uid,
+                    animskin_path=animskin_path,
                     animskin_hashcode=animskin_hashcode,
-                    animskin_offset=skin_offsets[(str(edb_path), animskin_hashcode)],
+                    animskin_offset=animskin_offset,
                 )
             )
     for requests in grouped.values():
-        requests.sort(key=lambda request: request.animation_index)
+        requests.sort(
+            key=lambda request: (
+                request.animation_index,
+                request.animskin_source_edb_uid,
+                request.animskin_hashcode,
+            )
+        )
+    return grouped
+
+
+def load_script_bound_requests(
+    binding_tsv: Path,
+    animskin_tsv: Path,
+    script_health_report: Path,
+) -> dict[int, list[ClipRequest]]:
+    animations: dict[tuple[int, int], dict[str, str]] = {}
+    native_pairs: set[tuple[int, int, int, int]] = set()
+    with binding_tsv.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle, delimiter="\t"):
+            edb_uid = parse_hex(row["edb_uid"])
+            animation_hashcode = parse_hex(row["animation_hashcode"])
+            animations[(edb_uid, animation_hashcode)] = row
+            if row["skin_binding_status"] == "resolved_by_base_skin_num":
+                native_pairs.add(
+                    (
+                        edb_uid,
+                        int(row["animation_index"]),
+                        edb_uid,
+                        parse_hex(row["animskin_hashcode"]),
+                    )
+                )
+
+    skins: dict[tuple[int, int], dict[str, str]] = {}
+    with animskin_tsv.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle, delimiter="\t"):
+            skins[(parse_hex(row["edb_uid"]), parse_hex(row["animskin_hashcode"]))] = row
+
+    report = json.loads(script_health_report.read_text(encoding="utf-8"))
+    grouped: dict[int, list[ClipRequest]] = defaultdict(list)
+    seen: set[tuple[int, int, int, int]] = set()
+    for script_row in report.get("rows", []):
+        for command in script_row.get("commands", []):
+            if command.get("command_kind") != "animation":
+                continue
+            resolutions = {
+                resolution.get("kind"): resolution
+                for resolution in command.get("resolutions", [])
+            }
+            animation_resolution = resolutions.get("animation")
+            skin_resolution = resolutions.get("skin")
+            if not animation_resolution or not skin_resolution:
+                continue
+            if animation_resolution.get("resolved_hash") is None:
+                continue
+            if skin_resolution.get("resolved_hash") is None:
+                continue
+            if skin_resolution.get("status") not in {"resolved_local", "resolved_global"}:
+                continue
+
+            animation_source_uid = int(animation_resolution["source_file"])
+            animation_hashcode = int(animation_resolution["resolved_hash"])
+            skin_source_uid = int(skin_resolution["source_file"])
+            animskin_hashcode = int(skin_resolution["resolved_hash"])
+            animation_row = animations.get((animation_source_uid, animation_hashcode))
+            skin_row = skins.get((skin_source_uid, animskin_hashcode))
+            if animation_row is None or skin_row is None:
+                continue
+
+            animation_index = int(animation_row["animation_index"])
+            pair = (
+                animation_source_uid,
+                animation_index,
+                skin_source_uid,
+                animskin_hashcode,
+            )
+            if pair in native_pairs or pair in seen:
+                continue
+            seen.add(pair)
+            grouped[animation_source_uid].append(
+                ClipRequest(
+                    edb_uid=animation_source_uid,
+                    edb_path=Path(animation_row["edb_path"]),
+                    animation_index=animation_index,
+                    animation_hashcode=animation_hashcode,
+                    animation_offset=parse_hex(animation_row["file_offset"]),
+                    motion_offset=parse_hex(animation_row["motiondata_info_addr"]),
+                    motion_size=int(animation_row["data_size"]),
+                    animskin_source_edb_uid=skin_source_uid,
+                    animskin_path=Path(skin_row["edb_path"]),
+                    animskin_hashcode=animskin_hashcode,
+                    animskin_offset=parse_hex(skin_row["file_offset"]),
+                    variant_cache=True,
+                )
+            )
+
+    for requests in grouped.values():
+        requests.sort(
+            key=lambda request: (
+                request.animation_index,
+                request.animskin_source_edb_uid,
+                request.animskin_hashcode,
+            )
+        )
     return grouped
 
 

@@ -941,6 +941,26 @@ pub(crate) fn trigger_base_rotation(trigger: &ProcessedTrigger) -> Quat {
     )
 }
 
+fn compose_platform_local_rotation(
+    base_rotation: Quat,
+    degrees_per_second: Vec3,
+    time: f32,
+    speed_scale: f32,
+) -> Quat {
+    let elapsed_degrees = degrees_per_second * time.max(0.0) * speed_scale.max(0.0);
+    let delta_rotation = Quat::from_euler(
+        glam::EulerRot::ZXY,
+        elapsed_degrees.z.to_radians(),
+        elapsed_degrees.x.to_radians(),
+        elapsed_degrees.y.to_radians(),
+    );
+
+    // XPathController_Platform serializes angular velocity in the platform body's
+    // local XYZ axes. The fixed-step physics path integrates that delta into the
+    // existing body quaternion; it is not an absolute world-space Euler pose.
+    (base_rotation * delta_rotation).normalize()
+}
+
 pub(crate) fn runtime_platform_preview_rotation(
     trigger: &ProcessedTrigger,
     time: f32,
@@ -957,17 +977,7 @@ pub(crate) fn runtime_platform_preview_rotation(
         return base_rotation;
     };
 
-    let elapsed_degrees = degrees_per_second * time * speed_scale.max(0.0);
-    let delta_rotation = Quat::from_euler(
-        glam::EulerRot::ZXY,
-        elapsed_degrees.z.to_radians(),
-        elapsed_degrees.x.to_radians(),
-        elapsed_degrees.y.to_radians(),
-    );
-
-    // XPathController_Platform writes the angular velocity directly to the physics body,
-    // so the recovered vector is treated as world-axis rotation applied over the base pose.
-    delta_rotation * base_rotation
+    compose_platform_local_rotation(base_rotation, degrees_per_second, time, speed_scale)
 }
 
 pub(crate) fn robots_vehicle_yaw_from_tangent(tangent: Vec3) -> Option<f32> {
@@ -1045,4 +1055,37 @@ pub(crate) fn runtime_trigger_preview_rotation(
     }
 
     runtime_platform_preview_rotation(trigger, time, animate, platform_rotation_speed_scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn platform_spin_preserves_the_body_local_rotation_axis() {
+        let base = Quat::from_rotation_y(0.977_145_73);
+        let rotated = compose_platform_local_rotation(base, Vec3::new(0.0, 0.0, 15.0), 7.0, 1.0);
+
+        let expected_axis = base * Vec3::Z;
+        let actual_axis = rotated * Vec3::Z;
+        assert!(
+            expected_axis.distance(actual_axis) < 1.0e-5,
+            "expected_axis={expected_axis:?} actual_axis={actual_axis:?}"
+        );
+    }
+
+    #[test]
+    fn platform_spin_keeps_the_serialized_direction_and_speed() {
+        let base = Quat::from_rotation_y(0.523_666_9);
+        let forward = compose_platform_local_rotation(base, Vec3::new(0.0, 0.0, 20.0), 1.0, 1.0);
+        let reverse = compose_platform_local_rotation(base, Vec3::new(0.0, 0.0, -20.0), 1.0, 1.0);
+        let local_x = base * Vec3::X;
+        let expected_forward = base * (Quat::from_rotation_z(20.0_f32.to_radians()) * Vec3::X);
+        let expected_reverse = base * (Quat::from_rotation_z(-20.0_f32.to_radians()) * Vec3::X);
+
+        assert!(forward.mul_vec3(Vec3::X).distance(expected_forward) < 1.0e-5);
+        assert!(reverse.mul_vec3(Vec3::X).distance(expected_reverse) < 1.0e-5);
+        assert!(forward.mul_vec3(Vec3::X).distance(local_x) > 0.1);
+        assert!(reverse.mul_vec3(Vec3::X).distance(local_x) > 0.1);
+    }
 }

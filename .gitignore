@@ -22,6 +22,10 @@ ghidra-projects/
 *.xmv
 *.elm
 *.gltf
+*.fbx
+*.ecfbx
 *.ecm
 *.pyc
+/tools/fbx-exporter/sdk/
+/tools/fbx-exporter/_sdk/
 *.log

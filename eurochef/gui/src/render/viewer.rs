@@ -90,6 +90,11 @@ impl BaseViewer {
         }
     }
 
+    pub fn set_fly_camera_pose(&mut self, position: Vec3, direction: Vec3) {
+        self.selected_camera = CameraType::Fly;
+        self.camera_fly.set_pose_from_direction(position, direction);
+    }
+
     pub fn show_statusbar(&mut self, ui: &mut egui::Ui) {
         if self.selected_camera == CameraType::Fly {
             ui.strong("Speed:");

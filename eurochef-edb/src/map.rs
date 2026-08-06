@@ -18,9 +18,9 @@ pub struct EXGeoMap {
     pub bsp_tree: EXRelPtr<EXGeoBspTree>,   // EXGeoBspTree, 0x4
     pub paths: EXGeoHashArray<EXGeoPath>,   // 0x8
     pub lights: EXGeoHashArray<EXGeoLight>, // 0x10
-    pub cameras: EXRelArray<()>, // EXGeoCamera, 0x18, structure unconfirmed (never used in GForce)
-    pub isounds: EXRelArray<u16>, // 0x20
-    pub unk28: EXRelArray<()>,   // never used in GForce
+    pub cameras: EXRelArray<EXGeoCamera>,   // EXGeoCamera, 0x18
+    pub isounds: EXRelArray<u16>,           // 0x20
+    pub unk28: EXRelArray<()>,              // never used in GForce
     pub sounds: EXGeoHashArray<EXGeoSound>, // 0x30
     #[brw(if(version.eq(&177) || version.eq(&213) || version.eq(&221)))]
     pub unk34: EXGeoHashArray<()>,
@@ -66,15 +66,22 @@ pub struct EXGeoMapZone {
     pub unk2c: EXRelPtr<()>,                   // ???, 0x2c
     pub hash_ref: u32,                         // 0x30
     pub section: u32,                          // 0x34
-    pub unk38: [u32; 10],                      // 0x38
-    #[br(if(version.ne(&213) && version.ne(&221) && version.ne(&177) && version.ne(&240)))]
-    pub unk60: [u32; 2],
-    pub bounds_box: [EXVector3; 2], // 0x60
-    pub unk80: u32,                 // 0x80
+    pub unk38: [u32; 10],                      // 0x38..0x5f
 
-    // Robots has 8 less bytes
-    #[br(if(!version.le(&248) || (version.eq(&213) || version.eq(&221) || version.eq(&177) || version.eq(&240))))]
-    pub unk84: [u32; 2], // 0x84
+    // Robots v248 omits these two pre-bounds dwords. Its bounds begin at +0x60.
+    // Later layouts retain the pair and therefore begin their bounds at +0x68.
+    #[br(if(version.ne(&248) && version.ne(&213) && version.ne(&221) && version.ne(&177) && version.ne(&240)))]
+    pub unk60: [u32; 2],
+    pub bounds_box: [EXVector3; 2],
+    pub unk_after_bounds: u32,
+
+    // Robots v248 keeps three dwords after the +0x60 bounds, producing the
+    // instruction- and byte-proven 0x84 serialized stride.
+    #[br(if(version.eq(&248)))]
+    pub robots_unk7c_80: [u32; 2],
+
+    #[br(if(!version.le(&248) || version.eq(&213) || version.eq(&221) || version.eq(&177) || version.eq(&240)))]
+    pub unk84: [u32; 2],
 }
 
 #[binrw]

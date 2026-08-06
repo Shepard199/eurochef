@@ -91,7 +91,8 @@ impl EntityListPanel {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = [16., 16.].into();
             for (ii, (i, err)) in ids.iter().enumerate() {
-                ui.allocate_ui(egui::Vec2::new(256., 256. + 20.), |ui| {
+                let resource_label = format_hashcode_with_id(&self.hashcodes, *i);
+                ui.allocate_ui(egui::Vec2::new(256., 256. + 48.), |ui| {
                     ui.spacing_mut().item_spacing = [4., 4.].into();
                     ui.vertical(|ui| {
                         if let Some(err) = err {
@@ -113,7 +114,7 @@ impl EntityListPanel {
                             );
 
                             response.on_hover_ui(|ui| {
-                                ui.label(format!("Entity {i:x} failed:"));
+                                ui.label(format!("{resource_label} failed:"));
                                 ui.colored_label(
                                     Color32::LIGHT_RED,
                                     cutoff_string(strip_ansi_codes(err), 1024),
@@ -157,19 +158,16 @@ impl EntityListPanel {
                         };
 
                         let response = response.on_hover_ui(|ui| {
-                            ui.label(format!("Index: {ii}\nHashcode: {i:08x}"));
+                            ui.label(format!(
+                                "{resource_label}\nIndex: {ii}\nHashcode: 0x{i:08X}"
+                            ));
                         });
 
                         if response
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .clicked()
                         {
-                            self.entity_label = match ty {
-                                0 => format!("Entity {:x}", i),
-                                1 => format!("Ref Entity {}", i),
-                                2 => format!("Animation Skin {:x}", i),
-                                _ => unreachable!(),
-                            };
+                            self.entity_label = resource_label.clone();
 
                             if ty != 2 {
                                 self.entity_renderer = Some(EntityFrame::new(
@@ -235,31 +233,29 @@ impl EntityListPanel {
                             }
                         }
 
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             match ty {
                                 2 => {
                                     ui.colored_label(
                                         egui::Rgba::from_srgba_premultiplied(255, 130, 55, 255),
                                         fa::WALKING.to_string(),
                                     );
-                                    ui.label(RichText::new(format!("{i:x}")).strong());
                                 }
                                 1 => {
                                     ui.colored_label(
                                         egui::Rgba::from_srgba_premultiplied(55, 160, 0, 255),
                                         "\u{e52f}",
                                     );
-                                    ui.label(RichText::new(format!("ref_{i}")).strong());
                                 }
                                 0 => {
                                     ui.colored_label(
                                         egui::Rgba::from_srgba_premultiplied(55, 160, 255, 255),
                                         fa::CUBE.to_string(),
                                     );
-                                    ui.label(RichText::new(format!("{i:x}")).strong());
                                 }
                                 _ => {}
                             };
+                            ui.label(RichText::new(&resource_label).strong());
                         });
                     });
                 });
@@ -351,6 +347,8 @@ impl EntityListPanel {
 
                     if meshes.len() == 1 {
                         let mut er = EntityRenderer::new(self.file, self.platform);
+                        er.opaque_effect_preview = true;
+                        er.show_hidden_geometry = true;
                         er.load_mesh(&self.gl, meshes[0]);
                         er.draw_both(
                             &self.gl,
@@ -366,6 +364,8 @@ impl EntityListPanel {
                             .iter()
                             .map(|m| {
                                 let mut er = EntityRenderer::new(self.file, self.platform);
+                                er.opaque_effect_preview = true;
+                                er.show_hidden_geometry = true;
                                 er.load_mesh(&self.gl, m);
                                 er
                             })

@@ -115,6 +115,14 @@ enum EdbCommand {
         /// Output folder (default: "./particle_corpus_report/")
         output_folder: Option<String>,
     },
+    /// Build a canonical textures/animations/scripts/entities atlas from a pipeline manifest
+    ResourceAtlas {
+        /// Pipeline manifest.tsv containing EDB UID and source path columns
+        manifest: String,
+
+        /// Output folder (default: "./resource_atlas/")
+        output_folder: Option<String>,
+    },
     /// Build a shipped-corpus AnimScript health report from a pipeline manifest
     ScriptHealth {
         /// Pipeline manifest.tsv containing EDB UID and source path columns
@@ -150,6 +158,42 @@ enum EdbCommand {
 
         /// Output folder (default: "./anim_binding_corpus_report/")
         output_folder: Option<String>,
+    },
+    /// Export Robots character models and animation-only clips through Autodesk FBX SDK
+    FbxCharacters {
+        /// .edb file containing AnimSkin character resources
+        filename: String,
+
+        /// Output folder (default: "./fbx/{filename}/")
+        output_folder: Option<String>,
+
+        /// Override for platform detection; only the proved PC layout is supported
+        #[arg(value_enum, short, long, ignore_case = true)]
+        platform: Option<PlatformArg>,
+
+        /// Explicit path to fbx_export_helper.exe
+        #[arg(long)]
+        exporter: Option<String>,
+
+        /// Keep the canonical .ecfbx and .fbxscene.json intermediate files
+        #[arg(long)]
+        keep_ir: bool,
+
+        /// Build and validate only the canonical character/animation IR; do not invoke Autodesk FBX SDK
+        #[arg(long)]
+        ir_only: bool,
+
+        /// Manifest of all EDB files used to resolve map/Script Animation and AnimSkin references across files
+        #[arg(long)]
+        script_manifest: Option<String>,
+
+        /// Explicit FPS for clips with no valid in-EDB AnimScript timing reference
+        #[arg(long)]
+        unreferenced_animation_fps: Option<f32>,
+
+        /// Replace existing FBX and report files
+        #[arg(long)]
+        overwrite: bool,
     },
     /// Extract textures
     Textures {
@@ -275,6 +319,10 @@ fn handle_edb(cmd: EdbCommand) -> anyhow::Result<()> {
             manifest,
             output_folder,
         } => edb::particle_report::execute_command(manifest, output_folder),
+        EdbCommand::ResourceAtlas {
+            manifest,
+            output_folder,
+        } => edb::resource_atlas::execute_command(manifest, output_folder),
         EdbCommand::ScriptHealth {
             manifest,
             output_folder,
@@ -292,6 +340,27 @@ fn handle_edb(cmd: EdbCommand) -> anyhow::Result<()> {
             manifest,
             output_folder,
         } => edb::anim_binding_report::execute_command(manifest, output_folder),
+        EdbCommand::FbxCharacters {
+            filename,
+            output_folder,
+            platform,
+            exporter,
+            keep_ir,
+            ir_only,
+            script_manifest,
+            unreferenced_animation_fps,
+            overwrite,
+        } => edb::fbx_characters::execute_command(
+            filename,
+            platform,
+            output_folder,
+            exporter,
+            keep_ir,
+            ir_only,
+            script_manifest,
+            unreferenced_animation_fps,
+            overwrite,
+        ),
         EdbCommand::Spreadsheets {
             filename,
             output_folder,

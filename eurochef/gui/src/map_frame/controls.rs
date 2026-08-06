@@ -9,6 +9,18 @@ impl MapFrame {
         let Some(current_map) = maps.get(self.selected_map) else {
             return Ok(());
         };
+        let camera_position = {
+            let mut viewer = self.viewer.lock();
+            viewer.camera_mut().position()
+        };
+        let active_zone_index =
+            robots_map_zone_index_by_bounds(current_map.zones.len(), camera_position, |index| {
+                let zone = &current_map.zones[index];
+                (
+                    Vec3::from(zone.bounds_box[0]),
+                    Vec3::from(zone.bounds_box[1]),
+                )
+            });
 
         self.textfield_focused = false;
         let mut render_options_changed = false;
@@ -70,6 +82,7 @@ impl MapFrame {
                                 }
                             }
                         });
+                        ui.monospace(&self.sky_diagnostic);
 
                         render_options_changed |= ui
                             .checkbox(&mut self.vertex_lighting, "Vertex Lighting")
@@ -155,9 +168,217 @@ impl MapFrame {
                             });
                     });
 
+                egui::CollapsingHeader::new("Map runtime")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.checkbox(
+                            &mut self.preview_zone_background,
+                            "Serialized zone background preview",
+                        )
+                        .on_hover_text(
+                            "Clears the map viewport with EXGeoIdentifier.rgba_back_ground from the exact active MapZone. This is a direct serialized preview; native fog composition remains separate.",
+                        );
+                        ui.checkbox(&mut self.show_portals, "Portals")
+                            .on_hover_text("Draws the four serialized EXGeoPortal boundary edges. Portal traversal and level-state transfer are not fabricated.");
+                        ui.monospace(format!(
+                            "Camera [{:.3}, {:.3}, {:.3}]  active zone {}",
+                            camera_position.x,
+                            camera_position.y,
+                            camera_position.z,
+                            active_zone_index
+                                .map(|index| index.to_string())
+                                .unwrap_or_else(|| "none".to_string())
+                        ));
+
+                        if let Some(trigger_index) = self.active_camera_trigger {
+                            if let Some(plan) =
+                                robots_camera_controller_plan(current_map, trigger_index)
+                            {
+                                ui.monospace(format!(
+                                    "Active XTrigger_Camera #{}  {}",
+                                    trigger_index,
+                                    plan.setup_kind.description(),
+                                ));
+                                ui.monospace(format!(
+                                    "flags=0x{:08X} tested=0x{:03X} data3(raw)=0x{:08X} data4/5(scaled)={:?}/{:?}",
+                                    plan.flags,
+                                    plan.native_tested_flags,
+                                    plan.controller_data3_raw,
+                                    plan.scaled_data4,
+                                    plan.scaled_data5,
+                                ));
+                                if let Some(marker_index) = plan.linked_marker_index {
+                                    ui.monospace(format!(
+                                        "first linked Camera Marker #{} position={:?}",
+                                        marker_index, plan.linked_marker_position,
+                                    ));
+                                }
+                                if let Some(yaw) = plan.mode1_yaw_radians {
+                                    ui.monospace(format!(
+                                        "mode1 native yaw atan2+2pi={:.6} rad",
+                                        yaw,
+                                    ));
+                                }
+                                if plan.mode == 3 {
+                                    ui.monospace(format!(
+                                        "mode3 player substitutions: Y={} XZ={}",
+                                        plan.mode3_override_player_y,
+                                        plan.mode3_override_player_xz,
+                                    ));
+                                }
+                                if plan.mode == 4 {
+                                    ui.monospace(format!(
+                                        "mode4 path={:?} data6/7(raw float)={:?}/{:?} option flags=0x{:02X}",
+                                        plan.path_hashcode,
+                                        plan.mode4_data6,
+                                        plan.mode4_data7,
+                                        plan.mode4_option_flags,
+                                    ));
+                                }
+                                ui.small(
+                                    "This mirrors the native controller command plan. It does not pretend that the editor owns the game's player/camera-controller state.",
+                                );
+                            } else {
+                                ui.monospace("Active XTrigger_Camera: stale or invalid controller plan");
+                            }
+                        } else {
+                            ui.monospace("Active XTrigger_Camera: none");
+                        }
+
+                        if let Some(zone_index) = active_zone_index {
+                            let identifier = &current_map.zones[zone_index].identifier;
+                            ui.separator();
+                            ui.monospace(format!(
+                                "zone {} sky={} fog_method={} fog near/far={:.3}/{:.3} min/max={:.3}/{:.3}",
+                                zone_index,
+                                identifier.sky_index,
+                                identifier.fog_method,
+                                identifier.fog_near,
+                                identifier.fog_far,
+                                identifier.fog_min,
+                                identifier.fog_max,
+                            ));
+                            ui.monospace(format!(
+                                "camera distance/elevation={:.3}/{:.3} ambience={:.6}",
+                                identifier.camera_distance,
+                                identifier.camera_elevation,
+                                identifier.ambience,
+                            ));
+                            ui.monospace(format!(
+                                "flags=0x{:04X} effects=0x{:04X} background={:02X}{:02X}{:02X}{:02X} fog={:02X}{:02X}{:02X}{:02X}",
+                                identifier.flags,
+                                identifier.effect_flags,
+                                identifier.rgba_back_ground[0],
+                                identifier.rgba_back_ground[1],
+                                identifier.rgba_back_ground[2],
+                                identifier.rgba_back_ground[3],
+                                identifier.rgba_fog[0],
+                                identifier.rgba_fog[1],
+                                identifier.rgba_fog[2],
+                                identifier.rgba_fog[3],
+                            ));
+                        }
+
+                        if let Some(zone_index) = active_zone_index {
+                            let connections = current_map
+                                .portals
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(portal_index, portal)| {
+                                    robots_portal_neighbor_zone(
+                                        portal,
+                                        zone_index,
+                                        current_map.zones.len(),
+                                    )
+                                    .map(|neighbor| (portal_index, neighbor, portal))
+                                })
+                                .collect::<Vec<_>>();
+                            ui.monospace(format!(
+                                "active zone portal connections: {}",
+                                connections.len()
+                            ));
+                            for (portal_index, neighbor, portal) in connections.iter().take(16) {
+                                ui.monospace(format!(
+                                    "portal #{} -> zone {} flags=0x{:04X} distance={:.3}",
+                                    portal_index, neighbor, portal.flags, portal.distance,
+                                ));
+                            }
+                            if connections.len() > 16 {
+                                ui.label(format!("… and {} more", connections.len() - 16));
+                            }
+                        }
+
+                        ui.separator();
+                        ui.label(format!(
+                            "Serialized cameras {}  portals {}  placement groups {}  isounds {}",
+                            current_map.cameras.len(),
+                            current_map.portals.len(),
+                            current_map.placement_group_count,
+                            current_map.isounds.len(),
+                        ));
+                        egui::CollapsingHeader::new("Serialized cameras")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for (index, camera) in current_map.cameras.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("Jump").on_hover_text(
+                                            "Editor-only viewport jump to the exact serialized position/look vector. This is not XTrigger_Camera gameplay interpolation.",
+                                        ).clicked() {
+                                            self.viewer
+                                                .lock()
+                                                .set_fly_camera_pose(camera.position, camera.look);
+                                        }
+                                        ui.monospace(format!(
+                                            "#{} 0x{:08X} pos=[{:.2},{:.2},{:.2}] look=[{:.3},{:.3},{:.3}] flags=0x{:08X} focal={:.3} aperture={:.3}x{:.3}",
+                                            index,
+                                            camera.hashcode,
+                                            camera.position.x,
+                                            camera.position.y,
+                                            camera.position.z,
+                                            camera.look.x,
+                                            camera.look.y,
+                                            camera.look.z,
+                                            camera.flags,
+                                            camera.focal_length,
+                                            camera.aperture_width,
+                                            camera.aperture_height,
+                                        ));
+                                    });
+                                }
+                            });
+                        egui::CollapsingHeader::new("Serialized portals")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for (index, portal) in current_map.portals.iter().enumerate() {
+                                    ui.monospace(format!(
+                                        "#{} endpoints={}/{} flags=0x{:04X} distance={:.3} face common=0x{:08X} tex=0x{:08X} flags=0x{:08X} vertices={}",
+                                        index,
+                                        portal.map_a,
+                                        portal.map_b,
+                                        portal.flags,
+                                        portal.distance,
+                                        portal.face_common,
+                                        portal.face_texture_ref,
+                                        portal.face_flags,
+                                        portal.face_vertices.len(),
+                                    ));
+                                }
+                            });
+                        if !current_map.isounds.is_empty() {
+                            ui.monospace(format!("Raw isounds: {:?}", current_map.isounds));
+                        }
+                    });
+
                 egui::CollapsingHeader::new("Geometry")
                     .default_open(true)
                     .show(ui, |ui| {
+                        render_options_changed |= ui
+                            .checkbox(
+                                &mut self.show_flag_0x10_geometry,
+                                "Geometry with strip flag 0x10",
+                            )
+                            .on_hover_text("Shows or hides geometry whose serialized strip flags contain bit 0x10. It is loaded and visible by default; the bit is not treated as permission to discard it.")
+                            .changed();
                         render_options_changed |= ui
                             .checkbox(&mut self.show_navmesh, "NavMesh")
                             .on_hover_text("Shows or hides the already loaded 0x607 NavMesh without reloading the map.")
@@ -306,6 +527,14 @@ impl MapFrame {
                                 .speed(0.05)
                                 .prefix("Script speed "),
                         );
+                        ui.add_enabled(
+                            self.animate_scripts,
+                            egui::DragValue::new(&mut self.fan_runtime_value)
+                                .range(-10_000..=10_000)
+                                .speed(1)
+                                .prefix("Fan XItem +0x6C "),
+                        )
+                        .on_hover_text("Explicit gameplay-runtime input for XItemHandler_FanHorizontal. The value is not serialized by the standalone AnimScript or proven to come from a FanHorizontal trigger data slot.");
                         ui.checkbox(&mut self.particle_settings.enabled, "Native Particles")
                             .on_hover_text("Uses native EXParticleSys simulation: serialized rate and pool, lifetime variance, emitter box, angular/speed distribution, acceleration, damping, render selectors and appended RGBA/scale/rotation curves.");
                     });

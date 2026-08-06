@@ -82,10 +82,22 @@ impl MapFrame {
             (camera_pos, camera_rotation)
         };
 
+        let active_zone_index =
+            robots_map_zone_index_by_bounds(map.zones.len(), camera_pos, |index| {
+                let zone = &map.zones[index];
+                (
+                    Vec3::from(zone.bounds_box[0]),
+                    Vec3::from(zone.bounds_box[1]),
+                )
+            });
+        let zone_background_color =
+            active_zone_index.map(|index| map.zones[index].identifier.rgba_back_ground);
+
         self.sync_map_ambient_audio(
             map,
             self.file,
             script_global_time,
+            runtime_time,
             camera_pos,
             camera_rotation,
             context,
@@ -93,7 +105,59 @@ impl MapFrame {
 
         // TODO(cohae): How do we get out of this situation
         let map = map.clone(); // FIXME(cohae): ugh.
-        let sky_objects = map_sky_objects(&self.sky_ent, &map.skies);
+        let zone_skies = map
+            .zones
+            .iter()
+            .map(|zone| {
+                (
+                    Vec3::from(zone.bounds_box[0]),
+                    Vec3::from(zone.bounds_box[1]),
+                    zone.identifier.sky_index,
+                )
+            })
+            .collect::<Vec<_>>();
+        let sky_selection = map_sky_selection(&self.sky_ent, &map.skies, &zone_skies, camera_pos);
+        let sky_background_fallback = map_sky_background_fallback(&map.skies, sky_selection);
+        let sky_diagnostic = match sky_selection {
+            Some(selection) => format!(
+                "Camera [{:.3}, {:.3}, {:.3}]  zone={}  sky_index={}  object=0x{:08X}  {}",
+                camera_pos.x,
+                camera_pos.y,
+                camera_pos.z,
+                selection
+                    .zone_index
+                    .map(|index| index.to_string())
+                    .unwrap_or_else(|| "override".to_string()),
+                selection
+                    .sky_index
+                    .map(|index| index.to_string())
+                    .unwrap_or_else(|| "override".to_string()),
+                selection.object,
+                match (selection.zone_index, selection.contains_camera) {
+                    (None, _) => "override",
+                    (Some(0), false) => "zone0-fallback",
+                    (Some(_), true) => "inside",
+                    _ => "selected",
+                }
+            ),
+            None => format!(
+                "Camera [{:.3}, {:.3}, {:.3}]  no zone assembly; background_fallback={}",
+                camera_pos.x,
+                camera_pos.y,
+                camera_pos.z,
+                sky_background_fallback
+                    .map(|object| format!("0x{object:08X}"))
+                    .unwrap_or_else(|| "none".to_string())
+            ),
+        };
+        if self.sky_diagnostic != sky_diagnostic {
+            eprintln!("[Robots] map sky selection: {sky_diagnostic}");
+            self.sky_diagnostic = sky_diagnostic;
+        }
+        let sky_objects = sky_selection
+            .map(|selection| selection.object)
+            .into_iter()
+            .collect::<Vec<_>>();
         let default_trigger_icon = self.default_trigger_icon;
         let billboard_renderer = self.billboard_renderer.clone();
         let particle_renderer = self.particle_renderer.clone();
@@ -110,12 +174,15 @@ impl MapFrame {
         let platform_rotation_speed_scale = self.platform_rotation_speed_scale;
         let animate_scripts = self.animate_scripts;
         let script_playback_speed = self.script_playback_speed;
+        let fan_runtime_value = self.fan_runtime_value;
         let trigger_scale = self.trigger_scale;
         let sound_scale = self.sound_scale;
         let hovered_link = self.selected_link;
         let trigger_info = self.trigger_info.clone();
         let trigger_icons = self.trigger_icons.clone();
         let render_filter = self.render_filter;
+        let preview_zone_background = self.preview_zone_background;
+        let show_portals = self.show_portals;
         let global_lighting_enabled = self.global_lighting;
         let native_lights_enabled = self.native_lights;
         let native_light_strength = self.native_light_strength;
@@ -188,9 +255,25 @@ impl MapFrame {
             };
             v.uniforms.global_lightmap = lightmap;
             v.uniforms.native_lighting_triangles.clear();
+            if preview_zone_background {
+                if let Some(rgba) = zone_background_color {
+                    painter.gl().clear_color(
+                        rgba[0] as f32 / 255.0,
+                        rgba[1] as f32 / 255.0,
+                        rgba[2] as f32 / 255.0,
+                        rgba[3] as f32 / 255.0,
+                    );
+                    painter.gl().clear(glow::COLOR_BUFFER_BIT);
+                }
+            }
             v.start_render(painter.gl(), info.viewport.aspect_ratio(), time as f32);
             let mut sky_uniforms = v.uniforms.clone();
+            // Only camera-relative members stay in the unlit sky pass. Map-space
+            // facade/decor members are transferred into the ordinary scene queue.
             sky_uniforms.global_lighting_enabled = false;
+            sky_uniforms.global_lighting = None;
+            sky_uniforms.global_lightmap = None;
+            sky_uniforms.native_lights_enabled = false;
             let sky_render_context = RenderContext {
                 shaders: &v.shaders,
                 uniforms: &sky_uniforms,
@@ -202,31 +285,50 @@ impl MapFrame {
                 lighting_key: 0,
             };
 
-            let mut sky_queue = Vec::<QueuedEntityRender>::new();
-            for sky in &sky_objects {
+            let base_sky = map.skies.first().copied();
+            let mut sky_queue = Vec::<(QueuedEntityRender, bool, bool)>::new();
+            for (sky, background_only) in sky_objects
+                .iter()
+                .copied()
+                .map(|sky| (sky, false))
+                .chain(sky_background_fallback.into_iter().map(|sky| (sky, true)))
+            {
                 match sky.base() {
-                    0x02000000 => sky_queue.push(QueuedEntityRender {
-                        entity: (current_file, *sky),
-                        entity_alt: None,
-                        position: camera_pos,
-                        rotation: Quat::IDENTITY,
-                        scale: Vec3::ONE,
-                    }),
+                    0x02000000 => sky_queue.push((
+                        QueuedEntityRender {
+                            entity: (current_file, sky),
+                            entity_alt: None,
+                            position: camera_pos,
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::ONE,
+                        },
+                        background_only,
+                        base_sky == Some(sky),
+                    )),
                     0x04000000 => {
                         let sky_time = render_store
                             .read()
-                            .get_script(current_file, *sky)
+                            .get_script(current_file, sky)
                             .map(|script| script.time_at_frame(1.0))
                             .unwrap_or_default();
+                        let native_scaled_source = base_sky == Some(sky);
+                        let mut root_member = true;
                         render_static_script(
                             camera_pos,
                             Quat::IDENTITY,
                             Vec3::ONE,
                             current_file,
-                            *sky,
+                            sky,
                             sky_time,
                             &render_store.read(),
-                            &mut |q| sky_queue.push(q),
+                            &mut |queued| {
+                                sky_queue.push((
+                                    queued,
+                                    background_only,
+                                    native_scaled_source && root_member,
+                                ));
+                                root_member = false;
+                            },
                             vec![],
                         );
                     }
@@ -234,29 +336,49 @@ impl MapFrame {
                 }
             }
 
+            let mut sky_world_queue = Vec::<QueuedEntityRender>::new();
             painter.gl().depth_mask(false);
-            for queued in &sky_queue {
-                if let Some(entity) = render_store
-                    .read()
-                    .get_entity(queued.entity.0, queued.entity.1)
-                {
+            for (queued, background_only, root_member) in &sky_queue {
+                let store = render_store.read();
+                if let Some(entity) = store.get_entity(queued.entity.0, queued.entity.1) {
+                    let (position, scale, class) = map_sky_entity_transform(
+                        camera_pos,
+                        queued.position,
+                        queued.scale,
+                        entity.entity_flags(),
+                        *root_member,
+                    );
+                    if *background_only && class == MapSkyEntityClass::WorldSpace {
+                        continue;
+                    }
+                    let transformed = QueuedEntityRender {
+                        entity: queued.entity,
+                        entity_alt: queued.entity_alt.clone(),
+                        position,
+                        rotation: queued.rotation,
+                        scale,
+                    };
+                    if class == MapSkyEntityClass::WorldSpace {
+                        sky_world_queue.push(transformed);
+                        continue;
+                    }
                     entity.draw_opaque(
                         painter.gl(),
                         &sky_render_context,
-                        queued.position,
-                        queued.rotation,
-                        queued.scale,
+                        transformed.position,
+                        transformed.rotation,
+                        transformed.scale,
                         time,
-                        &render_store.read(),
+                        &store,
                     );
                     entity.draw_transparent(
                         painter.gl(),
                         &sky_render_context,
-                        queued.position,
-                        queued.rotation,
-                        queued.scale,
+                        transformed.position,
+                        transformed.rotation,
+                        transformed.scale,
                         time,
-                        &render_store.read(),
+                        &store,
                     );
                 }
             }
@@ -298,18 +420,14 @@ impl MapFrame {
                             scale,
                         }),
                         0x0400_0000 => {
-                            let script_time = render_store
-                                .read()
-                                .get_script(current_file, p.object_ref)
-                                .map(|script| {
-                                    map_script_time(
-                                        script,
-                                        script_global_time,
-                                        animate_scripts,
-                                        script_playback_speed,
-                                    )
-                                })
-                                .unwrap_or_default();
+                            let script_time = resolved_map_script_time(
+                                &render_store.read(),
+                                current_file,
+                                p.object_ref,
+                                script_global_time,
+                                animate_scripts,
+                                script_playback_speed,
+                            );
                             render_script(
                                 position,
                                 rotation,
@@ -379,18 +497,14 @@ impl MapFrame {
                                 let assembly =
                                     render_store.read().find_assembly_script(visual_file, v);
                                 if let Some(script_hashcode) = assembly {
-                                    let script_time = render_store
-                                        .read()
-                                        .get_script(visual_file, script_hashcode)
-                                        .map(|script| {
-                                            map_script_time(
-                                                script,
-                                                script_global_time,
-                                                animate_scripts,
-                                                script_playback_speed,
-                                            )
-                                        })
-                                        .unwrap_or(0.0);
+                                    let script_time = resolved_map_script_time(
+                                        &render_store.read(),
+                                        visual_file,
+                                        script_hashcode,
+                                        script_global_time,
+                                        animate_scripts,
+                                        script_playback_speed,
+                                    );
                                     let queue_start = render_queue.len();
                                     render_script(
                                         trigger_position,
@@ -493,18 +607,14 @@ impl MapFrame {
                                     v,
                                     t.engine_options.visual_object_file,
                                 );
-                                let script_time = render_store
-                                    .read()
-                                    .get_script(visual_file, v)
-                                    .map(|script| {
-                                        map_script_time(
-                                            script,
-                                            script_global_time,
-                                            animate_scripts,
-                                            script_playback_speed,
-                                        )
-                                    })
-                                    .unwrap_or(0.0);
+                                let script_time = resolved_map_script_time(
+                                    &render_store.read(),
+                                    visual_file,
+                                    v,
+                                    script_global_time,
+                                    animate_scripts,
+                                    script_playback_speed,
+                                );
 
                                 let queue_start = render_queue.len();
 
@@ -544,45 +654,111 @@ impl MapFrame {
                         }
                     }
 
-                    // ROBOTS_PATCH_0027_RENDER_PICKUP_VISUAL
+                    // Render the native uncollected Pickup state. Complete pickup
+                    // Scripts own multi-Entity assemblies and idle particles; direct
+                    // entities remain for the few PC assets without a world Script.
                     if !resolved_trigger_visuals[i] {
                         if let Some(pickup) = robots_pickup_visual(t.ttype, &t.data) {
-                            if render_store
-                                .read()
-                                .get_entity(pickup.file, pickup.entity)
-                                .is_some()
-                            {
-                                let rotation = Quat::from_euler(
-                                    glam::EulerRot::ZXY,
-                                    t.rotation[2],
-                                    t.rotation[0],
-                                    t.rotation[1],
-                                );
-
-                                render_queue.push(QueuedEntityRender {
-                                    entity: (pickup.file, pickup.entity),
-                                    entity_alt: None,
-                                    position: trigger_position,
-                                    rotation,
-                                    scale: t.scale * pickup.scale,
-                                });
-                                resolved_trigger_visuals[i] = true;
+                            let rotation = Quat::from_euler(
+                                glam::EulerRot::ZXY,
+                                t.rotation[2],
+                                t.rotation[0],
+                                t.rotation[1],
+                            );
+                            match pickup.object.base() {
+                                0x04000000 => {
+                                    // Frame 1 is the uncollected idle state. Advancing
+                                    // beyond opcode 0x10 would incorrectly play the
+                                    // collection branch without a gameplay event.
+                                    let script_time = render_store
+                                        .read()
+                                        .get_script(pickup.file, pickup.object)
+                                        .map(|script| script.time_at_frame(1.0))
+                                        .unwrap_or(0.0);
+                                    let queue_start = render_queue.len();
+                                    render_script(
+                                        trigger_position,
+                                        rotation,
+                                        t.scale * pickup.scale,
+                                        pickup.file,
+                                        pickup.object,
+                                        script_time,
+                                        &render_store.read(),
+                                        &mut |q| render_queue.push(q),
+                                        vec![],
+                                    );
+                                    collect_script_particles(
+                                        trigger_position,
+                                        rotation,
+                                        t.scale * pickup.scale,
+                                        pickup.file,
+                                        pickup.object,
+                                        script_time,
+                                        &render_store.read(),
+                                        &mut particle_queue,
+                                        vec![],
+                                    );
+                                    // Do not hide the trigger placeholder for a broken
+                                    // Script closure that produced particles but no model.
+                                    resolved_trigger_visuals[i] = render_queue.len() > queue_start;
+                                }
+                                0x02000000 => {
+                                    if render_store
+                                        .read()
+                                        .get_entity(pickup.file, pickup.object)
+                                        .is_some()
+                                    {
+                                        render_queue.push(QueuedEntityRender {
+                                            entity: (pickup.file, pickup.object),
+                                            entity_alt: None,
+                                            position: trigger_position,
+                                            rotation,
+                                            scale: t.scale * pickup.scale,
+                                        });
+                                        resolved_trigger_visuals[i] = true;
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
 
+                    // Monster/NPC/Fish triggers do not serialize visual_object.
+                    // Robots.exe resolves data[0] through d00_mons.edb and creates
+                    // an XItem from the selected external character EDB. Queue the
+                    // first shipped local Animation Script as a static complete
+                    // model preview; gameplay AI and animation-state selection stay
+                    // outside this geometry reconstruction.
+                    if !resolved_trigger_visuals[i] {
+                        if let Some(character) = &t.character_visual {
+                            let rotation = Quat::from_euler(
+                                glam::EulerRot::ZXY,
+                                t.rotation[2],
+                                t.rotation[0],
+                                t.rotation[1],
+                            );
+                            let queue_start = render_queue.len();
+                            render_static_script(
+                                trigger_position,
+                                rotation,
+                                t.scale,
+                                character.file,
+                                character.script,
+                                0.0,
+                                &render_store.read(),
+                                &mut |queued| render_queue.push(queued),
+                                vec![],
+                            );
+                            resolved_trigger_visuals[i] = render_queue.len() > queue_start;
+                        }
+                    }
+
                     if t.ttype == 34 {
-                        let runtime_value = t
-                            .data
-                            .first()
-                            .copied()
-                            .flatten()
-                            .unwrap_or_default() as i32;
                         let angle = if animate_scripts {
                             advance_native_fan_angle(
                                 0.0,
                                 script_global_time,
-                                runtime_value,
+                                fan_runtime_value,
                                 script_playback_speed,
                             )
                         } else {
@@ -598,6 +774,19 @@ impl MapFrame {
             }
 
             if render_filter.contains(RenderFilter::Opaque) {
+                for r in &sky_world_queue {
+                    if let Some(e) = render_store.read().get_entity(r.entity.0, r.entity.1) {
+                        e.draw_opaque(
+                            painter.gl(),
+                            &sky_render_context,
+                            r.position,
+                            r.rotation,
+                            r.scale,
+                            time,
+                            &render_store.read(),
+                        );
+                    }
+                }
                 for (render_index, r) in render_queue.iter().enumerate() {
                     let keyed_context = RenderContext {
                         shaders: render_context.shaders,
@@ -633,6 +822,19 @@ impl MapFrame {
             painter.gl().depth_mask(false);
 
             if render_filter.contains(RenderFilter::Transparent) {
+                for r in &sky_world_queue {
+                    if let Some(e) = render_store.read().get_entity(r.entity.0, r.entity.1) {
+                        e.draw_transparent(
+                            painter.gl(),
+                            &sky_render_context,
+                            r.position,
+                            r.rotation,
+                            r.scale,
+                            time,
+                            &render_store.read(),
+                        );
+                    }
+                }
                 for (render_index, r) in render_queue.iter().enumerate() {
                     let keyed_context = RenderContext {
                         shaders: render_context.shaders,
@@ -677,6 +879,29 @@ impl MapFrame {
                         particle_settings,
                         &store,
                     );
+                }
+            }
+
+            if show_portals {
+                painter.gl().depth_mask(true);
+                for portal in &map.portals {
+                    let colour = if active_zone_index.is_some_and(|zone_index| {
+                        robots_portal_neighbor_zone(portal, zone_index, map.zones.len()).is_some()
+                    }) {
+                        Vec3::new(1.0, 0.55, 0.15)
+                    } else {
+                        Vec3::new(0.2, 0.85, 1.0)
+                    };
+                    for edge in 0..4usize {
+                        link_renderer.render(
+                            painter.gl(),
+                            &render_context,
+                            portal.vertices[edge],
+                            portal.vertices[(edge + 1) % 4],
+                            colour,
+                            trigger_scale * 0.6,
+                        );
+                    }
                 }
             }
 

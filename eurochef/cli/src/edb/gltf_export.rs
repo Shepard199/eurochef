@@ -432,7 +432,10 @@ mod tests {
 
         let index_accessor = &root.accessors[primitive.indices.unwrap().value()];
         let index_view = &root.buffer_views[index_accessor.buffer_view.unwrap().value()];
-        let index_uri = root.buffers[index_view.buffer.value()].uri.as_ref().unwrap();
+        let index_uri = root.buffers[index_view.buffer.value()]
+            .uri
+            .as_ref()
+            .unwrap();
         let raw_indices = base64::engine::general_purpose::STANDARD
             .decode(index_uri.split_once(',').unwrap().1)
             .unwrap();

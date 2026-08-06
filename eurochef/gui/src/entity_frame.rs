@@ -20,6 +20,7 @@ pub struct EntityFrame {
     mesh_center: Vec3,
     vertex_lighting: bool,
     opaque_effect_preview: bool,
+    show_hidden_geometry: bool,
 }
 
 #[derive(Clone)]
@@ -50,6 +51,7 @@ impl EntityFrame {
             viewer: Arc::new(Mutex::new(BaseViewer::new(gl))),
             vertex_lighting: true,
             opaque_effect_preview: true,
+            show_hidden_geometry: true,
         };
 
         unsafe {
@@ -59,6 +61,7 @@ impl EntityFrame {
                     {
                         let mut renderer = r.lock();
                         renderer.opaque_effect_preview = true;
+                        renderer.show_hidden_geometry = true;
                         renderer.load_mesh(gl, m);
                     }
                     s.renderers.push(r);
@@ -68,6 +71,7 @@ impl EntityFrame {
                 {
                     let mut renderer = r.lock();
                     renderer.opaque_effect_preview = true;
+                    renderer.show_hidden_geometry = true;
                     s.mesh_center = renderer.load_mesh(gl, meshes[0]);
                 }
                 s.renderers.push(r);
@@ -100,6 +104,18 @@ impl EntityFrame {
             {
                 for r in &self.renderers {
                     r.lock().opaque_effect_preview = self.opaque_effect_preview;
+                }
+            }
+
+            if ui
+                .checkbox(&mut self.show_hidden_geometry, "Hidden/collision geometry")
+                .on_hover_text(
+                    "Shows strips carrying serialized flag 0x10 in the Entities inspector only. Maps keeps them hidden like the game.",
+                )
+                .changed()
+            {
+                for r in &self.renderers {
+                    r.lock().show_hidden_geometry = self.show_hidden_geometry;
                 }
             }
         });

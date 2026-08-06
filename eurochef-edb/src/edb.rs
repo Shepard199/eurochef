@@ -114,6 +114,17 @@ impl EdbFile {
         }
     }
 
+    /// Adds an explicitly cross-file reference without reclassifying a local
+    /// object hash as belonging to the current EDB. For example,
+    /// `o01_pick.edb:0x8200000B` is local to o01_pick, not to the map.
+    pub fn add_external_reference(&mut self, file: Hashcode, reference: Hashcode) {
+        if file == u32::MAX || file == self.header.hashcode {
+            self.add_reference_internal(reference);
+        } else if !self.external_references.contains(&(file, reference)) {
+            self.external_references.push((file, reference));
+        }
+    }
+
     pub fn add_reference_internal(&mut self, reference: u32) {
         if !self.internal_references.contains(&reference) {
             self.internal_references.push(reference);

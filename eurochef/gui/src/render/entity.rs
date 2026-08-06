@@ -5,7 +5,7 @@ use eurochef_shared::entities::{TriStrip, UXVertex};
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use glow::HasContext;
 
-use crate::entities::ProcessedEntityMesh;
+use crate::{entities::ProcessedEntityMesh, map_zone::robots_map_zone_index_by_bounds};
 
 use super::{
     blend::{set_blending_mode, BlendMode},
@@ -164,12 +164,9 @@ fn native_light_position_influence(light: &NativeLight, point: Vec3) -> f32 {
 }
 
 fn containing_native_light_zone(zones: &[NativeLightZone], object_position: Vec3) -> Option<usize> {
-    zones
-        .iter()
-        .enumerate()
-        .filter(|(_, zone)| zone.contains(object_position))
-        .min_by(|(_, a), (_, b)| a.volume().total_cmp(&b.volume()))
-        .map(|(index, _)| index)
+    robots_map_zone_index_by_bounds(zones.len(), object_position, |index| {
+        (zones[index].bounds_min, zones[index].bounds_max)
+    })
 }
 
 fn select_native_lights<'a>(
@@ -223,12 +220,14 @@ struct EntityMeshGpu {
 #[derive(Clone)]
 pub struct EntityRenderer {
     mesh: Option<EntityMeshGpu>,
+    serialized_vertex_count: Option<usize>,
     platform: Platform,
     flags: u32,
     navmesh_texture: Option<glow::Texture>,
     pub file_hashcode: Hashcode,
     pub vertex_lighting: bool,
     pub opaque_effect_preview: bool,
+    pub show_hidden_geometry: bool,
     pub navmesh_visible: bool,
     pub navmesh_texture_scale: f32,
     /// Exact EXGeoMapZone index for map-zone geometry. Dynamic objects leave this unset
@@ -243,17 +242,34 @@ impl EntityRenderer {
     pub fn new(file_hashcode: Hashcode, platform: Platform) -> Self {
         Self {
             mesh: None,
+            serialized_vertex_count: None,
             platform,
             flags: 0,
             navmesh_texture: None,
             vertex_lighting: true,
             opaque_effect_preview: false,
+            show_hidden_geometry: true,
             navmesh_visible: true,
             navmesh_texture_scale: 1.0 / 16.0,
             native_light_zone: None,
             native_light_sample_position: None,
             file_hashcode,
         }
+    }
+
+    pub fn has_renderable_geometry(&self) -> bool {
+        self.serialized_vertex_count
+            .map(|vertex_count| vertex_count > 0)
+            .unwrap_or(true)
+    }
+
+    pub fn entity_flags(&self) -> u32 {
+        self.flags
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_serialized_vertex_count_for_test(&mut self, vertex_count: usize) {
+        self.serialized_vertex_count = Some(vertex_count);
     }
 
     /// Returns the center of the model (average of all points)
@@ -267,6 +283,7 @@ impl EntityRenderer {
             ..
         } = mesh;
 
+        self.serialized_vertex_count = Some(vertex_data.len());
         let bounding_box = mesh.bounding_box();
         let center = (bounding_box.0 + bounding_box.1) / 2.0;
 
@@ -851,8 +868,10 @@ impl EntityRenderer {
             return;
         }
 
-        // Hide what is hidden
-        if (t.flags & 0x10) != 0 {
+        // Strip flag 0x10 is a distinct serialized render category, not permission
+        // to discard geometry. It remains visible by default and is only filtered
+        // when the user disables the dedicated map/entity checkbox.
+        if (t.flags & 0x10) != 0 && !self.show_hidden_geometry {
             return;
         }
 
@@ -993,19 +1012,25 @@ mod tests {
     }
 
     #[test]
-    fn smallest_containing_map_zone_selects_its_exact_light_indices() {
-        let lights = vec![light(3, 1.0), light(7, 2.0), light(11, 3.0)];
+    fn native_map_zone_order_selects_its_exact_light_indices() {
+        let lights = vec![light(3, 1.0), light(7, 2.0), light(11, 3.0), light(5, 4.0)];
         let zones = vec![
+            NativeLightZone {
+                bounds_min: Vec3::splat(-100.0),
+                bounds_max: Vec3::splat(100.0),
+                light_indices: vec![0, 2],
+                ambience: 0.0,
+            },
             NativeLightZone {
                 bounds_min: Vec3::splat(-10.0),
                 bounds_max: Vec3::splat(10.0),
-                light_indices: vec![0, 2],
+                light_indices: vec![1],
                 ambience: 0.0,
             },
             NativeLightZone {
                 bounds_min: Vec3::splat(-1.0),
                 bounds_max: Vec3::splat(1.0),
-                light_indices: vec![1],
+                light_indices: vec![3],
                 ambience: 0.0,
             },
         ];

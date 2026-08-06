@@ -9,9 +9,7 @@ use eurochef_edb::{
     binrw::BinReaderExt,
     edb::EdbFile,
     entity::{EXGeoEntity, EXGeoMapZoneEntity},
-    map::{
-        EXGeoLight, EXGeoMap, EXGeoPath, EXGeoPlacement, EXGeoSound, EXGeoTriggerEngineOptions,
-    },
+    map::{EXGeoLight, EXGeoMap, EXGeoPath, EXGeoPlacement, EXGeoSound, EXGeoTriggerEngineOptions},
     robots_provenance::{
         decode_script_create_flags, RobotsScriptCreateFlags, RobotsScriptCreatorProvenance,
         RobotsScriptSpawnFunctionProvenance, ROBOTS_PC_EXE_SHA256,

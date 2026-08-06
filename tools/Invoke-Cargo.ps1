@@ -7,6 +7,21 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+function Split-NativeCommandLine {
+    param([Parameter(Mandatory = $true)][string]$CommandLine)
+
+    $arguments = [System.Collections.Generic.List[string]]::new()
+    foreach ($match in [regex]::Matches($CommandLine, '(?:"([^"]*)"|(\S+))')) {
+        if ($match.Groups[1].Success) {
+            [void]$arguments.Add($match.Groups[1].Value)
+        }
+        else {
+            [void]$arguments.Add($match.Groups[2].Value)
+        }
+    }
+    return $arguments.ToArray()
+}
+
 $Root = Split-Path -Parent $PSScriptRoot
 $Initializer = Join-Path $PSScriptRoot 'Initialize-CargoEnvironment.ps1'
 if (-not (Test-Path -LiteralPath $Initializer -PathType Leaf)) {
@@ -14,7 +29,13 @@ if (-not (Test-Path -LiteralPath $Initializer -PathType Leaf)) {
 }
 
 $Context = & $Initializer -Root $Root -Quiet
-$Arguments = @($CargoArgs)
+[string[]]$Arguments = @()
+if (-not [string]::IsNullOrWhiteSpace($env:EUROCHEF_CARGO_COMMAND_LINE)) {
+    $Arguments = @(Split-NativeCommandLine -CommandLine $env:EUROCHEF_CARGO_COMMAND_LINE)
+}
+else {
+    $Arguments = @($CargoArgs)
+}
 
 if ($Arguments.Count -eq 0) {
     $Arguments = @('--version')

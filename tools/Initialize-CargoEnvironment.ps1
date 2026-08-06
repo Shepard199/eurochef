@@ -34,11 +34,68 @@ $ToolchainBin = Join-Path $ToolchainDirectory 'bin'
 $CargoExe = Join-Path $ToolchainBin 'cargo.exe'
 $RustcExe = Join-Path $ToolchainBin 'rustc.exe'
 $RustdocExe = Join-Path $ToolchainBin 'rustdoc.exe'
+$RustfmtExe = Join-Path $ToolchainBin 'rustfmt.exe'
+$CargoFmtExe = Join-Path $ToolchainBin 'cargo-fmt.exe'
 
 New-Item -ItemType Directory -Force -Path $CanonicalCargoHome, $TargetDirectory | Out-Null
 foreach ($required in @($CanonicalRustupHome, $CargoExe, $RustcExe, $RustdocExe)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Canonical portable Rust component is missing: $required"
+    }
+}
+
+if (-not (Test-Path -LiteralPath $RustfmtExe -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $CargoFmtExe -PathType Leaf)) {
+    $RustupCommand = Get-Command rustup.exe -ErrorAction SilentlyContinue
+    $RustupExe = if ($null -ne $RustupCommand) {
+        $RustupCommand.Source
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        Join-Path $env:USERPROFILE '.cargo\bin\rustup.exe'
+    }
+    else {
+        $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($RustupExe) -or
+        -not (Test-Path -LiteralPath $RustupExe -PathType Leaf)) {
+        throw "rustfmt is required by $ToolchainFile, but rustup.exe was not found to repair $ToolchainName"
+    }
+
+    $PreviousCargoHome = $env:CARGO_HOME
+    $PreviousRustupHome = $env:RUSTUP_HOME
+    try {
+        $env:CARGO_HOME = $CanonicalCargoHome
+        $env:RUSTUP_HOME = $CanonicalRustupHome
+        if (-not $Quiet) {
+            Write-Host "Installing missing rustfmt component for $ToolchainName..." -ForegroundColor DarkGray
+        }
+        $RustupProcess = Start-Process -FilePath $RustupExe `
+            -ArgumentList @('component', 'add', '--toolchain', $ToolchainName, 'rustfmt') `
+            -WorkingDirectory $Root -NoNewWindow -Wait -PassThru
+        if ($RustupProcess.ExitCode -ne 0) {
+            throw "rustup failed to install rustfmt for $ToolchainName (exit $($RustupProcess.ExitCode))"
+        }
+    }
+    finally {
+        if ($null -eq $PreviousCargoHome) {
+            Remove-Item Env:CARGO_HOME -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:CARGO_HOME = $PreviousCargoHome
+        }
+        if ($null -eq $PreviousRustupHome) {
+            Remove-Item Env:RUSTUP_HOME -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:RUSTUP_HOME = $PreviousRustupHome
+        }
+    }
+
+    foreach ($required in @($RustfmtExe, $CargoFmtExe)) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "rustup completed, but the canonical rustfmt component is still missing: $required"
+        }
     }
 }
 
@@ -51,6 +108,7 @@ $VariablesToClear = @(
     'RUSTDOCFLAGS',
     'CARGO_ENCODED_RUSTFLAGS',
     'CARGO_BUILD_RUSTFLAGS',
+    'CARGO_INCREMENTAL',
     'RUSTC_WRAPPER',
     'RUSTC_WORKSPACE_WRAPPER',
     'CARGO_BUILD_TARGET'
@@ -71,9 +129,24 @@ $env:CARGO_HOME = $CanonicalCargoHome
 $env:RUSTUP_HOME = $CanonicalRustupHome
 $env:RUSTUP_TOOLCHAIN = $ToolchainName
 $env:CARGO_TARGET_DIR = $TargetDirectory
-$env:CARGO_INCREMENTAL = '1'
 $env:RUSTC = $RustcExe
 $env:RUSTDOC = $RustdocExe
+
+# Release builds deliberately do not use incremental compilation. Cargo never
+# garbage-collects old incremental generations, so keeping it enabled for this
+# large GUI made target\release\incremental grow without a useful bound.
+$LegacyReleaseIncremental = Join-Path $TargetDirectory 'release\incremental'
+if (Test-Path -LiteralPath $LegacyReleaseIncremental -PathType Container) {
+    try {
+        Remove-Item -LiteralPath $LegacyReleaseIncremental -Recurse -Force -ErrorAction Stop
+        if (-not $Quiet) {
+            Write-Host "Removed obsolete release incremental cache: $LegacyReleaseIncremental" -ForegroundColor DarkGray
+        }
+    }
+    catch {
+        Write-Warning "Could not remove obsolete release incremental cache: $LegacyReleaseIncremental. $($_.Exception.Message)"
+    }
+}
 
 $PathParts = New-Object 'System.Collections.Generic.List[string]'
 foreach ($candidate in @($ToolchainBin, (Join-Path $CanonicalCargoHome 'bin'))) {
@@ -121,7 +194,7 @@ if ($RustcVersionLines.Count -eq 0 -or [string]::IsNullOrWhiteSpace($RustcVersio
 $RustcVersion = [string]$RustcVersionLines[0]
 
 $Context = [ordered]@{
-    schema = 1
+    schema = 2
     projectRoot = $Root
     cargoHome = $CanonicalCargoHome
     rustupHome = $CanonicalRustupHome
@@ -129,8 +202,12 @@ $Context = [ordered]@{
     cargo = $CargoExe
     rustc = $RustcExe
     rustcVersion = [string]$RustcVersion
+    rustfmt = $RustfmtExe
     targetDirectory = $TargetDirectory
-    incremental = $true
+    incremental = [ordered]@{
+        dev = $true
+        release = $false
+    }
     lockedDependencies = $true
 }
 $ContextJson = $Context | ConvertTo-Json -Depth 5
@@ -163,6 +240,8 @@ return [PSCustomObject]@{
     Cargo = $CargoExe
     Rustc = $RustcExe
     Rustdoc = $RustdocExe
+    Rustfmt = $RustfmtExe
+    CargoFmt = $CargoFmtExe
     CargoHome = $CanonicalCargoHome
     RustupHome = $CanonicalRustupHome
     Toolchain = $ToolchainName

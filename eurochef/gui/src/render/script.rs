@@ -8,6 +8,107 @@ use super::RenderStore;
 
 const MAX_SCRIPT_RECURSION_DEPTH: usize = 64;
 
+pub fn first_resolved_visual_time(
+    current_file: Hashcode,
+    script_hashcode: Hashcode,
+    render_store: &RenderStore,
+) -> Option<f32> {
+    fn visit(
+        current_file: Hashcode,
+        script_hashcode: Hashcode,
+        render_store: &RenderStore,
+        ancestry: &mut Vec<(Hashcode, Hashcode)>,
+    ) -> Option<f32> {
+        if ancestry.len() >= MAX_SCRIPT_RECURSION_DEPTH
+            || ancestry.contains(&(current_file, script_hashcode))
+        {
+            return None;
+        }
+        let script = render_store.get_script(current_file, script_hashcode)?;
+        ancestry.push((current_file, script_hashcode));
+
+        let mut first = None::<f32>;
+        for command in &script.commands {
+            let command_start = script.time_at_frame(command.start.max(0) as f32);
+            let candidate = match command.data {
+                UXGeoScriptCommandData::Entity { hashcode, file } => {
+                    let file = if file == u32::MAX || hashcode.is_local() {
+                        current_file
+                    } else {
+                        file
+                    };
+                    render_store
+                        .get_entity(file, hashcode)
+                        .filter(|entity| entity.has_renderable_geometry())
+                        .map(|_| command_start)
+                }
+                UXGeoScriptCommandData::Animation {
+                    skin_file,
+                    skin_hashcode,
+                    anim_file,
+                    anim_hashcode,
+                } => {
+                    let animation_file = if anim_file == u32::MAX || anim_hashcode.is_local() {
+                        current_file
+                    } else {
+                        anim_file
+                    };
+                    let explicit_skin_file = if skin_file == u32::MAX || skin_hashcode.is_local() {
+                        current_file
+                    } else {
+                        skin_file
+                    };
+                    let (resolved_skin_file, resolved_skin) = if skin_hashcode == u32::MAX {
+                        (
+                            animation_file,
+                            render_store
+                                .get_animation_runtime(animation_file)
+                                .and_then(|runtime| runtime.bound_skin_hashcode(anim_hashcode)),
+                        )
+                    } else {
+                        (explicit_skin_file, Some(skin_hashcode))
+                    };
+                    resolved_skin
+                        .filter(|skin| {
+                            render_store
+                                .get_animskin_entities(resolved_skin_file, *skin)
+                                .is_some_and(|entities| !entities.is_empty())
+                        })
+                        .map(|_| command_start)
+                }
+                UXGeoScriptCommandData::Particle { hashcode, file } => {
+                    let file = if file == u32::MAX || hashcode.is_local() {
+                        current_file
+                    } else {
+                        file
+                    };
+                    render_store
+                        .get_particle(file, hashcode)
+                        .map(|_| command_start)
+                }
+                UXGeoScriptCommandData::SubScript { hashcode, file } => {
+                    let file = if file == u32::MAX || hashcode.is_local() {
+                        current_file
+                    } else {
+                        file
+                    };
+                    visit(file, hashcode, render_store, ancestry)
+                        .map(|child_time| command_start + child_time)
+                }
+                _ => None,
+            };
+            if let Some(candidate) = candidate {
+                first = Some(first.map_or(candidate, |value| value.min(candidate)));
+            }
+        }
+
+        ancestry.pop();
+        first
+    }
+
+    visit(current_file, script_hashcode, render_store, &mut Vec::new())
+}
+
 fn command_controller(
     controllers: &[EXGeoAnimScriptControllerHeader],
     controller_header_index: u16,
@@ -325,26 +426,43 @@ fn render_script_with_mode<F>(
             UXGeoScriptCommandData::Animation {
                 skin_file,
                 skin_hashcode,
-                ..
+                anim_file,
+                anim_hashcode,
             } => {
                 if include_animation_geometry {
-                    let resolved_skin_file = if skin_file == u32::MAX || skin_hashcode.is_local() {
+                    let resolved_anim_file = if anim_file == u32::MAX || anim_hashcode.is_local() {
                         current_file
                     } else {
-                        skin_file
+                        anim_file
+                    };
+                    let (resolved_skin_file, resolved_skin_hashcode) = if skin_hashcode == u32::MAX
+                    {
+                        let bound_skin = render_store
+                            .get_animation_runtime(resolved_anim_file)
+                            .and_then(|runtime| runtime.bound_skin_hashcode(anim_hashcode));
+                        (resolved_anim_file, bound_skin)
+                    } else {
+                        let file = if skin_file == u32::MAX || skin_hashcode.is_local() {
+                            current_file
+                        } else {
+                            skin_file
+                        };
+                        (file, Some(skin_hashcode))
                     };
 
-                    if let Some(entity_hashcodes) =
-                        render_store.get_animskin_entities(resolved_skin_file, skin_hashcode)
-                    {
-                        for entity_hashcode in entity_hashcodes {
-                            render(QueuedEntityRender {
-                                entity: (resolved_skin_file, *entity_hashcode),
-                                entity_alt: None,
-                                position: position + rotation.mul_vec3(scale * transform.0),
-                                rotation: rotation * transform.1,
-                                scale: scale * transform.2,
-                            });
+                    if let Some(resolved_skin_hashcode) = resolved_skin_hashcode {
+                        if let Some(entity_hashcodes) = render_store
+                            .get_animskin_entities(resolved_skin_file, resolved_skin_hashcode)
+                        {
+                            for entity_hashcode in entity_hashcodes {
+                                render(QueuedEntityRender {
+                                    entity: (resolved_skin_file, *entity_hashcode),
+                                    entity_alt: None,
+                                    position: position + rotation.mul_vec3(scale * transform.0),
+                                    rotation: rotation * transform.1,
+                                    scale: scale * transform.2,
+                                });
+                            }
                         }
                     }
                 }
@@ -663,7 +781,8 @@ fn collect_script_particles_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eurochef_edb::script::EXGeoAnimScriptControllerChannels;
+    use crate::render::entity::EntityRenderer;
+    use eurochef_edb::{script::EXGeoAnimScriptControllerChannels, versions::Platform};
     use eurochef_shared::script::{UXGeoScript, UXGeoScriptCommand, UXGeoScriptCommandData};
 
     fn controller(x: f32) -> EXGeoAnimScriptControllerHeader {
@@ -687,6 +806,96 @@ mod tests {
             ctrl_channel_mask: 0,
             channels: EXGeoAnimScriptControllerChannels::default(),
         }
+    }
+
+    fn test_script(
+        hashcode: Hashcode,
+        length: u32,
+        commands: Vec<UXGeoScriptCommand>,
+    ) -> UXGeoScript {
+        UXGeoScript {
+            hashcode,
+            framerate: 30.0,
+            length,
+            num_threads: 1,
+            commands,
+            serialized_controller_count: 0,
+            controller_record_metadata: vec![],
+            controllers: vec![],
+            controller_group_indices: vec![],
+            controller_groups: vec![],
+        }
+    }
+
+    #[test]
+    fn first_resolved_visual_time_descends_into_subscripts() {
+        let file = 0x0100_001D;
+        let parent = 0x0400_1000;
+        let child = 0x0400_1001;
+        let entity = 0x0200_1234;
+        let zero_anchor = 0x0200_1235;
+        let mut store = RenderStore::new();
+        let mut visible_renderer = EntityRenderer::new(file, Platform::Pc);
+        visible_renderer.set_serialized_vertex_count_for_test(3);
+        store.insert_entity(file, entity, 0, visible_renderer);
+        let mut zero_renderer = EntityRenderer::new(file, Platform::Pc);
+        zero_renderer.set_serialized_vertex_count_for_test(0);
+        store.insert_entity(file, zero_anchor, 1, zero_renderer);
+        store.insert_script(
+            file,
+            test_script(
+                child,
+                90,
+                vec![UXGeoScriptCommand {
+                    opcode: 3,
+                    start: 30,
+                    length: 30,
+                    controller_header_index: u16::MAX,
+                    controller_index: u8::MAX,
+                    parent_controller_index: u8::MAX,
+                    data: UXGeoScriptCommandData::Entity {
+                        hashcode: entity,
+                        file: u32::MAX,
+                    },
+                }],
+            ),
+        );
+        store.insert_script(
+            file,
+            test_script(
+                parent,
+                120,
+                vec![
+                    UXGeoScriptCommand {
+                        opcode: 3,
+                        start: 0,
+                        length: 120,
+                        controller_header_index: u16::MAX,
+                        controller_index: u8::MAX,
+                        parent_controller_index: u8::MAX,
+                        data: UXGeoScriptCommandData::Entity {
+                            hashcode: zero_anchor,
+                            file: u32::MAX,
+                        },
+                    },
+                    UXGeoScriptCommand {
+                        opcode: 4,
+                        start: 15,
+                        length: 90,
+                        controller_header_index: u16::MAX,
+                        controller_index: u8::MAX,
+                        parent_controller_index: u8::MAX,
+                        data: UXGeoScriptCommandData::SubScript {
+                            hashcode: child,
+                            file: u32::MAX,
+                        },
+                    },
+                ],
+            ),
+        );
+
+        let resolved = first_resolved_visual_time(file, parent, &store).unwrap();
+        assert!((resolved - 1.5).abs() < f32::EPSILON);
     }
 
     #[test]

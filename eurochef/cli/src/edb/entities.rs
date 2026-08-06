@@ -206,8 +206,7 @@ fn export_navmesh(
                 face[0] + 1,
                 face[1] + 1,
                 face[1] + 1,
-                face[2] + 1
-                ,
+                face[2] + 1,
                 face[2] + 1
             ));
             covered[face_index] = true;
@@ -223,8 +222,7 @@ fn export_navmesh(
                     face[0] + 1,
                     face[1] + 1,
                     face[1] + 1,
-                    face[2] + 1
-                    ,
+                    face[2] + 1,
                     face[2] + 1
                 ));
             }

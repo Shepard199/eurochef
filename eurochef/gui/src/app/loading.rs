@@ -157,8 +157,18 @@ impl EurochefApp {
             .filter(|v| !rs_lock.is_object_loaded(header.hashcode, **v))
             .copied()
             .collect();
-        let internal_refs = [references, &interal_references_filtered].concat();
+        let mut internal_refs = [references, &interal_references_filtered].concat();
         let animation_catalog = animations::read_from_file(edb)?;
+        // Animation commands commonly serialize skin=0xFFFFFFFF, meaning use the
+        // AnimSkin bound by the Animation asset. Promote that bound skin into the
+        // selected entity closure so static Maps previews load its component meshes.
+        for reference in internal_refs.clone() {
+            if let Some(skin_hashcode) = animation_catalog.bound_skin_hashcode(reference) {
+                if !internal_refs.contains(&skin_hashcode) {
+                    internal_refs.push(skin_hashcode);
+                }
+            }
+        }
         let (entities, skins, _) = entities::read_from_file(edb, Some(&internal_refs))?;
         if !animation_catalog.clips.is_empty() {
             rs_lock.insert_animation_runtime(
@@ -271,7 +281,13 @@ impl EurochefApp {
             crate::sound_preview::shared_sound_preview(self.current_source_path.as_deref());
         self.sound_preview = Some(sound_preview.clone());
 
-        self.current_panel = Panel::FileInfo;
+        self.current_panel = if std::env::var("EUROCHEF_START_PANEL")
+            .is_ok_and(|panel| panel.trim().eq_ignore_ascii_case("maps"))
+        {
+            Panel::Maps
+        } else {
+            Panel::FileInfo
+        };
         self.spreadsheetlist = None;
         self.fileinfo = None;
         self.textures = None;
@@ -306,50 +322,33 @@ impl EurochefApp {
                 }
             }
 
-            let mut rs_lock = self.render_store.write();
             let scripts = UXGeoScript::read_all(&mut edb)?;
             preload_script_sounds(&sound_preview, &scripts);
-            for s in &scripts {
-                rs_lock.insert_script(header.hashcode, s.clone());
-            }
-            for particle in particles {
-                rs_lock.insert_particle(header.hashcode, particle);
-            }
+            let has_animations = !animation_catalog.clips.is_empty();
+            {
+                let mut rs_lock = self.render_store.write();
+                for s in &scripts {
+                    rs_lock.insert_script(header.hashcode, s.clone());
+                }
+                for particle in particles {
+                    rs_lock.insert_particle(header.hashcode, particle);
+                }
 
-            if !animation_catalog.clips.is_empty() {
-                rs_lock.insert_animation_runtime(
-                    header.hashcode,
-                    Arc::new(animations::AnimationRuntime::new(
+                if has_animations {
+                    rs_lock.insert_animation_runtime(
                         header.hashcode,
-                        &self.gl,
-                        platform,
-                        animation_catalog.clone(),
-                        &entities,
-                    )),
-                );
-                self.animations = Some(animations::AnimationListPanel::new(
-                    header.hashcode,
-                    &self.gl,
-                    animation_catalog,
-                    &entities,
-                    &scripts,
-                    platform,
-                    self.render_store.clone(),
-                    self.hashcodes.clone(),
-                ));
+                        Arc::new(animations::AnimationRuntime::new(
+                            header.hashcode,
+                            &self.gl,
+                            platform,
+                            animation_catalog.clone(),
+                            &entities,
+                        )),
+                    );
+                }
             }
 
-            if !scripts.is_empty() {
-                self.scripts = Some(scripts::ScriptListPanel::new(
-                    header.hashcode,
-                    &self.gl,
-                    scripts,
-                    self.render_store.clone(),
-                    self.hashcodes.clone(),
-                    sound_preview.clone(),
-                ));
-            }
-
+            let mut rs_lock = self.render_store.write();
             for (i, e) in entities.iter() {
                 let mut r = EntityRenderer::new(header.hashcode, platform);
                 if let Ok((_, m)) = &e.data {
@@ -388,10 +387,47 @@ impl EurochefApp {
                     );
                 }
             }
+            drop(rs_lock);
+
+            if has_animations {
+                self.animations = Some(animations::AnimationListPanel::new(
+                    header.hashcode,
+                    &self.gl,
+                    animation_catalog,
+                    &entities,
+                    &scripts,
+                    platform,
+                    self.render_store.clone(),
+                    self.hashcodes.clone(),
+                ));
+            }
+
+            if !scripts.is_empty() {
+                self.scripts = Some(scripts::ScriptListPanel::new(
+                    header.hashcode,
+                    &self.gl,
+                    scripts,
+                    self.render_store.clone(),
+                    self.hashcodes.clone(),
+                    sound_preview.clone(),
+                ));
+            }
 
             if entities.len() + skins.len() + ref_entities.len() > 0 {
                 if self.fileinfo.as_ref().unwrap().header.map_list.len() > 0 {
-                    let map = maps::read_from_file(&mut edb);
+                    let mut map = maps::read_from_file(&mut edb);
+                    if self.game.eq_ignore_ascii_case("robots") {
+                        let resolved_characters = maps::resolve_robots_character_visuals(
+                            &mut edb,
+                            &mut map,
+                            &self.path_cache,
+                            platform,
+                        )?;
+                        info!(
+                            "Resolved {} runtime-created Monster/NPC character visuals",
+                            resolved_characters
+                        );
+                    }
                     sound_preview.lock().preload_hashes(
                         map.iter()
                             .flat_map(|map| map.sounds.iter().map(|sound| sound.sound_ref)),
@@ -418,6 +454,7 @@ impl EurochefApp {
                     entities.into_iter().map(|(_, ires)| ires).collect(),
                     skins,
                     ref_entities,
+                    self.hashcodes.clone(),
                     platform,
                 ));
             }
@@ -440,6 +477,7 @@ impl EurochefApp {
             self.textures = Some(textures::TextureList::new(
                 ctx,
                 textures.into_iter().map(|(_, t)| t).collect(),
+                self.hashcodes.clone(),
             ));
         }
 

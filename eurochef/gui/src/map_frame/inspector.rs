@@ -1,5 +1,15 @@
 use super::*;
 
+fn format_object_audio_sound(hashcodes: &IntMap<u32, String>, sound: Option<u32>) -> String {
+    let Some(sound) = sound else {
+        return "none / native fallback unavailable".to_string();
+    };
+    hashcodes
+        .get(&sound)
+        .map(|name| format!("{name} (0x{sound:08X})"))
+        .unwrap_or_else(|| format!("0x{sound:08X}"))
+}
+
 impl MapFrame {
     pub(super) fn draw_trigger_inspector(&mut self, ctx: &egui::Context, map: &ProcessedMap) {
         let screen_space = ctx.content_rect();
@@ -191,7 +201,7 @@ impl MapFrame {
                                             ui,
                                             "Proven flag tests",
                                             if trig.ttype == 1 {
-                                                "0x0008 and 0x8000"
+                                                "accessors 0x0008/0x8000; controller 0x0001/0002/0004/0010/0020/0040/0080/0100/0200"
                                             } else {
                                                 "0x0002 and 0x8000"
                                             }
@@ -211,6 +221,99 @@ impl MapFrame {
                                     );
                                     ui.end_row();
                                 });
+                            }
+
+                            if trig.ttype == 1 {
+                                if let Some(trigger_index) = self.selected_trigger {
+                                    if let Some(plan) =
+                                        robots_camera_controller_plan(map, trigger_index)
+                                    {
+                                        ui.separator();
+                                        ui.strong("Native Controller Command Plan");
+                                        quick_grid!(ui, "t_native_camera_plan", |ui| {
+                                            readonly_input!(
+                                                ui,
+                                                "Setup dispatch",
+                                                plan.setup_kind.description().to_string()
+                                            );
+                                            ui.end_row();
+                                            readonly_input!(
+                                                ui,
+                                                "data[3] controller raw",
+                                                format!("0x{:08x}", plan.controller_data3_raw)
+                                            );
+                                            ui.end_row();
+                                            readonly_input!(
+                                                ui,
+                                                "Native-tested flag mask",
+                                                format!("0x{:03x}", plan.native_tested_flags)
+                                            );
+                                            ui.end_row();
+                                            readonly_input!(
+                                                ui,
+                                                "First linked Marker",
+                                                plan.linked_marker_index
+                                                    .map(|index| {
+                                                        format!(
+                                                            "#{} at {:?}",
+                                                            index, plan.linked_marker_position
+                                                        )
+                                                    })
+                                                    .unwrap_or_else(|| "none".to_string())
+                                            );
+                                            ui.end_row();
+                                            if let Some(yaw) = plan.mode1_yaw_radians {
+                                                readonly_input!(
+                                                    ui,
+                                                    "Mode 1 yaw",
+                                                    format!(
+                                                        "{yaw:.6} rad (atan2(camera-marker) + 2π)"
+                                                    )
+                                                );
+                                                ui.end_row();
+                                            }
+                                            if plan.mode == 3 {
+                                                readonly_input!(
+                                                    ui,
+                                                    "Mode 3 player substitutions",
+                                                    format!(
+                                                        "Y={} XZ={}",
+                                                        plan.mode3_override_player_y,
+                                                        plan.mode3_override_player_xz
+                                                    )
+                                                );
+                                                ui.end_row();
+                                            }
+                                            if plan.mode == 4 {
+                                                readonly_input!(
+                                                    ui,
+                                                    "Mode 4 path",
+                                                    plan.path_hashcode
+                                                        .map(|hash| format!("0x{hash:08x}"))
+                                                        .unwrap_or_else(|| {
+                                                            "null/sentinel".to_string()
+                                                        })
+                                                );
+                                                ui.end_row();
+                                                readonly_input!(
+                                                    ui,
+                                                    "Mode 4 data[6]/data[7]",
+                                                    format!(
+                                                        "{:?} / {:?} (raw finite floats)",
+                                                        plan.mode4_data6, plan.mode4_data7
+                                                    )
+                                                );
+                                                ui.end_row();
+                                                readonly_input!(
+                                                    ui,
+                                                    "Mode 4 option flags",
+                                                    format!("0x{:02x}", plan.mode4_option_flags)
+                                                );
+                                                ui.end_row();
+                                            }
+                                        });
+                                    }
+                                }
                             }
 
                             if trig.ttype == 48 {
@@ -596,9 +699,138 @@ impl MapFrame {
                                 });
                             }
 
-                            if matches!(trig.ttype, 8 | 37 | 80)
-                                && robots_trigger_runtime_path_speed(trig.ttype, &trig.data).is_some()
-                            {
+                            let trigger_index = self.selected_trigger.unwrap_or_default();
+                            let object_audio_profile = if trig.ttype == 79 {
+                                robots_direct_object_audio_profile(trig)
+                            } else {
+                                robots_object_audio_profile_for_source(map, trigger_index)
+                            };
+                            if let Some(profile) = object_audio_profile {
+                                ui.separator();
+                                ui.strong("Native Object Audio Profile");
+                                quick_grid!(ui, "t_native_object_audio", |ui| {
+                                    readonly_input!(
+                                        ui,
+                                        "Runtime Role",
+                                        if trig.ttype == 79 {
+                                            "data-only four-slot sound profile; it does not handle events itself"
+                                                .to_string()
+                                        } else {
+                                            "native object consumes linked profile through vtable slot +0xEC"
+                                                .to_string()
+                                        }
+                                    );
+                                    ui.end_row();
+                                    readonly_input!(
+                                        ui,
+                                        "Profile Source",
+                                        profile
+                                            .linked_trigger_index
+                                            .map(|index| format!("XTrigger_ObjectAudio #{index}"))
+                                            .unwrap_or_else(|| {
+                                                if trig.ttype == 79 {
+                                                    format!("selected XTrigger_ObjectAudio #{trigger_index}")
+                                                } else {
+                                                    "native class fallback table".to_string()
+                                                }
+                                            })
+                                    );
+                                    ui.end_row();
+                                    readonly_input!(
+                                        ui,
+                                        "Audio Gate",
+                                        if trig.ttype == 79 {
+                                            "not applicable; controlled by linked consumer".to_string()
+                                        } else {
+                                            let state = if robots_object_audio_is_enabled(trig) {
+                                                "enabled"
+                                            } else {
+                                                "disabled"
+                                            };
+                                            let proof = match trig.ttype {
+                                                7 => "data[4] bit 0",
+                                                34 => "data[5] bit 0",
+                                                8 => "data[7] bit 0x100",
+                                                32 => "data[3] bit 0x200",
+                                                37 => "data[2] bit 0x800",
+                                                55 | 80 => "unconditional native consumer",
+                                                _ => "not a native ObjectAudio consumer",
+                                            };
+                                            format!("{state} ({proof})")
+                                        }
+                                    );
+                                    ui.end_row();
+                                    for (slot, role) in [
+                                        (0, "data[0] Activate One-Shot"),
+                                        (1, "data[1] Deactivate One-Shot"),
+                                        (2, "data[2] Active Loop"),
+                                        (3, "data[3] Inactive Loop"),
+                                    ] {
+                                        let raw_sound = if trig.ttype == 79 {
+                                            trig.data.get(slot).copied().flatten()
+                                        } else {
+                                            profile.sound(slot)
+                                        };
+                                        let display = if trig.ttype == 79
+                                            && raw_sound == Some(0x1AF0_0001)
+                                        {
+                                            "HT_Sound_SFX_AA_BLANK (use consumer native fallback)"
+                                                .to_string()
+                                        } else {
+                                            format_object_audio_sound(&self.hashcodes, raw_sound)
+                                        };
+                                        readonly_input!(ui, role, display);
+                                        ui.end_row();
+                                    }
+                                    if trig.ttype == 79 {
+                                        let consumers = trig
+                                            .incoming_links
+                                            .iter()
+                                            .filter_map(|link| usize::try_from(*link).ok())
+                                            .filter_map(|index| {
+                                                map.triggers
+                                                    .get(index)
+                                                    .filter(|consumer| {
+                                                        robots_object_audio_is_consumer(consumer.ttype)
+                                                    })
+                                                    .map(|consumer| {
+                                                    let name = self
+                                                        .trigger_info
+                                                        .triggers
+                                                        .get(&consumer.ttype)
+                                                        .map(|info| info.name.as_str())
+                                                        .unwrap_or("Unknown");
+                                                    format!("#{index} {name}")
+                                                })
+                                            })
+                                            .collect::<Vec<_>>();
+                                        readonly_input!(
+                                            ui,
+                                            "Incoming Consumers",
+                                            if consumers.is_empty() {
+                                                "none".to_string()
+                                            } else {
+                                                consumers.join(", ")
+                                            }
+                                        );
+                                        ui.end_row();
+                                    }
+                                    readonly_input!(
+                                        ui,
+                                        "Native Events",
+                                        if trig.ttype == 55 {
+                                            "Clock: 0x100 starts Active Loop; 0x200 stops it; slots 0/1/3 are unused"
+                                                .to_string()
+                                        } else {
+                                            "0x100: stop inactive loop, start active loop + activate one-shot; 0x200: stop active loop, start inactive loop + deactivate one-shot"
+                                                .to_string()
+                                        }
+                                    );
+                                    ui.end_row();
+                                });
+                            }
+
+                            if Self::runtime_event_supported(map, trig) {
                                 let trigger_index = self.selected_trigger.unwrap_or_default();
                                 let wall_time = ctx.input(|input| input.time);
                                 let snapshot = self.runtime_event_snapshot(
@@ -606,6 +838,7 @@ impl MapFrame {
                                     trigger_index,
                                     wall_time,
                                 );
+
                                 let runtime_time = self
                                     .runtime_motion_start_time
                                     .map(|start| (wall_time - start).max(0.0) as f32)
@@ -1343,6 +1576,50 @@ impl MapFrame {
                 ui.separator();
                 ui.strong("EuroSound bank preview");
                 let mut preview = self.sound_preview.lock();
+                if let Some(profile) = preview.native_sound_profile(sound.sound_ref) {
+                    egui::Grid::new("native_sound_profile")
+                        .num_columns(2)
+                        .striped(true)
+                        .spacing([24.0, 4.0])
+                        .show(ui, |ui| {
+                            let mut row = |label: &str, value: String| {
+                                ui.label(label);
+                                ui.monospace(value);
+                                ui.end_row();
+                            };
+                            row("Native master", format!("{:.3}", profile.master_volume));
+                            row("Priority", profile.priority.to_string());
+                            row("Max voices", profile.max_voices.to_string());
+                            row(
+                                "Voice group",
+                                format!(
+                                    "0x{:04X}, max {}",
+                                    profile.group_hashcode, profile.group_max_channels
+                                ),
+                            );
+                            row(
+                                "Delay raw",
+                                format!("{}..{}", profile.min_delay, profile.max_delay),
+                            );
+                            row(
+                                "Ducker",
+                                format!("{} / {}", profile.ducker, profile.ducker_length),
+                            );
+                            row("Reverb send raw", profile.reverb_send.to_string());
+                            row("Doppler raw", profile.doppler_value.to_string());
+                            row("Tracking", format!("0x{:02X}", profile.tracking_type));
+                            row("Flags", format!("0x{:04X}", profile.flags));
+                            row("User flags", format!("0x{:04X}", profile.user_flags));
+                            row("User value", profile.user_value.to_string());
+                            row(
+                                "Duration / loop",
+                                format!("{:.4}s / {}", profile.duration_seconds, profile.looping),
+                            );
+                        });
+                    ui.small(
+                        "Priority, per-SFX MaxVoices and group channel limits are active. Delay, ducker, reverb, Doppler and user fields are preserved raw until their native consumers/units are proven.",
+                    );
+                }
                 preview.draw_settings(ui);
                 preview.draw_actions(ui, sound.sound_ref);
             });

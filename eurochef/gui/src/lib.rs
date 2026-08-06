@@ -13,6 +13,7 @@ mod entity_frame;
 mod fileinfo;
 mod map_frame;
 mod map_runtime;
+mod map_zone;
 mod maps;
 mod render;
 mod scripts;

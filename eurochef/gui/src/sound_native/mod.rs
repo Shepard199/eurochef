@@ -2,7 +2,9 @@ mod adpcm;
 mod catalog;
 
 pub(crate) use adpcm::decode_eurocom_ima_adpcm;
-pub(crate) use catalog::{NativeSoundCatalog, NativeWave};
+pub(crate) use catalog::{
+    NativeSoundCatalog, NativeSoundProfile, NativeSoundProfileCatalog, NativeWave,
+};
 
 pub(crate) struct DecodedWave {
     pub(crate) samples: Vec<i16>,

@@ -18,7 +18,7 @@ use eurochef_edb::{
 };
 use eurochef_shared::{
     entities::UXVertex,
-    maps::format_hashcode,
+    maps::{format_hashcode, format_hashcode_with_id},
     script::{UXGeoScript, UXGeoScriptCommandData},
     IdentifiableResult,
 };
@@ -199,6 +199,14 @@ pub struct AnimationClipRecord {
 pub struct AnimationCatalog {
     pub clips: Vec<AnimationClipRecord>,
     pub skins: Vec<AnimationSkinRecord>,
+}
+
+impl AnimationCatalog {
+    pub fn bound_skin_hashcode(&self, animation_hashcode: Hashcode) -> Option<Hashcode> {
+        let clip_index = resolve_clip_index(&self.clips, animation_hashcode)?;
+        let skin_index = self.clips.get(clip_index)?.skin_index?;
+        self.skins.get(skin_index).map(|skin| skin.hashcode)
+    }
 }
 
 fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, String> {
@@ -862,6 +870,10 @@ impl AnimationRuntime {
         }
     }
 
+    pub fn bound_skin_hashcode(&self, animation_hashcode: Hashcode) -> Option<Hashcode> {
+        self.catalog.bound_skin_hashcode(animation_hashcode)
+    }
+
     fn resolve_skin_index(&self, hashcode: Hashcode) -> Option<usize> {
         if hashcode.is_local() {
             let index = hashcode.index() as usize;
@@ -977,7 +989,9 @@ impl AnimationRuntime {
             )
             .is_some()
             {
-                entity.renderer.update_vertices(gl, &entity.skinned_vertices);
+                entity
+                    .renderer
+                    .update_vertices(gl, &entity.skinned_vertices);
             }
             entity.renderer.draw_opaque(
                 gl,
@@ -1012,9 +1026,12 @@ fn semantic_script_reference(
     script_hashcode: Hashcode,
 ) -> String {
     if script_hashcode.is_local() {
-        format!("Script #{}", script_hashcode.index())
+        format!(
+            "Script #{} [0x{script_hashcode:08X}]",
+            script_hashcode.index()
+        )
     } else {
-        format_hashcode(hashcodes, script_hashcode)
+        format_hashcode_with_id(hashcodes, script_hashcode)
     }
 }
 
@@ -1040,9 +1057,9 @@ fn semantic_animation_label(
             .get(skin_index)
             .map(|skin| {
                 if skin.hashcode.is_local() {
-                    format!("AnimSkin #{}", skin.index)
+                    format!("AnimSkin #{} [0x{:08X}]", skin.index, skin.hashcode)
                 } else {
-                    format_hashcode(hashcodes, skin.hashcode)
+                    format_hashcode_with_id(hashcodes, skin.hashcode)
                 }
             })
             .unwrap_or_else(|| format!("AnimSkin index {skin_index}"));
@@ -1171,12 +1188,16 @@ impl AnimationListPanel {
                         .show(ui, |ui| {
                             for index in 0..self.catalog.clips.len() {
                                 let clip = &self.catalog.clips[index];
-                                let name = semantic_animation_label(
-                                    &self.catalog,
-                                    clip,
-                                    &self.hashcodes,
-                                );
-                                let label = format!("{name}  [0x{:08X}]", clip.hashcode);
+                                let semantic =
+                                    semantic_animation_label(&self.catalog, clip, &self.hashcodes);
+                                let decoded = format_hashcode(&self.hashcodes, clip.hashcode);
+                                let canonical =
+                                    format_hashcode_with_id(&self.hashcodes, clip.hashcode);
+                                let label = if semantic == decoded {
+                                    canonical
+                                } else {
+                                    format!("{canonical} · {semantic}")
+                                };
                                 if !filter.is_empty()
                                     && !label.to_ascii_lowercase().contains(&filter)
                                 {
@@ -1296,9 +1317,9 @@ impl AnimationListPanel {
                         Some(duration.map_or(value, |current| current.max(value)))
                     })
                     .or_else(|| {
-                        clip.pose_cache.as_ref().map(|cache| {
-                            cache.frame_count.saturating_sub(1).max(1) as f32 / 30.0
-                        })
+                        clip.pose_cache
+                            .as_ref()
+                            .map(|cache| cache.frame_count.saturating_sub(1).max(1) as f32 / 30.0)
                     })
                     .unwrap_or(DEFAULT_PREVIEW_SECONDS)
                     .max(f32::EPSILON)
@@ -1511,9 +1532,16 @@ impl AnimationListPanel {
             ui.label("No animation selected");
             return;
         };
-        let name = semantic_animation_label(&self.catalog, clip, &self.hashcodes);
+        let semantic = semantic_animation_label(&self.catalog, clip, &self.hashcodes);
+        let decoded = format_hashcode(&self.hashcodes, clip.hashcode);
+        let canonical = format_hashcode_with_id(&self.hashcodes, clip.hashcode);
+        let heading = if semantic == decoded {
+            canonical
+        } else {
+            format!("{canonical} · {semantic}")
+        };
 
-        ui.heading(name);
+        ui.heading(heading);
         ui.horizontal_wrapped(|ui| {
             ui.monospace(format!("hash=0x{:08X}", clip.hashcode));
             ui.separator();
@@ -1689,9 +1717,9 @@ impl AnimationListPanel {
                                             component
                                                 .entity_hashcode
                                                 .map(|hashcode| {
-                                                    format!(
-                                                        "{} [0x{hashcode:08X}]",
-                                                        format_hashcode(&self.hashcodes, hashcode)
+                                                    format_hashcode_with_id(
+                                                        &self.hashcodes,
+                                                        hashcode,
                                                     )
                                                 })
                                                 .unwrap_or_else(|| {
@@ -1730,18 +1758,26 @@ impl AnimationListPanel {
                 }
                 for usage in &clip.usages {
                     ui.monospace(format!(
-                        "script 0x{:08X}, command {}, start {}, length {}, {:.3} fps, skin {}",
-                        usage.script_hashcode,
+                        "script {}, command {}, start {}, length {}, {:.3} fps, skin {}",
+                        semantic_script_reference(&self.hashcodes, usage.script_hashcode),
                         usage.command_index,
                         usage.start_frame,
                         usage.length_frames,
                         usage.script_fps,
                         if usage.skin_hashcode == u32::MAX {
-                            "implicit Animation binding".to_string()
+                            "implicit Animation binding [0xFFFFFFFF]".to_string()
                         } else if usage.skin_hashcode.is_local() {
-                            format!("AnimSkin #{}", usage.skin_hashcode.index())
+                            format!(
+                                "AnimSkin #{} [0x{:08X}]",
+                                usage.skin_hashcode.index(),
+                                usage.skin_hashcode
+                            )
                         } else {
-                            format!("0x{:08X}@0x{:08X}", usage.skin_hashcode, usage.skin_file)
+                            format!(
+                                "{} @ {}",
+                                format_hashcode_with_id(&self.hashcodes, usage.skin_hashcode),
+                                format_hashcode_with_id(&self.hashcodes, usage.skin_file)
+                            )
                         }
                     ));
                 }
@@ -1855,9 +1891,7 @@ mod tests {
             checksum,
         )
         .expect("valid synthetic pose cache");
-        let sample = cache
-            .sample_frame(0.5)
-            .expect("interpolated pose sample");
+        let sample = cache.sample_frame(0.5).expect("interpolated pose sample");
         assert_eq!(sample.len(), 1);
         assert!((sample[0].position.x - 1.0).abs() < 1.0e-6);
         assert!((sample[0].rotation.length() - 1.0).abs() < 1.0e-6);

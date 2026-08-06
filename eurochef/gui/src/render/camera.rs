@@ -9,7 +9,9 @@ pub trait Camera3D: Sync + Send {
     fn zoom(&self) -> f32;
 
     fn position(&mut self) -> Vec3 {
-        (self.calculate_matrix() * Vec4::ONE).xyz()
+        self.calculate_matrix()
+            .inverse()
+            .transform_point3(Vec3::ZERO)
     }
 
     fn rotation(&self) -> Quat;
@@ -204,6 +206,17 @@ impl Default for FpsCamera {
 }
 
 impl FpsCamera {
+    pub fn set_pose_from_direction(&mut self, position: Vec3, direction: Vec3) {
+        self.position = position;
+        let direction = direction.normalize_or_zero();
+        if direction.length_squared() <= f32::EPSILON {
+            return;
+        }
+        self.orientation.x = (-direction.y.clamp(-1.0, 1.0).asin()).to_degrees();
+        self.orientation.y = direction.x.atan2(direction.z).to_degrees();
+        self.update_vectors();
+    }
+
     fn update_vectors(&mut self) {
         let mut front = Vec3::ZERO;
         front.x = self.orientation.x.to_radians().cos() * self.orientation.y.to_radians().sin();
@@ -290,5 +303,38 @@ impl Camera3D for FpsCamera {
 
     fn focus_offset(&mut self, dist_scale: f32) -> Vec3 {
         self.front * (2.5 * dist_scale)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fly_camera_pose_uses_the_serialized_direction_without_changing_position() {
+        let mut camera = FpsCamera::default();
+        let position = Vec3::new(12.0, 3.0, -7.0);
+        let direction = Vec3::new(0.25, -0.5, 1.0).normalize();
+        camera.set_pose_from_direction(position, direction);
+        assert!(camera.position.distance(position) < 1.0e-6);
+        assert!(camera.front.distance(direction) < 1.0e-5);
+    }
+
+    #[test]
+    fn orbit_camera_position_is_the_inverse_view_origin() {
+        let mut camera = ArcBallCamera::new(
+            Vec3::new(12.0, -3.0, 27.0),
+            Vec2::new(24.0, 137.0),
+            4.5,
+            true,
+        );
+        let view = camera.calculate_matrix();
+        let expected = view.inverse().transform_point3(Vec3::ZERO);
+        let actual = camera.position();
+
+        assert!(
+            actual.distance(expected) < 1.0e-5,
+            "expected={expected:?} actual={actual:?}"
+        );
     }
 }

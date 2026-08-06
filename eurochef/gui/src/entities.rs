@@ -8,6 +8,7 @@ use eurochef_edb::{
 };
 use eurochef_shared::{
     entities::{read_entity, TriStrip, UXVertex},
+    maps::format_hashcode_with_id,
     textures::UXGeoTexture,
     IdentifiableResult,
 };
@@ -15,6 +16,7 @@ use fnv::FnvHashMap;
 use font_awesome as fa;
 use glam::{Quat, Vec2, Vec3};
 use glow::HasContext;
+use nohash_hasher::IntMap;
 
 use crate::{
     entity_frame::{EntityFrame, RenderableTexture},
@@ -32,6 +34,7 @@ pub struct EntityListPanel {
     gl: Arc<glow::Context>,
     entity_renderer: Option<EntityFrame>,
     entity_label: String,
+    hashcodes: Arc<IntMap<Hashcode, String>>,
 
     entity_previews: FnvHashMap<u32, Option<egui::TextureHandle>>,
     // TODO(cohae): Hack to get shaders for entity previews
@@ -89,6 +92,10 @@ fn apply_navmesh_uv(vertices: &mut [UXVertex]) {
 
 impl ProcessedEntityMesh {
     pub fn bounding_box(&self) -> (Vec3, Vec3) {
+        if self.vertex_data.is_empty() {
+            return (Vec3::ZERO, Vec3::ZERO);
+        }
+
         let mut min = Vec3::splat(f32::MAX);
         let mut max = Vec3::splat(f32::MIN);
         for v in &self.vertex_data {
@@ -109,6 +116,7 @@ impl EntityListPanel {
         entities: Vec<IdentifiableResult<(EXGeoEntity, ProcessedEntityMesh)>>,
         skins: Vec<IdentifiableResult<EXGeoBaseAnimSkin>>,
         ref_entities: Vec<IdentifiableResult<(EXGeoEntity, ProcessedEntityMesh)>>,
+        hashcodes: Arc<IntMap<Hashcode, String>>,
         platform: Platform,
     ) -> Self {
         let mut entity_previews = FnvHashMap::default();
@@ -139,6 +147,7 @@ impl EntityListPanel {
             gl,
             entity_renderer: None,
             entity_label: String::new(),
+            hashcodes,
             entities,
             skins,
             ref_entities,
@@ -376,6 +385,20 @@ mod tests {
         let requested = [0x0200_01AE];
         assert!(entity_is_requested(99, 0x0200_01AE, &requested));
         assert!(!entity_is_requested(2, 0x0200_017A, &requested));
+    }
+
+    #[test]
+    fn zero_geometry_anchor_has_finite_zero_bounds() {
+        let mesh = ProcessedEntityMesh {
+            vertex_data: vec![],
+            indices: vec![],
+            strips: vec![],
+            flags: 0,
+            is_navmesh: false,
+            part_vertex_ranges: vec![],
+        };
+
+        assert_eq!(mesh.bounding_box(), (Vec3::ZERO, Vec3::ZERO));
     }
 
     #[test]

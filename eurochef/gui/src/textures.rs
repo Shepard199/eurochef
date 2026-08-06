@@ -1,12 +1,17 @@
-use egui::{Color32, Widget};
-use eurochef_shared::{textures::UXGeoTexture, IdentifiableResult};
+use std::sync::Arc;
+
+use egui::{Color32, RichText, Widget};
+use eurochef_edb::Hashcode;
+use eurochef_shared::{maps::format_hashcode_with_id, textures::UXGeoTexture, IdentifiableResult};
 use fnv::FnvHashMap;
 use instant::Instant;
+use nohash_hasher::IntMap;
 
 use crate::strip_ansi_codes;
 
 pub struct TextureList {
     textures: Vec<IdentifiableResult<UXGeoTexture>>,
+    hashcodes: Arc<IntMap<Hashcode, String>>,
 
     // Each texture is a collection of frame textures
     egui_textures: FnvHashMap<u32, Vec<egui::TextureHandle>>,
@@ -26,9 +31,14 @@ pub struct TextureList {
 impl TextureList {
     const ENLARGED_ZOOM_DEFAULT: f32 = 2.5;
 
-    pub fn new(ctx: &egui::Context, textures: Vec<IdentifiableResult<UXGeoTexture>>) -> Self {
+    pub fn new(
+        ctx: &egui::Context,
+        textures: Vec<IdentifiableResult<UXGeoTexture>>,
+        hashcodes: Arc<IntMap<Hashcode, String>>,
+    ) -> Self {
         let mut s = Self {
             textures,
+            hashcodes,
             egui_textures: FnvHashMap::default(),
             start_time: Instant::now(),
 
@@ -92,6 +102,8 @@ impl TextureList {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = [4. * self.zoom; 2].into();
                     for (i, it) in self.textures.iter().enumerate() {
+                        let resource_label = format_hashcode_with_id(&self.hashcodes, it.hashcode);
+
                         // Skip null texture
                         if it.hashcode == 0x06000000 {
                             continue;
@@ -103,56 +115,75 @@ impl TextureList {
                                     continue;
                                 }
 
-                                let time = self.start_time.elapsed().as_secs_f32();
-                                let frametime_scale = t.frame_count as f32 / t.frames.len() as f32;
-                                let frame_time = (1. / t.framerate as f32) * frametime_scale;
+                                ui.vertical(|ui| {
+                                    ui.set_max_width(128.0 * self.zoom);
+                                    let time = self.start_time.elapsed().as_secs_f32();
+                                    let frametime_scale =
+                                        t.frame_count as f32 / t.frames.len() as f32;
+                                    let frame_time = (1. / t.framerate as f32) * frametime_scale;
 
-                                let frames = &self.egui_textures[&it.hashcode];
-                                let current = if frames.is_empty() {
-                                    &self.fallback_texture
-                                } else if frames.len() > 1 {
-                                    &frames[(time / frame_time) as usize % frames.len()]
-                                } else {
-                                    &frames[0]
-                                };
+                                    let frames = &self.egui_textures[&it.hashcode];
+                                    let current = if frames.is_empty() {
+                                        &self.fallback_texture
+                                    } else if frames.len() > 1 {
+                                        &frames[(time / frame_time) as usize % frames.len()]
+                                    } else {
+                                        &frames[0]
+                                    };
 
-                                let diagnostics = t.diagnostics.to_strings();
+                                    let diagnostics = t.diagnostics.to_strings();
 
-                                let response = egui::Image::new((current.id(), egui::vec2(128., 128.) * self.zoom)).sense(egui::Sense::click()).ui(ui)
-                                .on_hover_ui(|ui| {
-                                    ui.label(format!(
-                                        "Hashcode: {:08x}\nFormat (internal): 0x{:x}\nDimensions: {}x{}{}\nScroll: {} {}\nFlags: 0x{:x}\nGameflags: 0x{:x}\nIndex: {i}\n",
-                                        it.hashcode, t.format_internal, t.width, t.height, if t.depth <= 1 { String::new() } else { format!("x{}", t.depth) }, t.scroll[0], t.scroll[1], t.flags, t.game_flags
-                                    ));
+                                    let response = egui::Image::new((
+                                        current.id(),
+                                        egui::vec2(128., 128.) * self.zoom,
+                                    ))
+                                    .sense(egui::Sense::click())
+                                    .ui(ui)
+                                    .on_hover_ui(|ui| {
+                                        ui.label(format!(
+                                            "{resource_label}\nHashcode: 0x{:08X}\nFormat (internal): 0x{:x}\nDimensions: {}x{}{}\nScroll: {} {}\nFlags: 0x{:x}\nGameflags: 0x{:x}\nIndex: {i}\n",
+                                            it.hashcode, t.format_internal, t.width, t.height, if t.depth <= 1 { String::new() } else { format!("x{}", t.depth) }, t.scroll[0], t.scroll[1], t.flags, t.game_flags
+                                        ));
 
-                                    if frames.len() > 1 {
-                                        ui.label(format!("{} frames ({} fps)\n", frames.len(), t.framerate));
-                                    }
+                                        if frames.len() > 1 {
+                                            ui.label(format!(
+                                                "{} frames ({} fps)\n",
+                                                frames.len(),
+                                                t.framerate
+                                            ));
+                                        }
 
-                                    for d in &diagnostics {
-                                        ui.colored_label(Color32::YELLOW, *d);
-                                    }
+                                        for d in &diagnostics {
+                                            ui.colored_label(Color32::YELLOW, *d);
+                                        }
+
+                                        if !diagnostics.is_empty() {
+                                            ui.label("");
+                                        }
+
+                                        ui.strong("Click to enlarge");
+                                    })
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
 
                                     if !diagnostics.is_empty() {
-                                        ui.label("");
+                                        ui.painter().text(
+                                            response.rect.left_top() + egui::vec2(24., 24.),
+                                            egui::Align2::CENTER_CENTER,
+                                            font_awesome::EXCLAMATION_TRIANGLE,
+                                            egui::FontId::proportional(24.),
+                                            Color32::YELLOW,
+                                        );
                                     }
 
-                                    ui.strong("Click to enlarge");
-                                }).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    if response.clicked() {
+                                        self.enlarged_texture = Some((i, it.hashcode));
+                                    }
 
-                                if !diagnostics.is_empty() {
-                                    ui.painter().text(
-                                        response.rect.left_top() + egui::vec2(24., 24.),
-                                        egui::Align2::CENTER_CENTER,
-                                        font_awesome::EXCLAMATION_TRIANGLE,
-                                        egui::FontId::proportional(24.),
-                                        Color32::YELLOW,
+                                    ui.add(
+                                        egui::Label::new(RichText::new(&resource_label).strong())
+                                            .wrap(),
                                     );
-                                }
-
-                                if response.clicked() {
-                                    self.enlarged_texture = Some((i, it.hashcode));
-                                }
+                                });
                             }
                             (_, Some((ext_file, ext_texture))) => {
                                 // We don't know anything about linked textures, skip if filtered
@@ -160,26 +191,43 @@ impl TextureList {
                                     continue;
                                 }
 
-                                let (rect, response) =
-                                ui.allocate_exact_size(egui::vec2(128., 128.) * self.zoom, egui::Sense::click());
-                                ui.painter().rect_filled(
-                                    rect,
-                            egui::CornerRadius::ZERO,
-                                    Color32::BLACK,
-                                );
+                                ui.vertical(|ui| {
+                                    ui.set_max_width(128.0 * self.zoom);
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::vec2(128., 128.) * self.zoom,
+                                        egui::Sense::click(),
+                                    );
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        egui::CornerRadius::ZERO,
+                                        Color32::BLACK,
+                                    );
 
-                                ui.painter().text(rect.left_top() + egui::vec2(24., 24.),
-                                    egui::Align2::CENTER_CENTER,
-                                    font_awesome::LINK,
-                                    egui::FontId::proportional(24.),
-                                    Color32::RED,
-                                );
-                                
-                                response.on_hover_ui(|ui| {
-                                    ui.colored_label(Color32::LIGHT_RED, format!(
-                                        "Texture {:08x} is a reference to texture {:08x} in file {:08x}",
-                                        it.hashcode, ext_texture, ext_file
-                                    ));
+                                    ui.painter().text(
+                                        rect.left_top() + egui::vec2(24., 24.),
+                                        egui::Align2::CENTER_CENTER,
+                                        font_awesome::LINK,
+                                        egui::FontId::proportional(24.),
+                                        Color32::RED,
+                                    );
+
+                                    response.on_hover_ui(|ui| {
+                                        ui.colored_label(
+                                            Color32::LIGHT_RED,
+                                            format!(
+                                                "{resource_label} is a reference to {} in {}",
+                                                format_hashcode_with_id(
+                                                    &self.hashcodes,
+                                                    ext_texture
+                                                ),
+                                                format_hashcode_with_id(&self.hashcodes, ext_file)
+                                            ),
+                                        );
+                                    });
+                                    ui.add(
+                                        egui::Label::new(RichText::new(&resource_label).strong())
+                                            .wrap(),
+                                    );
                                 });
                             }
                             (Err(e), _) => {
@@ -188,26 +236,40 @@ impl TextureList {
                                     continue;
                                 }
 
-                                let (rect, response) = ui.allocate_exact_size(egui::vec2(128., 128.) * self.zoom, egui::Sense::click());
-                                ui.painter().rect_filled(rect,
-                            egui::CornerRadius::ZERO,
-                                    Color32::BLACK,
-                                );
+                                ui.vertical(|ui| {
+                                    ui.set_max_width(128.0 * self.zoom);
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::vec2(128., 128.) * self.zoom,
+                                        egui::Sense::click(),
+                                    );
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        egui::CornerRadius::ZERO,
+                                        Color32::BLACK,
+                                    );
 
-                                ui.painter().text(
-                                    rect.left_top() + egui::vec2(24., 24.),
-                                    egui::Align2::CENTER_CENTER,
-                                    font_awesome::EXCLAMATION_TRIANGLE,
-                                    egui::FontId::proportional(24.),
-                                    Color32::RED,
-                                );
+                                    ui.painter().text(
+                                        rect.left_top() + egui::vec2(24., 24.),
+                                        egui::Align2::CENTER_CENTER,
+                                        font_awesome::EXCLAMATION_TRIANGLE,
+                                        egui::FontId::proportional(24.),
+                                        Color32::RED,
+                                    );
 
-                                response.on_hover_ui(|ui| {
-                                    ui.label(format!(
-                                        "Texture {:08x} failed:",
-                                        it.hashcode
-                                    ));
-                                    ui.colored_label(Color32::LIGHT_RED, cutoff_string(strip_ansi_codes(&format!("{e:?}")), 1024));
+                                    response.on_hover_ui(|ui| {
+                                        ui.label(format!("{resource_label} failed:"));
+                                        ui.colored_label(
+                                            Color32::LIGHT_RED,
+                                            cutoff_string(
+                                                strip_ansi_codes(&format!("{e:?}")),
+                                                1024,
+                                            ),
+                                        );
+                                    });
+                                    ui.add(
+                                        egui::Label::new(RichText::new(&resource_label).strong())
+                                            .wrap(),
+                                    );
                                 });
                             },
                         }
@@ -221,14 +283,16 @@ impl TextureList {
         if let Some(enlarged_texture) = self.enlarged_texture {
             let (i, _hashcode) = enlarged_texture;
             let it = &self.textures[i];
+            let resource_label = format_hashcode_with_id(&self.hashcodes, it.hashcode);
 
             if let Ok(t) = &it.data {
                 // TODO(cohae): Fix resizing window
-                egui::Window::new("Texture Viewer")
+                egui::Window::new(format!("Texture Viewer · {resource_label}"))
                     .open(&mut window_open)
                     .collapsible(false)
                     .default_height(ctx.content_rect().height() * 0.70_f32)
                     .show(ctx, |ui| {
+                        ui.strong(&resource_label);
                         let time = self.start_time.elapsed().as_secs_f32();
                         let frametime_scale = t.frame_count as f32 / t.frames.len() as f32;
                         let frame_time = (1. / t.framerate as f32) * frametime_scale;

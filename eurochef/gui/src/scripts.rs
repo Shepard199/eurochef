@@ -6,7 +6,7 @@ use egui::{
 };
 use eurochef_edb::{Hashcode, HashcodeUtils};
 use eurochef_shared::{
-    maps::format_hashcode,
+    maps::{format_hashcode, format_hashcode_with_id},
     script::{
         robots_script_command_role, robots_script_payload_diagnostic, UXGeoScript,
         UXGeoScriptCommandData,
@@ -24,7 +24,7 @@ use crate::{
     render::{
         particle::{ParticlePreviewSettings, ParticleRenderer},
         script::{
-            collect_script_animations, collect_script_particles,
+            collect_script_animations, collect_script_particles, first_resolved_visual_time,
             render_script_without_static_animations, render_static_script_without_animations,
         },
         viewer::BaseViewer,
@@ -35,9 +35,7 @@ use crate::{
 
 pub(crate) mod fan;
 pub(crate) mod sound;
-use fan::{
-    advance_native_fan_angle, apply_native_fan_rotation, script_contains_native_fan_entity,
-};
+use fan::{advance_native_fan_angle, apply_native_fan_rotation, script_contains_native_fan_entity};
 
 // ROBOTS_PATCH_0020_SCRIPT_LOCAL_REFERENCE_LABELS
 // Local script object hashes encode an index in the current EDB. They are not
@@ -50,15 +48,15 @@ fn format_script_object_reference(
     if hashcode.is_local() {
         if let Some(resolved) = resolved_hashcode {
             format!(
-                "{} [local#{} 0x{hashcode:08x} -> 0x{resolved:08x}]",
+                "{} [local#{} 0x{hashcode:08X} -> 0x{resolved:08X}]",
                 format_hashcode(hashcodes, resolved),
                 hashcode.index(),
             )
         } else {
-            format!("local#{} [0x{hashcode:08x}, unresolved]", hashcode.index())
+            format!("local#{} [0x{hashcode:08X}, unresolved]", hashcode.index())
         }
     } else {
-        format_hashcode(hashcodes, hashcode)
+        format_hashcode_with_id(hashcodes, hashcode)
     }
 }
 
@@ -76,12 +74,12 @@ fn semantic_object_reference(
     hashcode: Hashcode,
 ) -> String {
     if hashcode == u32::MAX {
-        return format!("implicit {kind} binding");
+        return format!("implicit {kind} binding [0x{hashcode:08X}]");
     }
     if hashcode.is_local() {
-        format!("{kind} #{}", hashcode.index())
+        format!("{kind} #{} [0x{hashcode:08X}]", hashcode.index())
     } else {
-        format_hashcode(hashcodes, hashcode)
+        format_hashcode_with_id(hashcodes, hashcode)
     }
 }
 
@@ -219,9 +217,13 @@ impl ScriptListPanel {
         let current_time = scripts
             .first()
             .and_then(|script| {
-                script
-                    .first_visual_frame()
-                    .map(|frame| script.time_at_frame(frame.max(0) as f32))
+                first_resolved_visual_time(file, script.hashcode, &render_store.read()).or_else(
+                    || {
+                        script
+                            .first_visual_frame()
+                            .map(|frame| script.time_at_frame(frame.max(0) as f32))
+                    },
+                )
             })
             .unwrap_or(0.0);
 
@@ -244,7 +246,7 @@ impl ScriptListPanel {
             show_full_assembly: false,
             particle_renderer: Arc::new(ParticleRenderer::new(gl).unwrap()),
             particle_settings: ParticlePreviewSettings::default(),
-            fan_runtime_value: 50,
+            fan_runtime_value: 0,
             fan_runtime_angle: 0.0,
             last_frame: Instant::now(),
             last_audio_script: selected_script,
@@ -348,19 +350,33 @@ impl ScriptListPanel {
                             if let Some((hc, (_, script))) =
                                 self.scripts.iter().find(|(_, (idx, _))| *idx == i)
                             {
-                                let label = semantic_script_label(&self.hashcodes, i, script);
+                                let semantic = semantic_script_label(&self.hashcodes, i, script);
+                                let decoded = format_hashcode(&self.hashcodes, *hc);
+                                let canonical = format_hashcode_with_id(&self.hashcodes, *hc);
+                                let label = if semantic == decoded {
+                                    canonical
+                                } else {
+                                    format!("{canonical} · {semantic}")
+                                };
                                 if ui
                                     .selectable_value(
                                         &mut self.selected_script,
                                         *hc,
-                                        format!("{label}  [0x{hc:08X}]"),
+                                        label,
                                     )
                                     .clicked()
                                 {
-                                    self.current_time = script
-                                        .first_visual_frame()
-                                        .map(|frame| script.time_at_frame(frame.max(0) as f32))
-                                        .unwrap_or(0.0);
+                                    self.current_time = first_resolved_visual_time(
+                                        self.file,
+                                        script.hashcode,
+                                        &self.render_store.read(),
+                                    )
+                                    .or_else(|| {
+                                        script.first_visual_frame().map(|frame| {
+                                            script.time_at_frame(frame.max(0) as f32)
+                                        })
+                                    })
+                                    .unwrap_or(0.0);
                                     self.is_playing = false;
                                     self.fan_runtime_angle = 0.0;
                                 }
@@ -800,7 +816,7 @@ impl ScriptListPanel {
                         {
                             String::new()
                         } else {
-                            format!(" {}", format_hashcode(&self.hashcodes, *skin_file))
+                            format!(" {}", format_hashcode_with_id(&self.hashcodes, *skin_file))
                         }
                     ),
                     script_object_file_for_display(*anim_hashcode, *anim_file),
@@ -841,7 +857,10 @@ impl ScriptListPanel {
                     extra_info = hex::encode(data);
                     (
                         Self::COMMAND_COLOR_EVENT,
-                        format!("Event {}", format_hashcode(&self.hashcodes, *event_type)),
+                        format!(
+                            "Event {}",
+                            format_hashcode_with_id(&self.hashcodes, *event_type)
+                        ),
                         u32::MAX,
                     )
                 }
@@ -918,7 +937,7 @@ impl ScriptListPanel {
                     "{}{}\nStart: {}\nLength: {}\nRuntime record: {}\nController header: {}\nParent record: {}\n",
                     label,
                     if file_hash != u32::MAX {
-                        format!(" ({})", format_hashcode(&self.hashcodes, file_hash))
+                        format!(" ({})", format_hashcode_with_id(&self.hashcodes, file_hash))
                     } else {
                         String::new()
                     },
