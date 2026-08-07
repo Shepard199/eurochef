@@ -74,15 +74,7 @@ fn object_audio_voice_key(map_hashcode: u32, trigger_index: usize, channel: u8) 
 }
 
 fn containing_sound_zones(map: &ProcessedMap, listener: Vec3) -> Vec<usize> {
-    robots_map_zone_index_by_bounds(map.zones.len(), listener, |index| {
-        let zone = &map.zones[index];
-        (
-            Vec3::from(zone.bounds_box[0]),
-            Vec3::from(zone.bounds_box[1]),
-        )
-    })
-    .into_iter()
-    .collect()
+    map.native_zone_index(listener).into_iter().collect()
 }
 
 fn listener_pan(listener_rotation: Quat, direction: Vec3) -> f32 {

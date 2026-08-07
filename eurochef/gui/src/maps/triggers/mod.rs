@@ -10,7 +10,11 @@ mod platform;
 mod vehicle;
 mod watchbot;
 
-pub use camera::controller_plan as robots_camera_controller_plan;
+pub use camera::{
+    controller_plan as robots_camera_controller_plan,
+    viewport_runtime as robots_camera_viewport_runtime, NativeCameraViewportPose,
+    NativeCameraViewportRuntime,
+};
 pub use object_audio::{
     direct_profile as robots_direct_object_audio_profile,
     is_consumer as robots_object_audio_is_consumer, is_enabled as robots_object_audio_is_enabled,

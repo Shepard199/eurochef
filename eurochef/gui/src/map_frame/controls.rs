@@ -13,14 +13,7 @@ impl MapFrame {
             let mut viewer = self.viewer.lock();
             viewer.camera_mut().position()
         };
-        let active_zone_index =
-            robots_map_zone_index_by_bounds(current_map.zones.len(), camera_position, |index| {
-                let zone = &current_map.zones[index];
-                (
-                    Vec3::from(zone.bounds_box[0]),
-                    Vec3::from(zone.bounds_box[1]),
-                )
-            });
+        let active_zone_index = current_map.native_zone_index(camera_position);
 
         self.textfield_focused = false;
         let mut render_options_changed = false;
@@ -176,10 +169,17 @@ impl MapFrame {
                             "Serialized zone background preview",
                         )
                         .on_hover_text(
-                            "Clears the map viewport with EXGeoIdentifier.rgba_back_ground from the exact active MapZone. This is a direct serialized preview; native fog composition remains separate.",
+                            "Clears the map viewport with EXGeoIdentifier.rgba_back_ground from the exact active MapZone. Native fog is composed independently from that zone's fog_near/far/min/max/method/rgba_fog fields and per-Entity NoFog flag.",
                         );
                         ui.checkbox(&mut self.show_portals, "Portals")
                             .on_hover_text("Draws the four serialized EXGeoPortal boundary edges. Portal traversal and level-state transfer are not fabricated.");
+                        ui.checkbox(
+                            &mut self.apply_native_camera_viewport,
+                            "Apply active native Camera to viewport",
+                        )
+                        .on_hover_text(
+                            "Applies the instruction-proven mode 0/3 position, target, SetVFOV and fixed-60-Hz interpolation. Mode 4 remains diagnostic until its path traversal is recovered.",
+                        );
                         ui.monospace(format!(
                             "Camera [{:.3}, {:.3}, {:.3}]  active zone {}",
                             camera_position.x,
@@ -221,9 +221,9 @@ impl MapFrame {
                                 }
                                 if plan.mode == 3 {
                                     ui.monospace(format!(
-                                        "mode3 player substitutions: Y={} XZ={}",
-                                        plan.mode3_override_player_y,
-                                        plan.mode3_override_player_xz,
+                                        "mode3 preserve current Camera axes: Y={} XZ={}",
+                                        plan.mode3_preserve_current_camera_y,
+                                        plan.mode3_preserve_current_camera_xz,
                                     ));
                                 }
                                 if plan.mode == 4 {
@@ -235,8 +235,27 @@ impl MapFrame {
                                         plan.mode4_option_flags,
                                     ));
                                 }
+                                if let Some(runtime) = self.native_camera_runtime.as_ref() {
+                                    ui.monospace(format!(
+                                        "viewport pose: pos={:?} target={:?} VFOV={:.3} rate={:.3}",
+                                        runtime.current.position,
+                                        runtime.current.target,
+                                        runtime.current.vertical_fov_degrees,
+                                        runtime.interpolation_rate,
+                                    ));
+                                    ui.monospace(format!(
+                                        "player anchor={:?} interpolation={}",
+                                        runtime.player_anchor, runtime.interpolating,
+                                    ));
+                                    if let Some(boundary) = runtime.boundary {
+                                        ui.colored_label(
+                                            egui::Color32::YELLOW,
+                                            format!("Viewport boundary: {}", boundary.description()),
+                                        );
+                                    }
+                                }
                                 ui.small(
-                                    "This mirrors the native controller command plan. It does not pretend that the editor owns the game's player/camera-controller state.",
+                                    "Mode 0/3 viewport pose, player target offset, SetVFOV and interpolation are native. Mode 4 stays diagnostic until path traversal is instruction-proven.",
                                 );
                             } else {
                                 ui.monospace("Active XTrigger_Camera: stale or invalid controller plan");
@@ -259,10 +278,11 @@ impl MapFrame {
                                 identifier.fog_max,
                             ));
                             ui.monospace(format!(
-                                "camera distance/elevation={:.3}/{:.3} ambience={:.6}",
+                                "camera distance/elevation={:.3}/{:.3} ambience={:.6} sky_anchor_y={:.3}",
                                 identifier.camera_distance,
                                 identifier.camera_elevation,
                                 identifier.ambience,
+                                identifier.sky_anchor_y,
                             ));
                             ui.monospace(format!(
                                 "flags=0x{:04X} effects=0x{:04X} background={:02X}{:02X}{:02X}{:02X} fog={:02X}{:02X}{:02X}{:02X}",

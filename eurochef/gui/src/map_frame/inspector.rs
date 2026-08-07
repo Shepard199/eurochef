@@ -275,11 +275,11 @@ impl MapFrame {
                                             if plan.mode == 3 {
                                                 readonly_input!(
                                                     ui,
-                                                    "Mode 3 player substitutions",
+                                                    "Mode 3 preserve current Camera axes",
                                                     format!(
                                                         "Y={} XZ={}",
-                                                        plan.mode3_override_player_y,
-                                                        plan.mode3_override_player_xz
+                                                        plan.mode3_preserve_current_camera_y,
+                                                        plan.mode3_preserve_current_camera_xz
                                                     )
                                                 );
                                                 ui.end_row();

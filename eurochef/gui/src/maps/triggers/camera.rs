@@ -7,6 +7,120 @@ pub const MARKER_TYPE: u32 = 20;
 
 const NATIVE_TESTED_FLAG_MASK: u32 = 0x0000_03F7;
 const MODE4_OPTION_FLAG_MASK: u32 = 0x0000_0057;
+const NATIVE_FIXED_HZ: f32 = 60.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeCameraViewportPose {
+    pub position: Vec3,
+    pub target: Vec3,
+    pub vertical_fov_degrees: f32,
+}
+
+impl NativeCameraViewportPose {
+    pub fn is_finite(self) -> bool {
+        self.position.is_finite()
+            && self.target.is_finite()
+            && self.vertical_fov_degrees.is_finite()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeCameraViewportBoundary {
+    MissingLinkedMarker,
+    Mode1ControllerStateUnresolved,
+    Mode2ControllerStateUnresolved,
+    Mode4PathTraversalUnresolved,
+    UnknownMode(u32),
+}
+
+impl NativeCameraViewportBoundary {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::MissingLinkedMarker => "linked Camera Marker is missing",
+            Self::Mode1ControllerStateUnresolved => {
+                "mode 1 yaw is decoded, but its gameplay controller position is unresolved"
+            }
+            Self::Mode2ControllerStateUnresolved => {
+                "mode 2 gameplay controller position/target is unresolved"
+            }
+            Self::Mode4PathTraversalUnresolved => {
+                "mode 4 path binding is decoded, but native path traversal is unresolved"
+            }
+            Self::UnknownMode(_) => "unknown native Camera mode",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeCameraViewportRuntime {
+    pub trigger_index: usize,
+    pub mode: u32,
+    pub current: NativeCameraViewportPose,
+    pub desired: NativeCameraViewportPose,
+    pub interpolation_rate: f32,
+    pub interpolating: bool,
+    pub player_anchor: Vec3,
+    pub boundary: Option<NativeCameraViewportBoundary>,
+}
+
+impl NativeCameraViewportRuntime {
+    pub fn advance(&mut self, delta_seconds: f32) {
+        if !self.interpolating || self.boundary.is_some() {
+            return;
+        }
+
+        // Robots.exe FUN_00474030 multiplies the active mode profile rate by
+        // DAT_00620034, the engine's fixed-60-Hz frame-step scalar. It snaps
+        // only when that product reaches one or more; otherwise every lane is
+        // the same current -> desired linear interpolation.
+        let factor = self.interpolation_rate * delta_seconds.max(0.0) * NATIVE_FIXED_HZ;
+        if factor >= 1.0 {
+            self.current = self.desired;
+            return;
+        }
+        if factor <= 0.0 {
+            return;
+        }
+
+        self.current.position = self.current.position.lerp(self.desired.position, factor);
+        self.current.target = self.current.target.lerp(self.desired.target, factor);
+        self.current.vertical_fov_degrees +=
+            (self.desired.vertical_fov_degrees - self.current.vertical_fov_degrees) * factor;
+
+        if self
+            .current
+            .position
+            .distance_squared(self.desired.position)
+            <= 1.0e-8
+            && self.current.target.distance_squared(self.desired.target) <= 1.0e-8
+            && (self.current.vertical_fov_degrees - self.desired.vertical_fov_degrees).abs()
+                <= 1.0e-4
+        {
+            self.current = self.desired;
+        }
+    }
+
+    pub fn is_transitioning(self) -> bool {
+        self.interpolating
+            && self.boundary.is_none()
+            && (self.current.position != self.desired.position
+                || self.current.target != self.desired.target
+                || self.current.vertical_fov_degrees != self.desired.vertical_fov_degrees)
+    }
+}
+
+fn native_mode_profile(mode: u32) -> Option<(f32, f32, f32)> {
+    // Camera-controller configuration records constructed by FUN_00471B60.
+    // Tuple: (interpolation rate, target Y offset, vertical FOV degrees).
+    Some(match mode {
+        0 => (0.04, 0.0, 45.0),
+        1 => (0.10, 0.0, 45.0),
+        2 => (0.075, 0.0, 45.0),
+        3 => (0.08, 1.3, 60.0),
+        4 => (0.08, 0.0, 45.0),
+        _ => return None,
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeCameraSetupKind {
@@ -45,8 +159,8 @@ pub struct NativeCameraControllerPlan {
     pub linked_marker_index: Option<usize>,
     pub linked_marker_position: Option<Vec3>,
     pub mode1_yaw_radians: Option<f32>,
-    pub mode3_override_player_y: bool,
-    pub mode3_override_player_xz: bool,
+    pub mode3_preserve_current_camera_y: bool,
+    pub mode3_preserve_current_camera_xz: bool,
     pub path_hashcode: Option<u32>,
     pub mode4_data6: Option<f32>,
     pub mode4_data7: Option<f32>,
@@ -144,8 +258,8 @@ pub fn controller_plan(
         linked_marker_index: marker.map(|(index, _)| index),
         linked_marker_position: marker_position,
         mode1_yaw_radians,
-        mode3_override_player_y: mode == 3 && flags & 0x100 != 0,
-        mode3_override_player_xz: mode == 3 && flags & 0x200 != 0,
+        mode3_preserve_current_camera_y: mode == 3 && flags & 0x100 != 0,
+        mode3_preserve_current_camera_xz: mode == 3 && flags & 0x200 != 0,
         path_hashcode: (mode == 4)
             .then(|| path_hash(&camera.data))
             .flatten()
@@ -161,6 +275,63 @@ pub fn controller_plan(
         controller_flag_0x20: flags & 0x20 != 0,
         lifecycle_flag_0x80: flags & 0x80 != 0,
     })
+}
+
+pub fn viewport_runtime(
+    plan: NativeCameraControllerPlan,
+    current: NativeCameraViewportPose,
+    player_anchor: Vec3,
+) -> NativeCameraViewportRuntime {
+    let (interpolation_rate, player_target_y_offset, vertical_fov_degrees) =
+        native_mode_profile(plan.mode).unwrap_or((0.0, 0.0, current.vertical_fov_degrees));
+    let mut desired = current;
+    desired.vertical_fov_degrees = vertical_fov_degrees;
+
+    let boundary = match plan.mode {
+        0 => match plan.linked_marker_position {
+            Some(marker) => {
+                desired.position = marker;
+                desired.target = plan.camera_position;
+                None
+            }
+            None => Some(NativeCameraViewportBoundary::MissingLinkedMarker),
+        },
+        1 => Some(NativeCameraViewportBoundary::Mode1ControllerStateUnresolved),
+        2 => Some(NativeCameraViewportBoundary::Mode2ControllerStateUnresolved),
+        3 => match plan.linked_marker_position {
+            Some(marker) => {
+                desired.position = marker;
+                if plan.mode3_preserve_current_camera_y {
+                    desired.position.y = current.position.y;
+                }
+                if plan.mode3_preserve_current_camera_xz {
+                    desired.position.x = current.position.x;
+                    desired.position.z = current.position.z;
+                }
+                desired.target = player_anchor + Vec3::Y * player_target_y_offset;
+                None
+            }
+            None => Some(NativeCameraViewportBoundary::MissingLinkedMarker),
+        },
+        4 => Some(NativeCameraViewportBoundary::Mode4PathTraversalUnresolved),
+        value => Some(NativeCameraViewportBoundary::UnknownMode(value)),
+    };
+
+    let interpolating = plan.controller_flag_0x1;
+    NativeCameraViewportRuntime {
+        trigger_index: plan.trigger_index,
+        mode: plan.mode,
+        current: if interpolating || boundary.is_some() {
+            current
+        } else {
+            desired
+        },
+        desired,
+        interpolation_rate,
+        interpolating,
+        player_anchor,
+        boundary,
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +371,14 @@ mod tests {
         data[0] = Some(mode);
         data[2] = Some(flags);
         data
+    }
+
+    fn current_pose() -> NativeCameraViewportPose {
+        NativeCameraViewportPose {
+            position: Vec3::new(20.0, 8.0, -4.0),
+            target: Vec3::new(21.0, 8.0, -4.0),
+            vertical_fov_degrees: 90.0,
+        }
     }
 
     #[test]
@@ -250,15 +429,143 @@ mod tests {
     }
 
     #[test]
-    fn mode_three_plan_preserves_player_axis_override_bits() {
+    fn mode_three_plan_preserves_current_camera_axis_bits() {
         let camera = trigger(TYPE, Vec3::ZERO, camera_data(3, 0x300), vec![]);
         let map = ProcessedMap {
             triggers: vec![camera],
             ..Default::default()
         };
         let plan = controller_plan(&map, 0).unwrap();
-        assert!(plan.mode3_override_player_y);
-        assert!(plan.mode3_override_player_xz);
+        assert!(plan.mode3_preserve_current_camera_y);
+        assert!(plan.mode3_preserve_current_camera_xz);
+    }
+
+    #[test]
+    fn mode_zero_viewport_snaps_to_marker_and_camera_with_native_vfov() {
+        let camera = trigger(TYPE, Vec3::new(10.0, 2.0, 4.0), camera_data(0, 0), vec![1]);
+        let marker = trigger(
+            MARKER_TYPE,
+            Vec3::new(3.0, 5.0, 7.0),
+            vec![None; 16],
+            vec![],
+        );
+        let map = ProcessedMap {
+            triggers: vec![camera, marker],
+            ..Default::default()
+        };
+
+        let runtime = viewport_runtime(
+            controller_plan(&map, 0).unwrap(),
+            current_pose(),
+            Vec3::ZERO,
+        );
+        assert_eq!(runtime.current.position, Vec3::new(3.0, 5.0, 7.0));
+        assert_eq!(runtime.current.target, Vec3::new(10.0, 2.0, 4.0));
+        assert_eq!(runtime.current.vertical_fov_degrees, 45.0);
+        assert_eq!(runtime.interpolation_rate, 0.04);
+        assert!(!runtime.interpolating);
+        assert_eq!(runtime.boundary, None);
+    }
+
+    #[test]
+    fn mode_zero_viewport_uses_native_fixed_sixty_hz_interpolation() {
+        let camera = trigger(TYPE, Vec3::new(10.0, 2.0, 4.0), camera_data(0, 1), vec![1]);
+        let marker = trigger(
+            MARKER_TYPE,
+            Vec3::new(3.0, 5.0, 7.0),
+            vec![None; 16],
+            vec![],
+        );
+        let map = ProcessedMap {
+            triggers: vec![camera, marker],
+            ..Default::default()
+        };
+        let current = current_pose();
+        let mut runtime = viewport_runtime(controller_plan(&map, 0).unwrap(), current, Vec3::ZERO);
+
+        runtime.advance(1.0 / 60.0);
+        assert!(
+            runtime
+                .current
+                .position
+                .distance(current.position.lerp(runtime.desired.position, 0.04))
+                < 1.0e-6
+        );
+        assert!(
+            runtime
+                .current
+                .target
+                .distance(current.target.lerp(runtime.desired.target, 0.04))
+                < 1.0e-6
+        );
+        assert!((runtime.current.vertical_fov_degrees - 88.2).abs() < 1.0e-5);
+        assert!(runtime.is_transitioning());
+    }
+
+    #[test]
+    fn mode_three_viewport_targets_player_anchor_plus_native_height() {
+        let camera = trigger(TYPE, Vec3::ZERO, camera_data(3, 0), vec![1]);
+        let marker = trigger(
+            MARKER_TYPE,
+            Vec3::new(3.0, 5.0, 7.0),
+            vec![None; 16],
+            vec![],
+        );
+        let map = ProcessedMap {
+            triggers: vec![camera, marker],
+            ..Default::default()
+        };
+        let player_anchor = Vec3::new(100.0, 2.0, -20.0);
+        let runtime = viewport_runtime(
+            controller_plan(&map, 0).unwrap(),
+            current_pose(),
+            player_anchor,
+        );
+
+        assert_eq!(runtime.current.position, Vec3::new(3.0, 5.0, 7.0));
+        assert_eq!(runtime.current.target, Vec3::new(100.0, 3.3, -20.0));
+        assert_eq!(runtime.current.vertical_fov_degrees, 60.0);
+        assert_eq!(runtime.interpolation_rate, 0.08);
+    }
+
+    #[test]
+    fn mode_three_viewport_preserves_requested_current_camera_axes() {
+        let camera = trigger(TYPE, Vec3::ZERO, camera_data(3, 0x300), vec![1]);
+        let marker = trigger(
+            MARKER_TYPE,
+            Vec3::new(3.0, 5.0, 7.0),
+            vec![None; 16],
+            vec![],
+        );
+        let map = ProcessedMap {
+            triggers: vec![camera, marker],
+            ..Default::default()
+        };
+        let current = current_pose();
+        let runtime = viewport_runtime(controller_plan(&map, 0).unwrap(), current, Vec3::ZERO);
+
+        assert_eq!(runtime.current.position, current.position);
+        assert_eq!(runtime.current.target, Vec3::new(0.0, 1.3, 0.0));
+    }
+
+    #[test]
+    fn mode_four_viewport_remains_diagnostic_until_path_traversal_is_proven() {
+        let mut data = camera_data(4, 1);
+        data[1] = Some(0x0B00_0042);
+        let camera = trigger(TYPE, Vec3::ZERO, data, vec![]);
+        let map = ProcessedMap {
+            triggers: vec![camera],
+            ..Default::default()
+        };
+        let current = current_pose();
+        let runtime = viewport_runtime(controller_plan(&map, 0).unwrap(), current, Vec3::ZERO);
+
+        assert_eq!(runtime.current, current);
+        assert_eq!(
+            runtime.boundary,
+            Some(NativeCameraViewportBoundary::Mode4PathTraversalUnresolved)
+        );
+        assert!(!runtime.is_transitioning());
     }
 
     #[test]

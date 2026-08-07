@@ -12,6 +12,7 @@ out vec4 f_color;
 out vec3 f_eye;
 out vec3 f_worldPos;
 out vec3 f_worldNormal;
+out float f_fogDepth;
 
 // TODO?
 // vec4 unpackRGBA(uint packedValue) {
@@ -56,4 +57,7 @@ void main()
     // f_eye = normalize(mv_pos.xyz);
 
     gl_Position = u_view * world_pos;
+    // Native Robots fog is vertex linear fog. With the current RH DirectX
+    // perspective projection, clip W is the positive camera-space depth.
+    f_fogDepth = gl_Position.w;
 }

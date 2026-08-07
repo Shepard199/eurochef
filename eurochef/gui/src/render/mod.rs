@@ -66,6 +66,16 @@ pub struct NativeLightZone {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct RobotsFog {
+    pub enabled: bool,
+    pub near: f32,
+    pub far: f32,
+    pub min: f32,
+    pub max: f32,
+    pub colour: glam::Vec3,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RobotsDirectionalSlot {
     pub direction: glam::Vec3,
     pub colour: glam::Vec3,
@@ -232,12 +242,15 @@ pub struct RenderUniforms {
     pub view: Mat4,
     pub camera_rotation: Quat,
     pub time: f32,
+    pub perspective: bool,
     pub global_lighting_enabled: bool,
     pub global_lighting: Option<RobotsGlobalLighting>,
     pub native_lights_enabled: bool,
     pub native_light_strength: f32,
     pub native_lights: Vec<NativeLight>,
     pub native_light_zones: Vec<NativeLightZone>,
+    pub native_fog_zones: Vec<RobotsFog>,
+    pub native_fog_zone_override: Option<usize>,
     pub native_lighting_triangles: Vec<NativeLightingTriangle>,
     pub global_lightmap: Option<std::sync::Arc<global_lightmap::GpuGlobalLightmap>>,
     pub live_lighting_states: Arc<Mutex<HashMap<u64, RobotsLiveLightingState>>>,
@@ -264,7 +277,9 @@ impl RenderUniforms {
             )
         } else {
             glam::camera::rh::proj::directx::perspective(
-                2.0 * aspect_ratio_vert.atan(),
+                camera
+                    .vertical_fov_radians()
+                    .unwrap_or_else(|| 2.0 * aspect_ratio_vert.atan()),
                 aspect_ratio,
                 0.02,
                 2000.0,
@@ -278,6 +293,7 @@ impl RenderUniforms {
         self.view = projection * camera.calculate_matrix();
         self.camera_rotation = camera.rotation();
         self.time = time;
+        self.perspective = !orthographic;
     }
 }
 

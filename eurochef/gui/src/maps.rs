@@ -7,17 +7,21 @@ use eurochef_edb::{
     binrw::BinReaderExt,
     edb::EdbFile,
     entity::{EXGeoEntity, EXGeoMapZoneEntity},
-    map::{EXGeoBaseDatum, EXGeoMap, EXGeoMapZone, EXGeoPlacement, EXGeoTriggerEngineOptions},
+    map::{
+        EXGeoBaseDatum, EXGeoBspNode, EXGeoMap, EXGeoMapZone, EXGeoPlacement,
+        EXGeoTriggerEngineOptions,
+    },
     versions::Platform,
     Hashcode,
 };
 use eurochef_shared::IdentifiableResult;
-use glam::{Vec2, Vec3, Vec4};
+use glam::{Mat4, Vec2, Vec3, Vec4};
 use nohash_hasher::IntMap;
 
 use crate::{
     entities::ProcessedEntityMesh,
     map_frame::MapFrame,
+    map_zone::robots_map_zone_index_by_bsp,
     render::{entity::EntityRenderer, viewer::CameraType, NativeLightingTriangle, RenderStore},
     sound_preview::SharedSoundPreview,
 };
@@ -31,17 +35,19 @@ pub use entities::{resolve_robots_character_visuals, robots_pickup_visual};
 pub use triggers::{
     robots_camera_controller_plan, robots_camera_flags, robots_camera_marker_scaled_data0,
     robots_camera_mode, robots_camera_scaled_data4, robots_camera_scaled_data5,
-    robots_direct_object_audio_profile, robots_monster_data15_value, robots_monster_data4_value,
-    robots_monster_flags, robots_monster_is_family, robots_monster_proximity_radius,
-    robots_monster_runtime_selector, robots_monster_test_runtime_value,
-    robots_monster_transporter_secondary_path_hash, robots_npc_alternate_cutscenes,
-    robots_npc_cutscene_is_null, robots_npc_flags, robots_npc_runtime_selector,
-    robots_npc_runtime_uid, robots_npc_text_group, robots_object_audio_is_consumer,
-    robots_object_audio_is_enabled, robots_object_audio_profile_for_source,
-    robots_trigger_path_data_slot, robots_trigger_path_hash, robots_trigger_path_is_proven,
+    robots_camera_viewport_runtime, robots_direct_object_audio_profile,
+    robots_monster_data15_value, robots_monster_data4_value, robots_monster_flags,
+    robots_monster_is_family, robots_monster_proximity_radius, robots_monster_runtime_selector,
+    robots_monster_test_runtime_value, robots_monster_transporter_secondary_path_hash,
+    robots_npc_alternate_cutscenes, robots_npc_cutscene_is_null, robots_npc_flags,
+    robots_npc_runtime_selector, robots_npc_runtime_uid, robots_npc_text_group,
+    robots_object_audio_is_consumer, robots_object_audio_is_enabled,
+    robots_object_audio_profile_for_source, robots_trigger_path_data_slot,
+    robots_trigger_path_hash, robots_trigger_path_is_proven,
     robots_trigger_platform_angular_velocity, robots_trigger_runtime_path_acceleration,
     robots_trigger_runtime_path_speed, robots_watchbot_enter_distance, robots_watchbot_flags,
-    robots_watchbot_leave_distance, robots_watchbot_mode, ObjectAudioProfile,
+    robots_watchbot_leave_distance, robots_watchbot_mode, NativeCameraViewportPose,
+    NativeCameraViewportRuntime, ObjectAudioProfile,
 };
 
 pub struct MapViewerPanel {
@@ -55,6 +61,7 @@ pub struct MapViewerPanel {
 #[allow(dead_code)]
 pub struct ProcessedMap {
     pub hashcode: u32,
+    pub bsp_nodes: Vec<EXGeoBspNode>,
     pub mapzone_entities: Vec<EXGeoMapZoneEntity>,
     pub zones: Vec<EXGeoMapZone>,
     pub skies: Vec<Hashcode>,
@@ -69,6 +76,422 @@ pub struct ProcessedMap {
     pub paths: Vec<ProcessedPath>,
     pub triggers: Vec<ProcessedTrigger>,
     pub trigger_collisions: Vec<EXGeoBaseDatum>,
+}
+
+impl ProcessedMap {
+    pub fn native_zone_index(&self, point: Vec3) -> Option<usize> {
+        robots_map_zone_index_by_bsp(&self.bsp_nodes, self.zones.len(), point)
+    }
+
+    /// Reproduces the local-map streaming request traversal used by
+    /// Robots.exe 0x004EEAB3. This is the transient +0x6E request set, not the
+    /// renderer's +0x6A activated-resource state and not the visual portal list
+    /// consumed by 0x004EC2AA.
+    pub fn native_streaming_request_zone_indices(&self, point: Vec3) -> Vec<usize> {
+        let Some(root_zone) = self.native_zone_index(point) else {
+            return Vec::new();
+        };
+
+        let mut requested = vec![false; self.zones.len()];
+        self.mark_native_streaming_zone(root_zone, 0, &mut requested);
+        requested
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, active)| active.then_some(index))
+            .collect()
+    }
+
+    fn mark_native_streaming_zone(&self, zone_index: usize, depth: usize, requested: &mut [bool]) {
+        // 0x004EEAB3 returns before marking when param_3 >= 4, so the root and
+        // at most three portal transitions are included.
+        if depth >= 4 || zone_index >= self.zones.len() {
+            return;
+        }
+        requested[zone_index] = true;
+
+        let Some(portal_infos) = self.zones[zone_index].unk18.as_ref() else {
+            return;
+        };
+        let portal_infos = portal_infos.data();
+        let mut group_index = 0usize;
+        while group_index < portal_infos.len() {
+            let info = &portal_infos[group_index];
+            let next_group =
+                group_index.saturating_add(1usize.saturating_add(info.portal_count as usize));
+
+            // Native uses 0xFFFF as the external/no-local-target sentinel.
+            if info.map_to != u16::MAX {
+                let target_zone = (info.map_to & 0x00ff) as usize;
+                let portal_index = usize::try_from(info.index).ok();
+                let portal_is_open = portal_index
+                    .and_then(|index| self.portals.get(index))
+                    .is_some_and(|portal| portal.flags & 1 == 0);
+
+                if portal_is_open && target_zone < requested.len() && !requested[target_zone] {
+                    // 0x004EEAB3 is depth-first and marks before recursion.
+                    self.mark_native_streaming_zone(target_zone, depth + 1, requested);
+                }
+            }
+
+            if next_group <= group_index {
+                break;
+            }
+            group_index = next_group;
+        }
+    }
+
+    /// Builds the visual MapZone list that feeds render record 0 at +0x20.
+    /// Robots.exe 0x004ED203 inserts the BSP root first; 0x004ED920 then walks
+    /// visible portal groups, permits shallower/equal-depth revisits, reparents
+    /// the embedded runtime-zone node, keeps sibling order by portal depth and
+    /// recurses while the next depth is < 16. 0x004EDDDB(..., 0) later flattens
+    /// that final tree into the +0x28/+0x2C array consumed by 0x004EC2AA.
+    #[cfg(test)]
+    pub fn native_visual_zone_indices(&self, point: Vec3, view_projection: Mat4) -> Vec<usize> {
+        self.native_visual_zone_frame(point, view_projection)
+            .ordered
+    }
+
+    pub(crate) fn native_visual_zone_frame(
+        &self,
+        point: Vec3,
+        view_projection: Mat4,
+    ) -> NativeVisualZoneFrame {
+        let Some(root_zone) = self.native_zone_index(point) else {
+            return NativeVisualZoneFrame::empty(self.zones.len());
+        };
+
+        let root_exclusion_mask = self.zones[root_zone].visual_zone_exclusion_mask;
+        let mut traversal = NativeVisualTraversal::new(self.zones.len());
+        self.collect_native_visual_zone(
+            root_zone,
+            1,
+            NativePortalClip::FULL,
+            view_projection,
+            &root_exclusion_mask,
+            &mut traversal,
+        );
+
+        let mut ordered = Vec::new();
+        traversal.flatten(root_zone, &mut ordered);
+        NativeVisualZoneFrame {
+            ordered,
+            frame_depths: traversal.frame_depths,
+            blocked_depth_writes: traversal.blocked_depth_writes,
+        }
+    }
+
+    fn collect_native_visual_zone(
+        &self,
+        zone_index: usize,
+        depth: usize,
+        parent_clip: NativePortalClip,
+        view_projection: Mat4,
+        root_exclusion_mask: &[u32; 8],
+        traversal: &mut NativeVisualTraversal,
+    ) {
+        if depth >= 16 || zone_index >= self.zones.len() {
+            return;
+        }
+        traversal.frame_depths[zone_index] = depth as i8;
+        traversal.clips[zone_index] = parent_clip;
+
+        let Some(portal_infos) = self.zones[zone_index].unk18.as_ref() else {
+            return;
+        };
+        let portal_infos = portal_infos.data();
+        let mut group_index = 0usize;
+        while group_index < portal_infos.len() {
+            let leader = &portal_infos[group_index];
+            let group_len = 1usize.saturating_add(leader.portal_count as usize);
+            let next_group = group_index.saturating_add(group_len);
+
+            if leader.map_to != u16::MAX {
+                // 0x004ED920 treats non-FFFF map_to as a direct local-zone
+                // index. Before touching that runtime zone it tests the bit in
+                // the root zone's serialized +0x40 256-bit exclusion mask.
+                let target_zone = leader.map_to as usize;
+                let target_excluded = target_zone < 256
+                    && (root_exclusion_mask[target_zone / 32] & (1u32 << (target_zone & 31))) != 0;
+                if target_excluded {
+                    group_index = next_group;
+                    continue;
+                }
+                if target_zone < self.zones.len() {
+                    let next_depth = depth.saturating_add(1);
+                    let previous_frame_depth = traversal.frame_depths[target_zone];
+                    let skip_open_portals = previous_frame_depth != 0
+                        && previous_frame_depth.unsigned_abs() < next_depth as u8;
+                    let mut group_clip: Option<NativePortalClip> = None;
+
+                    for info in portal_infos
+                        .iter()
+                        .skip(group_index)
+                        .take(group_len.min(portal_infos.len() - group_index))
+                    {
+                        let Some(portal_index) = usize::try_from(info.index).ok() else {
+                            continue;
+                        };
+                        let Some(portal) = self.portals.get(portal_index) else {
+                            continue;
+                        };
+
+                        if portal.flags & 1 == 0 {
+                            if skip_open_portals {
+                                continue;
+                            }
+                            let Some(clip) = native_portal_clip(
+                                portal,
+                                info.flipped,
+                                parent_clip,
+                                view_projection,
+                            ) else {
+                                continue;
+                            };
+                            group_clip = Some(match group_clip {
+                                Some(existing) => existing.union(clip),
+                                None => clip,
+                            });
+                        } else if previous_frame_depth == 0 {
+                            // 0x004ED920 writes -(next depth) directly into the
+                            // persistent +0x6B byte when a disabled portal sees
+                            // a target without a transient +0x6D depth.
+                            traversal.blocked_depth_writes[target_zone] = Some(-(next_depth as i8));
+                            if let Some(clip) = native_portal_clip(
+                                portal,
+                                info.flipped,
+                                parent_clip,
+                                view_projection,
+                            ) {
+                                traversal.clips[target_zone] = clip;
+                            }
+                        } else if previous_frame_depth > 0 {
+                            // Native merges only the four projected screen bounds
+                            // here; the target depth interval remains unchanged.
+                            traversal.clips[target_zone] =
+                                traversal.clips[target_zone].union_screen(parent_clip);
+                        }
+                    }
+
+                    if let Some(clip) = group_clip {
+                        traversal.reparent_sorted(zone_index, target_zone, clip);
+                        // A depth-16 child is inserted into the tree but native
+                        // does not recurse into it, so it can appear in the final
+                        // render list without receiving a +0x6D depth value.
+                        if next_depth < 16 {
+                            self.collect_native_visual_zone(
+                                target_zone,
+                                next_depth,
+                                clip,
+                                view_projection,
+                                root_exclusion_mask,
+                                traversal,
+                            );
+                        }
+                    }
+                }
+            }
+
+            if next_group <= group_index {
+                break;
+            }
+            group_index = next_group;
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NativeVisualZoneFrame {
+    pub ordered: Vec<usize>,
+    pub frame_depths: Vec<i8>,
+    pub blocked_depth_writes: Vec<Option<i8>>,
+}
+
+impl NativeVisualZoneFrame {
+    fn empty(zone_count: usize) -> Self {
+        Self {
+            ordered: Vec::new(),
+            frame_depths: vec![0; zone_count],
+            blocked_depth_writes: vec![None; zone_count],
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NativeVisualTraversal {
+    frame_depths: Vec<i8>,
+    blocked_depth_writes: Vec<Option<i8>>,
+    clips: Vec<NativePortalClip>,
+    parent: Vec<Option<usize>>,
+    children: Vec<Vec<usize>>,
+}
+
+impl NativeVisualTraversal {
+    fn new(zone_count: usize) -> Self {
+        Self {
+            frame_depths: vec![0; zone_count],
+            blocked_depth_writes: vec![None; zone_count],
+            clips: vec![NativePortalClip::FULL; zone_count],
+            parent: vec![None; zone_count],
+            children: vec![Vec::new(); zone_count],
+        }
+    }
+
+    fn reparent_sorted(&mut self, parent_zone: usize, target_zone: usize, clip: NativePortalClip) {
+        if let Some(old_parent) = self.parent[target_zone] {
+            self.children[old_parent].retain(|child| *child != target_zone);
+        }
+        self.parent[target_zone] = Some(parent_zone);
+        self.clips[target_zone] = clip;
+
+        let target_depth = clip.depth_min;
+        let insert_at = self.children[parent_zone]
+            .iter()
+            .position(|child| target_depth < self.clips[*child].depth_min)
+            .unwrap_or(self.children[parent_zone].len());
+        self.children[parent_zone].insert(insert_at, target_zone);
+    }
+
+    fn flatten(&self, zone_index: usize, output: &mut Vec<usize>) {
+        output.push(zone_index);
+        for child in &self.children[zone_index] {
+            self.flatten(*child, output);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NativePortalClip {
+    min: Vec2,
+    max: Vec2,
+    depth_min: f32,
+    depth_max: f32,
+}
+
+impl NativePortalClip {
+    const FULL: Self = Self {
+        min: Vec2::splat(-1.0),
+        max: Vec2::splat(1.0),
+        depth_min: 0.0,
+        depth_max: 1.0,
+    };
+
+    fn union(self, other: Self) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+            depth_min: self.depth_min.min(other.depth_min),
+            depth_max: self.depth_max.max(other.depth_max),
+        }
+    }
+
+    fn union_screen(self, other: Self) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+            depth_min: self.depth_min,
+            depth_max: self.depth_max,
+        }
+    }
+}
+
+fn native_clip_plane_value(vertex: Vec4, plane: usize) -> f32 {
+    match plane {
+        0 => vertex.x + vertex.w,
+        1 => vertex.w - vertex.x,
+        2 => vertex.y + vertex.w,
+        3 => vertex.w - vertex.y,
+        4 => vertex.z,
+        5 => vertex.w - vertex.z,
+        _ => vertex.w,
+    }
+}
+
+fn native_clip_polygon_to_frustum(mut polygon: Vec<Vec4>) -> Vec<Vec4> {
+    for plane in 0..6 {
+        if polygon.is_empty() {
+            break;
+        }
+        let input = std::mem::take(&mut polygon);
+        let mut previous = *input.last().unwrap();
+        let mut previous_distance = native_clip_plane_value(previous, plane);
+        for current in input {
+            let current_distance = native_clip_plane_value(current, plane);
+            let previous_inside = previous_distance >= 0.0;
+            let current_inside = current_distance >= 0.0;
+            if previous_inside != current_inside {
+                let denominator = previous_distance - current_distance;
+                if denominator.abs() > f32::EPSILON {
+                    let t = previous_distance / denominator;
+                    polygon.push(previous + (current - previous) * t);
+                }
+            }
+            if current_inside {
+                polygon.push(current);
+            }
+            previous = current;
+            previous_distance = current_distance;
+        }
+    }
+    polygon
+}
+
+fn native_portal_clip(
+    portal: &ProcessedPortal,
+    flipped: u8,
+    parent_clip: NativePortalClip,
+    view_projection: Mat4,
+) -> Option<NativePortalClip> {
+    let homogeneous = portal
+        .vertices
+        .map(|vertex| view_projection * vertex.extend(1.0));
+
+    // 0x004ED38B rejects the portal according to its serialized flipped bit and
+    // projected winding before intersecting it with the parent portal window.
+    // Keep the same inequality when all source vertices can be projected
+    // directly. Near-plane crossings are clipped below and stay conservative.
+    if homogeneous.iter().all(|vertex| vertex.w.abs() > 1.0e-6) {
+        let projected = homogeneous.map(|vertex| vertex.truncate() / vertex.w);
+        let winding = (projected[1].x - projected[2].x) * (projected[1].y - projected[0].y)
+            <= (projected[1].x - projected[0].x) * (projected[1].y - projected[2].y);
+        if (flipped == 0) != winding {
+            return None;
+        }
+    }
+
+    let polygon = native_clip_polygon_to_frustum(homogeneous.to_vec());
+    if polygon.len() < 3 {
+        return None;
+    }
+
+    let mut min = Vec2::splat(f32::INFINITY);
+    let mut max = Vec2::splat(f32::NEG_INFINITY);
+    let mut depth_min = f32::INFINITY;
+    let mut depth_max = f32::NEG_INFINITY;
+    for vertex in polygon {
+        if vertex.w.abs() <= 1.0e-6 {
+            continue;
+        }
+        let ndc = vertex.truncate() / vertex.w;
+        min = min.min(ndc.truncate());
+        max = max.max(ndc.truncate());
+        depth_min = depth_min.min(ndc.z);
+        depth_max = depth_max.max(ndc.z);
+    }
+    if !min.is_finite() || !max.is_finite() || !depth_min.is_finite() || !depth_max.is_finite() {
+        return None;
+    }
+
+    min = min.max(parent_clip.min);
+    max = max.min(parent_clip.max);
+    depth_min = depth_min.max(parent_clip.depth_min);
+    depth_max = depth_max.min(parent_clip.depth_max);
+    (min.x <= max.x && min.y <= max.y && depth_min <= depth_max).then_some(NativePortalClip {
+        min,
+        max,
+        depth_min,
+        depth_max,
+    })
 }
 
 fn map_editor_start_position(map: &ProcessedMap) -> Option<Vec3> {
@@ -440,6 +863,7 @@ pub fn read_from_file(edb: &mut EdbFile) -> Vec<ProcessedMap> {
 
         let mut map = ProcessedMap {
             hashcode: m.hashcode,
+            bsp_nodes: xmap.bsp_tree.0.clone(),
             mapzone_entities: vec![],
             placements: xmap.placements.data().clone(),
             placement_group_count: xmap.placement_groups.serialized_len(),
@@ -640,11 +1064,11 @@ pub fn read_from_file(edb: &mut EdbFile) -> Vec<ProcessedMap> {
 #[cfg(test)]
 mod tests {
     use super::{
-        map_editor_start_position, read_from_file, robots_camera_controller_plan,
-        robots_camera_flags, robots_camera_marker_scaled_data0, robots_camera_mode,
-        robots_camera_scaled_data4, robots_camera_scaled_data5, robots_monster_data15_value,
-        robots_monster_data4_value, robots_monster_flags, robots_monster_is_family,
-        robots_monster_proximity_radius, robots_monster_runtime_selector,
+        map_editor_start_position, native_portal_clip, read_from_file,
+        robots_camera_controller_plan, robots_camera_flags, robots_camera_marker_scaled_data0,
+        robots_camera_mode, robots_camera_scaled_data4, robots_camera_scaled_data5,
+        robots_monster_data15_value, robots_monster_data4_value, robots_monster_flags,
+        robots_monster_is_family, robots_monster_proximity_radius, robots_monster_runtime_selector,
         robots_monster_test_runtime_value, robots_monster_transporter_secondary_path_hash,
         robots_native_light_colour, robots_native_light_type_description,
         robots_npc_alternate_cutscenes, robots_npc_cutscene_is_null, robots_npc_flags,
@@ -653,14 +1077,18 @@ mod tests {
         robots_trigger_path_is_proven, robots_trigger_platform_angular_velocity,
         robots_trigger_runtime_path_acceleration, robots_trigger_runtime_path_speed,
         robots_watchbot_enter_distance, robots_watchbot_flags, robots_watchbot_leave_distance,
-        robots_watchbot_mode, ProcessedPortal,
+        robots_watchbot_mode, NativePortalClip, ProcessedPortal,
     };
     use eurochef_edb::{
-        binrw::BinReaderExt, edb::EdbFile, entity::EXGeoEntity, script::EXGeoAnimScript,
-        versions::Platform, HashcodeUtils,
+        binrw::BinReaderExt,
+        edb::EdbFile,
+        entity::{EXGeoEntity, ROBOTS_ENTITY_FLAG_NO_FOG},
+        script::EXGeoAnimScript,
+        versions::Platform,
+        HashcodeUtils,
     };
     use eurochef_shared::script::{UXGeoScript, UXGeoScriptCommandData};
-    use glam::Vec3;
+    use glam::{Mat4, Vec3};
     use std::{
         fs::File,
         io::{BufReader, Seek},
@@ -795,6 +1223,437 @@ mod tests {
         assert_eq!(robots_portal_neighbor_zone(&portal, 7, 8), Some(2));
         assert_eq!(robots_portal_neighbor_zone(&portal, 3, 8), None);
         assert_eq!(robots_portal_neighbor_zone(&portal, 2, 7), None);
+    }
+
+    #[test]
+    fn native_portal_clip_respects_winding_and_view_frustum() {
+        let projection = glam::camera::rh::proj::directx::perspective(
+            60.0f32.to_radians(),
+            16.0 / 9.0,
+            0.02,
+            2000.0,
+        );
+        let mut view_projection = projection * Mat4::IDENTITY;
+        view_projection.x_axis = -view_projection.x_axis;
+        let portal = ProcessedPortal {
+            map_a: 0,
+            map_b: 1,
+            flags: 0,
+            distance: 5.0,
+            vertices: [
+                Vec3::new(-1.0, -1.0, -5.0),
+                Vec3::new(1.0, -1.0, -5.0),
+                Vec3::new(1.0, 1.0, -5.0),
+                Vec3::new(-1.0, 1.0, -5.0),
+            ],
+            face_common: 0,
+            face_texture_ref: 0,
+            face_flags: 0,
+            face_vertices: vec![],
+        };
+        let front = native_portal_clip(&portal, 0, NativePortalClip::FULL, view_projection);
+        let back = native_portal_clip(&portal, 1, NativePortalClip::FULL, view_projection);
+        assert_ne!(front.is_some(), back.is_some());
+
+        let outside = ProcessedPortal {
+            vertices: portal
+                .vertices
+                .map(|vertex| vertex + Vec3::new(1000.0, 0.0, 0.0)),
+            ..portal
+        };
+        assert!(native_portal_clip(&outside, 0, NativePortalClip::FULL, view_projection).is_none());
+        assert!(native_portal_clip(&outside, 1, NativePortalClip::FULL, view_projection).is_none());
+    }
+
+    #[test]
+    fn real_map_visual_zone_exclusion_mask_corpus_when_requested() {
+        let Ok(root) = std::env::var("EUROCHEF_REAL_MAP_CORPUS_ROOT") else {
+            return;
+        };
+
+        fn collect_edb_paths(root: &Path, output: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_edb_paths(&path, output);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("edb"))
+                {
+                    output.push(path);
+                }
+            }
+        }
+
+        let mut paths = Vec::new();
+        collect_edb_paths(Path::new(&root), &mut paths);
+        paths.sort();
+
+        let mut map_count = 0usize;
+        let mut zone_count = 0usize;
+        let mut nonzero_zone_masks = Vec::new();
+        for path in paths {
+            let Ok(file) = File::open(&path) else {
+                continue;
+            };
+            let Ok(mut edb) = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc) else {
+                continue;
+            };
+            for map in read_from_file(&mut edb) {
+                map_count += 1;
+                zone_count += map.zones.len();
+                for (zone_index, zone) in map.zones.iter().enumerate() {
+                    if zone
+                        .visual_zone_exclusion_mask
+                        .iter()
+                        .any(|word| *word != 0)
+                    {
+                        nonzero_zone_masks.push((
+                            path.file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| path.display().to_string()),
+                            zone_index,
+                            zone.visual_zone_exclusion_mask,
+                            map.zones.len(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        eprintln!(
+            "VIS_ZONE_EXCLUSION_CORPUS maps={map_count} zones={zone_count} nonzero_masks={}",
+            nonzero_zone_masks.len()
+        );
+        for (file, zone, mask, zones) in &nonzero_zone_masks {
+            eprintln!("  {file} zone={zone}/{zones} mask={mask:08X?}");
+        }
+
+        assert_eq!(map_count, 18);
+        assert_eq!(zone_count, 351);
+        let compact = nonzero_zone_masks
+            .iter()
+            .map(|(file, zone, mask, zones)| (file.as_str(), *zone, mask[0], *zones))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            compact,
+            [
+                ("m04_cour.edb", 7, 0x0000_3800, 15),
+                ("m04_cour.edb", 8, 0x0000_3800, 15),
+                ("m04_cour.edb", 9, 0x0000_3000, 15),
+                ("m04_cour.edb", 11, 0x0000_0080, 15),
+                ("m04_cour.edb", 12, 0x0000_0380, 15),
+                ("m04_cour.edb", 13, 0x0000_0380, 15),
+            ]
+        );
+        assert!(nonzero_zone_masks
+            .iter()
+            .all(|(_, _, mask, _)| mask[1..] == [0; 7]));
+    }
+
+    #[test]
+    fn real_map_cross_submap_portal_corpus_when_requested() {
+        let Ok(root) = std::env::var("EUROCHEF_REAL_MAP_CORPUS_ROOT") else {
+            return;
+        };
+
+        fn collect_edb_paths(root: &Path, output: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_edb_paths(&path, output);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("edb"))
+                {
+                    output.push(path);
+                }
+            }
+        }
+
+        let mut paths = Vec::new();
+        collect_edb_paths(Path::new(&root), &mut paths);
+        paths.sort();
+
+        let mut multi_map_files = Vec::new();
+        let mut external_portal_rows = Vec::new();
+        let mut external_info_rows = Vec::new();
+        for path in paths {
+            let Ok(file) = File::open(&path) else {
+                continue;
+            };
+            let Ok(mut edb) = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc) else {
+                continue;
+            };
+            let maps = read_from_file(&mut edb);
+            let file_name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            if maps.len() > 1 {
+                multi_map_files.push((file_name.clone(), maps.len()));
+            }
+            for (map_index, map) in maps.iter().enumerate() {
+                for (portal_index, portal) in map.portals.iter().enumerate() {
+                    if portal.map_a == u16::MAX || portal.map_b == u16::MAX {
+                        external_portal_rows.push((
+                            file_name.clone(),
+                            map_index,
+                            map.hashcode,
+                            portal_index,
+                            portal.map_a,
+                            portal.map_b,
+                        ));
+                    }
+                }
+                for (zone_index, zone) in map.zones.iter().enumerate() {
+                    if let Some(infos) = zone.unk18.as_ref() {
+                        for (info_index, info) in infos.data().iter().enumerate() {
+                            if info.map_to == u16::MAX {
+                                external_info_rows.push((
+                                    file_name.clone(),
+                                    map_index,
+                                    map.hashcode,
+                                    zone_index,
+                                    info_index,
+                                    info.index,
+                                    info.map_on,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        eprintln!("CROSS_SUBMAP multi_map_files={multi_map_files:?}");
+        eprintln!(
+            "CROSS_SUBMAP external_portals={}",
+            external_portal_rows.len()
+        );
+        for row in &external_portal_rows {
+            eprintln!("  portal {row:?}");
+        }
+        eprintln!("CROSS_SUBMAP external_infos={}", external_info_rows.len());
+        for row in &external_info_rows {
+            eprintln!("  info {row:?}");
+        }
+
+        assert!(multi_map_files.is_empty());
+        assert!(external_portal_rows.is_empty());
+        assert!(external_info_rows.is_empty());
+    }
+
+    #[test]
+    fn real_map_zone_resource_fields_corpus_when_requested() {
+        let Ok(root) = std::env::var("EUROCHEF_REAL_MAP_CORPUS_ROOT") else {
+            return;
+        };
+
+        fn collect_edb_paths(root: &Path, output: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_edb_paths(&path, output);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("edb"))
+                {
+                    output.push(path);
+                }
+            }
+        }
+
+        let mut paths = Vec::new();
+        collect_edb_paths(Path::new(&root), &mut paths);
+        paths.sort();
+
+        let mut zone_count = 0usize;
+        let mut zero_resource_refs = 0usize;
+        let mut nonzero_masks = 0usize;
+        let mut resource_refs = std::collections::BTreeMap::<u32, usize>::new();
+        let mut mask_rows = Vec::new();
+        for path in paths {
+            let Ok(file) = File::open(&path) else {
+                continue;
+            };
+            let Ok(mut edb) = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc) else {
+                continue;
+            };
+            let file_name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            for map in read_from_file(&mut edb) {
+                for (zone_index, zone) in map.zones.iter().enumerate() {
+                    zone_count += 1;
+                    let resource_ref = zone.zone_resource_ref;
+                    *resource_refs.entry(resource_ref).or_default() += 1;
+                    if resource_ref == 0 {
+                        zero_resource_refs += 1;
+                    }
+                    let mask = zone.stream_resource_mask;
+                    if resource_ref != 0 {
+                        assert_eq!(resource_ref & 0xFF00_0000, 0x0800_0000);
+                        let resource_index = (resource_ref & 0x00FF_FFFF) as usize;
+                        assert!(resource_index < 128);
+                        assert_ne!(
+                            mask[resource_index / 32] & (1u32 << (resource_index & 31)),
+                            0
+                        );
+                    }
+                    if mask.iter().any(|word| *word != 0) {
+                        nonzero_masks += 1;
+                        mask_rows.push((file_name.clone(), zone_index, resource_ref, mask));
+                    }
+                }
+            }
+        }
+
+        eprintln!(
+            "ZONE_RESOURCE_CORPUS zones={zone_count} zero_refs={zero_resource_refs} unique_refs={} nonzero_masks={nonzero_masks}",
+            resource_refs.len()
+        );
+        eprintln!("ZONE_RESOURCE_REFS {resource_refs:08X?}");
+        for row in mask_rows.iter().take(64) {
+            eprintln!("  resource {row:08X?}");
+        }
+
+        assert_eq!(zone_count, 351);
+        assert!(resource_refs.len() > 1);
+        assert!(nonzero_masks > 0);
+    }
+
+    #[test]
+    fn real_map_sky_identifier_bit_zero_corpus_when_requested() {
+        let Ok(root) = std::env::var("EUROCHEF_REAL_MAP_CORPUS_ROOT") else {
+            return;
+        };
+
+        fn collect_edb_paths(root: &Path, output: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_edb_paths(&path, output);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("edb"))
+                {
+                    output.push(path);
+                }
+            }
+        }
+
+        let mut paths = Vec::new();
+        collect_edb_paths(Path::new(&root), &mut paths);
+        paths.sort();
+        let mut flagged = Vec::new();
+        for path in paths {
+            let Ok(file) = File::open(&path) else {
+                continue;
+            };
+            let Ok(mut edb) = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc) else {
+                continue;
+            };
+            let file_name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            for map in read_from_file(&mut edb) {
+                for (zone_index, zone) in map.zones.iter().enumerate() {
+                    if zone.identifier.flags & 1 != 0 {
+                        flagged.push((
+                            file_name.clone(),
+                            zone_index,
+                            zone.identifier.flags,
+                            zone.identifier.sky_index,
+                            zone.identifier.sky_anchor_y,
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            flagged.is_empty(),
+            "unexpected identifier bit0 zones: {flagged:?}"
+        );
+    }
+
+    #[test]
+    fn real_map_native_fog_corpus_when_requested() {
+        let Ok(root) = std::env::var("EUROCHEF_REAL_MAP_CORPUS_ROOT") else {
+            return;
+        };
+
+        fn collect_edb_paths(root: &Path, output: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_edb_paths(&path, output);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("edb"))
+                {
+                    output.push(path);
+                }
+            }
+        }
+
+        let mut paths = Vec::new();
+        collect_edb_paths(Path::new(&root), &mut paths);
+        paths.sort();
+        let mut zone_count = 0usize;
+        let mut enabled_count = 0usize;
+        let mut methods = std::collections::BTreeSet::new();
+        for path in paths {
+            let Ok(file) = File::open(&path) else {
+                continue;
+            };
+            let Ok(mut edb) = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc) else {
+                continue;
+            };
+            for map in read_from_file(&mut edb) {
+                for zone in &map.zones {
+                    zone_count += 1;
+                    let identifier = &zone.identifier;
+                    methods.insert(identifier.fog_method);
+                    if identifier.fog_method == 0 {
+                        continue;
+                    }
+                    enabled_count += 1;
+                    assert!(identifier.fog_near.is_finite());
+                    assert!(identifier.fog_far.is_finite());
+                    assert!(identifier.fog_min.is_finite());
+                    assert!(identifier.fog_max.is_finite());
+                    assert!(
+                        (identifier.fog_far - identifier.fog_near).abs() > f32::EPSILON,
+                        "enabled native fog has a zero near/far span"
+                    );
+                }
+            }
+        }
+
+        eprintln!(
+            "NATIVE_FOG_CORPUS zones={zone_count} enabled={enabled_count} methods={methods:?}"
+        );
+        assert_eq!(zone_count, 351);
+        assert!(enabled_count > 0);
     }
 
     #[test]
@@ -1654,16 +2513,9 @@ mod tests {
             editor_start.distance(Vec3::new(200.076_77, 0.0, 88.114_5)) < 0.003,
             "unexpected City editor start position: {editor_start:?}"
         );
-        let start_zone = crate::map_zone::robots_map_zone_index_by_bounds(
-            map.zones.len(),
-            editor_start,
-            |index| {
-                let a = Vec3::from(map.zones[index].bounds_box[0]);
-                let b = Vec3::from(map.zones[index].bounds_box[1]);
-                (a.min(b), a.max(b))
-            },
-        )
-        .expect("City start MapZone");
+        let start_zone = map
+            .native_zone_index(editor_start)
+            .expect("City start MapZone BSP leaf");
         assert_eq!(start_zone, 6);
         assert_eq!(map.zones[start_zone].identifier.sky_index, 1);
         assert_eq!(map.skies[1], 0x8400_0017);
@@ -2733,7 +3585,7 @@ mod tests {
             );
             assert_eq!(
                 base.flags, expected_flags,
-                "0x{target:08X} changed its native sky transform flag class"
+                "0x{target:08X} changed its serialized Entity flags"
             );
             assert!(base
                 .bounds_box
@@ -2832,7 +3684,7 @@ mod tests {
     }
 
     #[test]
-    fn real_main_map_sky_background_flag_corpus_when_requested() {
+    fn real_main_map_sky_no_fog_flag_corpus_when_requested() {
         let Ok(root) = std::env::var("EUROCHEF_REAL_MAIN_MAP_SKY_ROOT") else {
             return;
         };
@@ -2892,7 +3744,7 @@ mod tests {
         paths.sort();
 
         let mut audited_maps = 0usize;
-        let mut world_only_maps = Vec::new();
+        let mut fog_eligible_only_maps = Vec::new();
         for path in paths {
             let open_edb = || {
                 let file = File::open(&path).expect("main-map fixture disappeared");
@@ -2927,8 +3779,8 @@ mod tests {
             let mut entity_edb = open_edb();
             let header = entity_edb.header.clone();
             let endian = entity_edb.endian;
-            let mut background_count = 0usize;
-            let mut world_count = 0usize;
+            let mut no_fog_count = 0usize;
+            let mut fog_eligible_count = 0usize;
             let mut classified_entities = Vec::new();
             for record in header
                 .entity_list
@@ -2943,20 +3795,20 @@ mod tests {
                     .expect("main-map sky Entity did not parse");
                 let flags = entity.base().map(|base| base.flags).unwrap_or_default();
                 classified_entities.push((record.common.hashcode, flags));
-                if flags & 0x10 != 0 {
-                    background_count += 1;
+                if flags & ROBOTS_ENTITY_FLAG_NO_FOG != 0 {
+                    no_fog_count += 1;
                 } else {
-                    world_count += 1;
+                    fog_eligible_count += 1;
                 }
             }
 
             let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if background_count == 0 {
-                world_only_maps.push(file_name.clone());
+            if no_fog_count == 0 {
+                fog_eligible_only_maps.push(file_name.clone());
             }
             eprintln!(
-                "{}: skies={:?} camera_relative={} world_space={} entities={:?}",
-                file_name, sky_object_list, background_count, world_count, classified_entities
+                "{}: skies={:?} no_fog={} fog_eligible={} entities={:?}",
+                file_name, sky_object_list, no_fog_count, fog_eligible_count, classified_entities
             );
             audited_maps += 1;
         }
@@ -2965,11 +3817,11 @@ mod tests {
             audited_maps >= 5,
             "too few main maps with skies were audited"
         );
-        assert_eq!(world_only_maps, ["m08_chas.edb"]);
+        assert_eq!(fog_eligible_only_maps, ["m08_chas.edb"]);
     }
 
     #[test]
-    fn real_m03_hub1_no_sky_zones_keep_a_camera_relative_background_source_when_requested() {
+    fn real_m03_hub1_no_sky_zones_keep_the_large_no_fog_background_entity_when_requested() {
         let Ok(path) = std::env::var("EUROCHEF_REAL_M03_HUB1_EDB") else {
             return;
         };
@@ -3022,11 +3874,12 @@ mod tests {
         let entity = entity_edb
             .read_type_args::<EXGeoEntity>(endian, (header.version, Platform::Pc))
             .expect("m03_hub1 background Entity did not parse");
-        let flags = entity
+        let base = entity
             .base()
-            .expect("m03_hub1 background Entity has no base")
-            .flags;
-        assert_ne!(flags & 0x10, 0);
+            .expect("m03_hub1 background Entity has no base");
+        assert_ne!(base.flags & 0x10, 0);
+        assert!(base.bounds_box[0][0] < 599.34375 && base.bounds_box[1][0] > 948.65625);
+        assert!(base.bounds_box[0][2] < -231.75 && base.bounds_box[1][2] > -93.9375);
     }
 
     #[test]

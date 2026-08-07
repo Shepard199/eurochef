@@ -6,6 +6,7 @@ in vec4 f_color;
 in vec3 f_eye;
 in vec3 f_worldPos;
 in vec3 f_worldNormal;
+in float f_fogDepth;
 
 uniform sampler2D u_texture;
 uniform float u_cutoutThreshold;
@@ -27,6 +28,11 @@ uniform vec4 u_nativeLightPositionRadius[EC_MAX_NATIVE_LIGHTS];
 uniform vec4 u_nativeLightDirectionType[EC_MAX_NATIVE_LIGHTS];
 uniform vec4 u_nativeLightColorEffect[EC_MAX_NATIVE_LIGHTS];
 uniform vec2 u_nativeLightParameters[EC_MAX_NATIVE_LIGHTS];
+
+uniform int u_fogEnabled;
+uniform vec3 u_fogColor;
+uniform vec2 u_fogNearFar;
+uniform vec2 u_fogAmountRange;
 
 vec2 matcap(vec3 eye, vec3 normal) {
   vec3 reflected = reflect(eye, normal);
@@ -97,6 +103,14 @@ vec3 nativeLighting(vec3 normal) {
   return accumulated * u_nativeLightStrength;
 }
 
+float nativeFogAmount(float depth) {
+  float span = u_fogNearFar.y - u_fogNearFar.x;
+  float t = abs(span) > 0.000001
+    ? clamp((depth - u_fogNearFar.x) / span, 0.0, 1.0)
+    : step(u_fogNearFar.y, depth);
+  return mix(u_fogAmountRange.x, u_fogAmountRange.y, t);
+}
+
 out vec4 o_color;
 void main() {
 #ifdef EC_MATCAP
@@ -144,4 +158,9 @@ void main() {
 #ifdef EC_NO_TRANSPARENCY
     o_color.a = 1.0;
 #endif
+
+    if (u_fogEnabled != 0) {
+        float fogAmount = clamp(nativeFogAmount(f_fogDepth), 0.0, 1.0);
+        o_color.rgb = mix(o_color.rgb, u_fogColor, fogAmount);
+    }
 }

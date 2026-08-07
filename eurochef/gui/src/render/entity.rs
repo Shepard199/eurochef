@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use eurochef_edb::{versions::Platform, Hashcode};
+use eurochef_edb::{entity::ROBOTS_ENTITY_FLAG_NO_FOG, versions::Platform, Hashcode};
 use eurochef_shared::entities::{TriStrip, UXVertex};
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use glow::HasContext;
@@ -12,7 +12,7 @@ use super::{
     gl_helper, robots_advance_live_lighting, robots_transform_world_light_sample,
     robots_world_light_sample,
     viewer::RenderContext,
-    NativeLight, NativeLightZone, RenderStore, RobotsDirectionalSlot,
+    NativeLight, NativeLightZone, RenderStore, RobotsDirectionalSlot, RobotsFog,
 };
 
 const NAVMESH_TEXTURE_DATA: &[u8] =
@@ -167,6 +167,33 @@ fn containing_native_light_zone(zones: &[NativeLightZone], object_position: Vec3
     robots_map_zone_index_by_bounds(zones.len(), object_position, |index| {
         (zones[index].bounds_min, zones[index].bounds_max)
     })
+}
+
+fn robots_entity_fog_enabled(entity_flags: u32, perspective: bool, fog: Option<RobotsFog>) -> bool {
+    perspective
+        && entity_flags & ROBOTS_ENTITY_FLAG_NO_FOG == 0
+        && fog.is_some_and(|fog| fog.enabled)
+}
+
+#[cfg(test)]
+fn robots_linear_fog_amount(depth: f32, fog: RobotsFog) -> f32 {
+    if !fog.enabled || !depth.is_finite() {
+        return 0.0;
+    }
+
+    let near_amount = fog.min.clamp(0.0, 1.0);
+    let far_amount = fog.max.clamp(0.0, 1.0);
+    let span = fog.far - fog.near;
+    if !span.is_finite() || span.abs() <= f32::EPSILON {
+        return if depth >= fog.far {
+            far_amount
+        } else {
+            near_amount
+        };
+    }
+
+    let t = ((depth - fog.near) / span).clamp(0.0, 1.0);
+    near_amount + (far_amount - near_amount) * t
 }
 
 fn select_native_lights<'a>(
@@ -421,6 +448,7 @@ impl EntityRenderer {
 
         self.upload_global_lighting(gl, shader, position, context);
         self.upload_native_lights(gl, shader, position, context);
+        self.upload_native_fog(gl, shader, position, context);
         gl.uniform_1_i32(gl.get_uniform_location(shader, "u_texture").as_ref(), 0);
         gl.uniform_4_f32(
             gl.get_uniform_location(shader, "u_tint").as_ref(),
@@ -686,6 +714,52 @@ impl EntityRenderer {
             gl.get_uniform_location(shader, "u_nativeLightParameters[0]")
                 .as_ref(),
             &parameters,
+        );
+    }
+
+    unsafe fn upload_native_fog(
+        &self,
+        gl: &glow::Context,
+        shader: glow::Program,
+        object_position: Vec3,
+        context: &RenderContext,
+    ) {
+        let zone_index = context
+            .uniforms
+            .native_fog_zone_override
+            .filter(|index| *index < context.uniforms.native_fog_zones.len())
+            .or_else(|| {
+                self.native_light_zone
+                    .filter(|index| *index < context.uniforms.native_fog_zones.len())
+            })
+            .or_else(|| {
+                containing_native_light_zone(&context.uniforms.native_light_zones, object_position)
+                    .filter(|index| *index < context.uniforms.native_fog_zones.len())
+            });
+        let fog =
+            zone_index.and_then(|index| context.uniforms.native_fog_zones.get(index).copied());
+        let enabled = robots_entity_fog_enabled(self.flags, context.uniforms.perspective, fog);
+
+        gl.uniform_1_i32(
+            gl.get_uniform_location(shader, "u_fogEnabled").as_ref(),
+            i32::from(enabled),
+        );
+        let fog = fog.unwrap_or_default();
+        gl.uniform_3_f32(
+            gl.get_uniform_location(shader, "u_fogColor").as_ref(),
+            fog.colour.x,
+            fog.colour.y,
+            fog.colour.z,
+        );
+        gl.uniform_2_f32(
+            gl.get_uniform_location(shader, "u_fogNearFar").as_ref(),
+            fog.near,
+            fog.far,
+        );
+        gl.uniform_2_f32(
+            gl.get_uniform_location(shader, "u_fogAmountRange").as_ref(),
+            fog.min.clamp(0.0, 1.0),
+            fog.max.clamp(0.0, 1.0),
         );
     }
 
@@ -993,9 +1067,9 @@ impl EntityRenderer {
 mod tests {
     use super::{
         containing_native_light_zone, native_light_feature_factor, native_light_range_factor,
-        select_native_lights,
+        robots_entity_fog_enabled, robots_linear_fog_amount, select_native_lights,
     };
-    use crate::render::{NativeLight, NativeLightZone};
+    use crate::render::{NativeLight, NativeLightZone, RobotsFog};
     use glam::Vec3;
 
     fn light(light_type: u16, x: f32) -> NativeLight {
@@ -1009,6 +1083,55 @@ mod tests {
             light_type,
             beam_angle_degrees: 60.0,
         }
+    }
+
+    #[test]
+    fn native_linear_fog_uses_serialized_min_max_as_fog_amount_endpoints() {
+        let fog = RobotsFog {
+            enabled: true,
+            near: 100.0,
+            far: 500.0,
+            min: 0.25,
+            max: 0.75,
+            colour: Vec3::new(0.2, 0.4, 0.6),
+        };
+        assert_eq!(robots_linear_fog_amount(0.0, fog), 0.25);
+        assert_eq!(robots_linear_fog_amount(100.0, fog), 0.25);
+        assert_eq!(robots_linear_fog_amount(300.0, fog), 0.5);
+        assert_eq!(robots_linear_fog_amount(500.0, fog), 0.75);
+        assert_eq!(robots_linear_fog_amount(1000.0, fog), 0.75);
+    }
+
+    #[test]
+    fn native_linear_fog_clamps_amounts_and_respects_disabled_state() {
+        let mut fog = RobotsFog {
+            enabled: true,
+            near: 10.0,
+            far: 20.0,
+            min: -2.0,
+            max: 3.0,
+            colour: Vec3::ONE,
+        };
+        assert_eq!(robots_linear_fog_amount(10.0, fog), 0.0);
+        assert_eq!(robots_linear_fog_amount(20.0, fog), 1.0);
+        fog.enabled = false;
+        assert_eq!(robots_linear_fog_amount(20.0, fog), 0.0);
+    }
+
+    #[test]
+    fn native_entity_no_fog_and_editor_orthographic_disable_fog() {
+        let fog = Some(RobotsFog {
+            enabled: true,
+            near: 10.0,
+            far: 20.0,
+            min: 0.0,
+            max: 1.0,
+            colour: Vec3::ONE,
+        });
+        assert!(robots_entity_fog_enabled(0, true, fog));
+        assert!(!robots_entity_fog_enabled(0x10, true, fog));
+        assert!(!robots_entity_fog_enabled(0, false, fog));
+        assert!(!robots_entity_fog_enabled(0, true, None));
     }
 
     #[test]

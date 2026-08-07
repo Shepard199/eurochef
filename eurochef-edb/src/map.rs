@@ -58,15 +58,25 @@ pub struct EXGeoMapZone {
     pub light_array: EXGeoHashArray<u16>, // 0x8
     pub sound_array: EXGeoHashArray<u16>,      // 0x10
     #[br(if(version.ne(&205)))]
-    pub unk18: Option<EXRelArray<()>>, // ???, 0x18 (u16?)
+    pub unk18: Option<EXRelArray<EXGeoPortalInfo>>, // native 0x004ED920: 8-byte portal groups
     #[br(if(version.ne(&205)))]
-    pub unk20: Option<EXRelArray<()>>, // ???, 0x20
+    pub unk20: Option<EXRelPtr<EXRelArray<u16>>>, // native 0x00553527: relptr to per-zone render-object index array
+    #[br(if(version.ne(&205)))]
+    pub unk24: Option<u32>, // serialized +0x24 dword; semantics not proven yet
     #[br(if(version.ne(&205)))]
     pub unk28: Option<EXRelPtr<()>>, // PlacementInfo?, 0x28
-    pub unk2c: EXRelPtr<()>,                   // ???, 0x2c
-    pub hash_ref: u32,                         // 0x30
-    pub section: u32,                          // 0x34
-    pub unk38: [u32; 10],                      // 0x38..0x5f
+    /// Robots.exe uses this raw handle with the resource manager at
+    /// 0x004EDE68/0x004F7248. Shipped Robots values are 0 (always ready) or
+    /// 0x080000NN resource handles.
+    pub zone_resource_ref: u32, // 0x2c
+    /// 128 resource bits consumed by 0x004EDE68. Streaming-requested zones OR
+    /// these masks together; each set bit addresses resource 0x08000000|bit.
+    pub stream_resource_mask: [u32; 4], // 0x30..0x3f
+
+    /// Robots.exe 0x004ED203 passes these eight DWORDs to 0x0053BC13 and
+    /// 0x004ED920 tests target-zone bits before traversing local portal groups.
+    /// A set bit excludes that target from the current visual portal tree.
+    pub visual_zone_exclusion_mask: [u32; 8], // 0x40..0x5f, 256 MapZone bits
 
     // Robots v248 omits these two pre-bounds dwords. Its bounds begin at +0x60.
     // Later layouts retain the pair and therefore begin their bounds at +0x68.
@@ -102,6 +112,10 @@ pub struct EXGeoIdentifier {
     pub rgba_above_water: [u8; 4],
     pub rgba_below_water: [u8; 4],
     pub sky_index: i32,
+    /// Robots.exe reads this float at EXGeoIdentifier + 0x3C when
+    /// `flags & 1` is set and uses it as the fixed Y component of the
+    /// native sky-root translation. X/Z come from the per-frame root input.
+    pub sky_anchor_y: f32,
 }
 
 // TODO(cohae): A lot of these structures might need to be split up into separate files

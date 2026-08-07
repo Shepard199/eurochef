@@ -4,7 +4,7 @@ use glam::Vec3;
 use instant::Instant;
 
 use super::{
-    camera::{ArcBallCamera, Camera3D, FpsCamera},
+    camera::{ArcBallCamera, Camera3D, FpsCamera, NativeViewCamera},
     grid::GridRenderer,
     shaders::Shaders,
     RenderUniforms,
@@ -36,6 +36,7 @@ pub struct BaseViewer {
     pub orthographic: bool,
     pub camera_orbit: ArcBallCamera,
     pub camera_fly: FpsCamera,
+    native_camera: Option<NativeViewCamera>,
     pub selected_camera: CameraType,
     pub grid: GridRenderer,
     pub uniforms: RenderUniforms,
@@ -49,6 +50,7 @@ impl BaseViewer {
         Self {
             camera_orbit: ArcBallCamera::default(),
             camera_fly: FpsCamera::default(),
+            native_camera: None,
             selected_camera: CameraType::Orbit,
             show_grid: true,
             orthographic: false,
@@ -77,6 +79,9 @@ impl BaseViewer {
     }
 
     pub fn camera(&self) -> &dyn Camera3D {
+        if let Some(camera) = &self.native_camera {
+            return camera;
+        }
         match self.selected_camera {
             CameraType::Fly => &self.camera_fly,
             CameraType::Orbit => &self.camera_orbit,
@@ -84,10 +89,21 @@ impl BaseViewer {
     }
 
     pub fn camera_mut(&mut self) -> &mut dyn Camera3D {
+        if let Some(camera) = &mut self.native_camera {
+            return camera;
+        }
         match self.selected_camera {
             CameraType::Fly => &mut self.camera_fly,
             CameraType::Orbit => &mut self.camera_orbit,
         }
+    }
+
+    pub fn set_native_camera(&mut self, camera: NativeViewCamera) {
+        self.native_camera = Some(camera);
+    }
+
+    pub fn clear_native_camera(&mut self) {
+        self.native_camera = None;
     }
 
     pub fn set_fly_camera_pose(&mut self, position: Vec3, direction: Vec3) {
@@ -131,20 +147,20 @@ impl BaseViewer {
             super::start_render(gl);
         }
 
-        let camera: &mut dyn Camera3D = match self.selected_camera {
-            CameraType::Fly => &mut self.camera_fly,
-            CameraType::Orbit => &mut self.camera_orbit,
-        };
-        self.uniforms.update(
-            if self.selected_camera == CameraType::Orbit {
-                self.orthographic
-            } else {
-                false
-            },
-            camera,
-            aspect_ratio,
-            time,
-        );
+        let orthographic = self.native_camera.is_none()
+            && self.selected_camera == CameraType::Orbit
+            && self.orthographic;
+        let uniforms = &mut self.uniforms;
+        if let Some(camera) = self.native_camera.as_mut() {
+            uniforms.update(false, camera, aspect_ratio, time);
+        } else {
+            match self.selected_camera {
+                CameraType::Fly => uniforms.update(false, &mut self.camera_fly, aspect_ratio, time),
+                CameraType::Orbit => {
+                    uniforms.update(orthographic, &mut self.camera_orbit, aspect_ratio, time)
+                }
+            }
+        }
 
         if self.show_grid {
             unsafe { self.grid.draw(&self.render_context(), gl) }

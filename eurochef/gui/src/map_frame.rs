@@ -25,13 +25,13 @@ use crate::map_runtime::{
     RuntimeEventPreviewState, RuntimePathNodeEvent, ROBOTS_EVENT_ACTIVATE, ROBOTS_EVENT_DEACTIVATE,
 };
 use crate::{
-    map_zone::{robots_map_zone_contains, robots_map_zone_index_by_bounds},
+    map_zone::robots_map_zone_contains,
     maps::{
         robots_camera_controller_plan, robots_camera_flags, robots_camera_marker_scaled_data0,
         robots_camera_mode, robots_camera_scaled_data4, robots_camera_scaled_data5,
-        robots_dev_map_info, robots_direct_object_audio_profile, robots_monster_data15_value,
-        robots_monster_data4_value, robots_monster_flags, robots_monster_is_family,
-        robots_monster_proximity_radius, robots_monster_runtime_selector,
+        robots_camera_viewport_runtime, robots_dev_map_info, robots_direct_object_audio_profile,
+        robots_monster_data15_value, robots_monster_data4_value, robots_monster_flags,
+        robots_monster_is_family, robots_monster_proximity_radius, robots_monster_runtime_selector,
         robots_monster_test_runtime_value, robots_monster_transporter_secondary_path_hash,
         robots_native_light_colour, robots_native_light_type_description,
         robots_npc_alternate_cutscenes, robots_npc_cutscene_is_null, robots_npc_flags,
@@ -41,12 +41,14 @@ use crate::{
         robots_trigger_path_data_slot, robots_trigger_path_hash, robots_trigger_path_is_proven,
         robots_trigger_platform_angular_velocity, robots_trigger_runtime_path_acceleration,
         robots_trigger_runtime_path_speed, robots_watchbot_enter_distance, robots_watchbot_flags,
-        robots_watchbot_leave_distance, robots_watchbot_mode, ObjectAudioProfile, ProcessedMap,
+        robots_watchbot_leave_distance, robots_watchbot_mode, NativeCameraViewportPose,
+        NativeCameraViewportRuntime, NativeVisualZoneFrame, ObjectAudioProfile, ProcessedMap,
         ProcessedTrigger,
     },
     render::{
         billboard::BillboardRenderer,
         blend::{set_blending_mode, BlendMode},
+        camera::NativeViewCamera,
         entity::EntityRenderer,
         gl_helper,
         particle::{ParticlePreviewSettings, ParticleRenderer},
@@ -55,8 +57,8 @@ use crate::{
         script::{collect_script_particles, render_script, render_static_script},
         trigger::{CollisionDatumRenderer, LinkLineRenderer, SelectCubeRenderer},
         tweeny::{self, Tweeny3D},
-        viewer::{BaseViewer, RenderContext},
-        NativeLight, NativeLightZone, RenderStore,
+        viewer::{BaseViewer, CameraType, RenderContext},
+        NativeLight, NativeLightZone, RenderStore, RobotsFog,
     },
     scripts::fan::{advance_native_fan_angle, apply_native_fan_rotation},
     sound_preview::{SharedSoundPreview, SoundVoiceGroup},
@@ -94,6 +96,9 @@ pub struct MapFrame {
     pub viewer: Arc<Mutex<BaseViewer>>,
     sky_ent: String,
     sky_diagnostic: String,
+    native_zone_runtime_map: Option<u32>,
+    native_zone_runtime: Vec<NativeMapZoneRuntimeState>,
+    native_sky_cache: Vec<Option<NativeSkyCacheEntry>>,
 
     /// Used to prevent keybinds being triggered while a textfield is focused
     textfield_focused: bool,
@@ -112,6 +117,9 @@ pub struct MapFrame {
     native_runtime_event_gate: bool,
     runtime_event_states: FxHashMap<u64, RuntimeEventPreviewState>,
     active_camera_trigger: Option<usize>,
+    apply_native_camera_viewport: bool,
+    native_camera_runtime: Option<NativeCameraViewportRuntime>,
+    native_camera_last_time: Option<f64>,
     preview_zone_background: bool,
     show_portals: bool,
     runtime_path_playback_speed: f32,
@@ -145,6 +153,148 @@ struct MapSkySelection {
     zone_index: Option<usize>,
     sky_index: Option<usize>,
     contains_camera: bool,
+    root_translation: Vec3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NativeSkyCacheEntry {
+    object: Hashcode,
+    root_translation: Vec3,
+    pending_removal: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MapSkyZoneState {
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+    sky_index: i32,
+    identifier_flags: u32,
+    sky_anchor_y: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct NativeMapZoneRuntimeState {
+    // Robots.exe runtime-zone byte +0x6A, toggled only by 0x0053BC88 after
+    // the serialized +0x2C resource reaches/leaves manager state 3. EuroChef
+    // reproduces the same resource-bit ownership with zero load/unload latency.
+    activated: bool,
+    // Persistent signed visual depth/state at +0x6B.
+    visual_depth: i8,
+    // Latched streaming-seen byte at +0x6C. 0x0053B2FA only sets it; the
+    // full map reset 0x0053B24A is the proven clear path.
+    stream_latched: bool,
+}
+
+fn robots_merge_visual_zone_depth(previous: i8, current: i8) -> i8 {
+    // Exact 0x0053B2FA signed-byte merge. Positive values are visible portal
+    // depths, negative values mark a disabled/blocked portal reach, and zero
+    // means no visual result this frame.
+    if current == 0 {
+        previous
+    } else if current > 0 {
+        if previous > 0 {
+            previous.min(current)
+        } else {
+            current
+        }
+    } else if previous > 0 {
+        previous
+    } else {
+        previous.min(current)
+    }
+}
+
+fn robots_stream_resource_mask(map: &ProcessedMap, streaming_requested: &[usize]) -> [u32; 4] {
+    let mut ready = [0u32; 4];
+    for zone_index in streaming_requested {
+        let Some(zone) = map.zones.get(*zone_index) else {
+            continue;
+        };
+        for (ready_word, zone_word) in ready.iter_mut().zip(zone.stream_resource_mask) {
+            *ready_word |= zone_word;
+        }
+    }
+    ready
+}
+
+fn robots_zone_resource_ready(resource_ref: u32, ready_mask: &[u32; 4]) -> bool {
+    if resource_ref == 0 {
+        // 0x004F7248 returns ready/state 3 for handle zero without consulting
+        // the resource table.
+        return true;
+    }
+    if resource_ref & 0xFF00_0000 != 0x0800_0000 {
+        return false;
+    }
+    let resource_index = (resource_ref & 0x00FF_FFFF) as usize;
+    resource_index < 128 && ready_mask[resource_index / 32] & (1u32 << (resource_index & 31)) != 0
+}
+
+fn robots_update_zone_runtime_state(
+    state: &mut NativeMapZoneRuntimeState,
+    frame_depth: i8,
+    blocked_depth_write: Option<i8>,
+    stream_requested: bool,
+    resource_ready: bool,
+) {
+    if let Some(blocked_depth) = blocked_depth_write {
+        // 0x004ED920 writes the negative reach directly to persistent +0x6B
+        // before 0x0053B2FA reconciles it with current-frame +0x6D.
+        state.visual_depth = blocked_depth;
+    }
+    state.visual_depth = robots_merge_visual_zone_depth(state.visual_depth, frame_depth);
+
+    if stream_requested {
+        // 0x0053B2FA latches +0x6C from transient +0x6E independently of
+        // resource readiness.
+        state.stream_latched = true;
+    }
+
+    // 0x004EDE68 queries serialized zone +0x2C through 0x004F7248 and invokes
+    // 0x0053B4C4 only for state 3 (ready). 0x0053B371 clears +0x6A for resource
+    // state 0/4. EuroChef models that manager with zero latency, so readiness is
+    // the current union of streamed resource bits rather than the zone's +0x6E.
+    state.activated = resource_ready;
+}
+
+fn robots_sky_cache_begin_frame(cache: &mut [Option<NativeSkyCacheEntry>]) {
+    // 0x004EDE68 calls 0x004ECB24 before the current resource transition pass.
+    // Animators marked pending during the previous pass are destroyed here.
+    for slot in cache {
+        if slot.is_some_and(|entry| entry.pending_removal) {
+            *slot = None;
+        }
+    }
+}
+
+fn robots_sky_cache_mark_pending(cache: &mut [Option<NativeSkyCacheEntry>], sky_index: i32) {
+    let Ok(sky_index) = usize::try_from(sky_index) else {
+        return;
+    };
+    if let Some(Some(entry)) = cache.get_mut(sky_index) {
+        // 0x0053B371 sets animator object flag bit 0x10 when the owning zone
+        // loses +0x6A. 0x004ECB24 consumes that flag on the following update.
+        entry.pending_removal = true;
+    }
+}
+
+fn robots_sky_cache_activate(
+    cache: &mut [Option<NativeSkyCacheEntry>],
+    selection: MapSkySelection,
+) {
+    let Some(sky_index) = selection.sky_index else {
+        return;
+    };
+    let Some(slot) = cache.get_mut(sky_index) else {
+        return;
+    };
+    // 0x004EC921 lazily creates the sky animator, clears pending-removal bit
+    // 0x10 and writes the newly selected animator matrix.
+    *slot = Some(NativeSkyCacheEntry {
+        object: selection.object,
+        root_translation: selection.root_translation,
+        pending_removal: false,
+    });
 }
 
 const TRIGGER_ICON_DATA: &[(&str, &[u8])] = &[
@@ -278,7 +428,8 @@ const ROBOTS_TRIGGER_INFO: &str = include_str!("../../../assets/triggers_robots.
 fn map_sky_selection(
     sky_override: &str,
     skies: &[Hashcode],
-    zone_skies: &[(Vec3, Vec3, i32)],
+    zones: &[MapSkyZoneState],
+    active_zone_indices: &[usize],
     camera_position: Vec3,
 ) -> Option<MapSkySelection> {
     if let Ok(sky) = u32::from_str_radix(sky_override.trim(), 16) {
@@ -287,64 +438,68 @@ fn map_sky_selection(
             zone_index: None,
             sky_index: None,
             contains_camera: false,
+            root_translation: camera_position,
         });
     }
 
-    let zone_index = robots_map_zone_index_by_bounds(zone_skies.len(), camera_position, |index| {
-        (zone_skies[index].0, zone_skies[index].1)
-    })?;
-    let (bounds_min, bounds_max, serialized_sky_index) = zone_skies[zone_index];
-    let sky_index = usize::try_from(serialized_sky_index).ok()?;
+    // Robots.exe 0x004EC2AA walks active runtime zones in order and uses the
+    // first one whose EXGeoIdentifier.sky_index is non-negative. There is no
+    // implicit skies[0] fallback for a no-sky zone.
+    let zone_index = *active_zone_indices
+        .iter()
+        .find(|index| zones.get(**index).is_some_and(|zone| zone.sky_index >= 0))?;
+    let zone = zones.get(zone_index)?;
+    let sky_index = usize::try_from(zone.sky_index).ok()?;
     let object = *skies.get(sky_index)?;
+    // Robots.exe 0x004EC921 starts from the sky animator matrix created by
+    // 0x004ECA89, which is identity. Identifier bit 0 is the only path that
+    // replaces its translation with camera X/Z plus the serialized Y anchor.
+    let root_translation = if zone.identifier_flags & 1 != 0 {
+        Vec3::new(camera_position.x, zone.sky_anchor_y, camera_position.z)
+    } else {
+        Vec3::ZERO
+    };
 
     Some(MapSkySelection {
         object,
         zone_index: Some(zone_index),
         sky_index: Some(sky_index),
-        // Zone zero is the unconditional fallback in 0x004E9E71 and is never
-        // tested against the point before later zones.
-        contains_camera: zone_index != 0
-            && robots_map_zone_contains(bounds_min, bounds_max, camera_position),
+        contains_camera: robots_map_zone_contains(
+            zone.bounds_min,
+            zone.bounds_max,
+            camera_position,
+        ),
+        root_translation,
     })
 }
 
-fn map_sky_background_fallback(
-    skies: &[Hashcode],
-    selection: Option<MapSkySelection>,
-) -> Option<Hashcode> {
-    selection
-        .is_none()
-        .then(|| skies.first().copied())
-        .flatten()
-}
-
-const ROBOTS_NATIVE_SCALED_SKY_FACTOR: f32 = f32::from_bits(0x3FD8_51E6);
+// Captured from the City runtime sky root (0x84000019 -> 0x82000030).
+// Ghidra finds no literal 0x3FD851E6 in Robots.exe, and the generic ownerless
+// animator constructor at 0x004ECA89 starts from identity. Keep this as a
+// corpus-specific compatibility factor until its producer transform is proven.
+const ROBOTS_CAPTURED_CITY_SKY_SCALE_FACTOR: f32 = f32::from_bits(0x3FD8_51E6);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MapSkyEntityClass {
-    CameraRelative,
-    NativeScaledCameraRelative,
-    WorldSpace,
+    NativeScaledBaseRoot,
+    Ordinary,
 }
 
 fn map_sky_entity_class(entity_flags: u32, base_sky_root: bool) -> MapSkyEntityClass {
-    if entity_flags & 0x10 != 0 {
-        MapSkyEntityClass::CameraRelative
-    } else if base_sky_root && entity_flags & 0x100 != 0 {
-        MapSkyEntityClass::NativeScaledCameraRelative
+    if base_sky_root && entity_flags & 0x100 != 0 {
+        MapSkyEntityClass::NativeScaledBaseRoot
     } else {
-        MapSkyEntityClass::WorldSpace
+        MapSkyEntityClass::Ordinary
     }
 }
 
-/// `EXGeoMap.skies` mixes camera-relative background members with map-space
-/// facade/decor geometry. Object-level flag 0x10 keeps the inherited camera
-/// translation. The root member of the first/base sky source may additionally
-/// use flag 0x100 for the runtime-proven scaled camera-relative matrix (City
-/// 0x84000019 -> 0x82000030). Roots of later zone Scripts and later members of
-/// the base Script remain map-space assemblies (City 0x8200002E/2F/98).
+/// Native Script submit (`0x004FAC68`) composes the Script matrix with the
+/// parent matrix once and passes that same matrix to every child animator.
+/// `EXGeoBaseEntity.flags & 0x10` never changes this transform; its proven
+/// meaning is per-entity fog disable. The only remaining transform special case
+/// is the captured City base-root scale whose producer is still unresolved.
 fn map_sky_entity_transform(
-    camera_position: Vec3,
+    _root_translation: Vec3,
     scripted_position: Vec3,
     scripted_scale: Vec3,
     entity_flags: u32,
@@ -352,15 +507,12 @@ fn map_sky_entity_transform(
 ) -> (Vec3, Vec3, MapSkyEntityClass) {
     let class = map_sky_entity_class(entity_flags, base_sky_root);
     match class {
-        MapSkyEntityClass::CameraRelative => (scripted_position, scripted_scale, class),
-        MapSkyEntityClass::NativeScaledCameraRelative => (
+        MapSkyEntityClass::NativeScaledBaseRoot => (
             scripted_position,
-            scripted_scale * ROBOTS_NATIVE_SCALED_SKY_FACTOR,
+            scripted_scale * ROBOTS_CAPTURED_CITY_SKY_SCALE_FACTOR,
             class,
         ),
-        MapSkyEntityClass::WorldSpace => {
-            (scripted_position - camera_position, scripted_scale, class)
-        }
+        MapSkyEntityClass::Ordinary => (scripted_position, scripted_scale, class),
     }
 }
 
@@ -368,13 +520,20 @@ fn map_sky_entity_transform(
 fn map_sky_objects(
     sky_override: &str,
     skies: &[Hashcode],
-    zone_skies: &[(Vec3, Vec3, i32)],
+    zones: &[MapSkyZoneState],
+    active_zone_indices: &[usize],
     camera_position: Vec3,
 ) -> Vec<Hashcode> {
-    map_sky_selection(sky_override, skies, zone_skies, camera_position)
-        .map(|selection| selection.object)
-        .into_iter()
-        .collect()
+    map_sky_selection(
+        sky_override,
+        skies,
+        zones,
+        active_zone_indices,
+        camera_position,
+    )
+    .map(|selection| selection.object)
+    .into_iter()
+    .collect()
 }
 
 fn robots_infinite_script_loop(script: &UXGeoScript) -> Option<(f32, f32)> {
@@ -495,6 +654,7 @@ pub struct QueuedEntityRender {
     pub scale: Vec3,
 }
 
+mod camera;
 mod canvas;
 mod controls;
 mod inspector;
@@ -503,6 +663,66 @@ mod script_sound;
 mod sound;
 
 impl MapFrame {
+    fn sync_native_zone_runtime(
+        &mut self,
+        map: &ProcessedMap,
+        visual_frame: &NativeVisualZoneFrame,
+        streaming_requested: &[usize],
+    ) -> [u32; 4] {
+        let zone_count = map.zones.len();
+        if self.native_zone_runtime_map != Some(map.hashcode)
+            || self.native_zone_runtime.len() != zone_count
+            || self.native_sky_cache.len() != map.skies.len()
+        {
+            self.native_zone_runtime_map = Some(map.hashcode);
+            self.native_zone_runtime = vec![NativeMapZoneRuntimeState::default(); zone_count];
+            self.native_sky_cache = vec![None; map.skies.len()];
+        }
+
+        // Native 0x004ECB24 runs before this frame's resource transitions.
+        robots_sky_cache_begin_frame(&mut self.native_sky_cache);
+
+        let ready_resource_mask = robots_stream_resource_mask(map, streaming_requested);
+        let mut requested = vec![false; zone_count];
+        for zone_index in streaming_requested {
+            if let Some(value) = requested.get_mut(*zone_index) {
+                *value = true;
+            }
+        }
+
+        for zone_index in 0..zone_count {
+            let frame_depth = visual_frame
+                .frame_depths
+                .get(zone_index)
+                .copied()
+                .unwrap_or(0);
+            let blocked_depth_write = visual_frame
+                .blocked_depth_writes
+                .get(zone_index)
+                .copied()
+                .flatten();
+            let resource_ready = robots_zone_resource_ready(
+                map.zones[zone_index].zone_resource_ref,
+                &ready_resource_mask,
+            );
+            let was_activated = self.native_zone_runtime[zone_index].activated;
+            robots_update_zone_runtime_state(
+                &mut self.native_zone_runtime[zone_index],
+                frame_depth,
+                blocked_depth_write,
+                requested[zone_index],
+                resource_ready,
+            );
+            if was_activated && !self.native_zone_runtime[zone_index].activated {
+                robots_sky_cache_mark_pending(
+                    &mut self.native_sky_cache,
+                    map.zones[zone_index].identifier.sky_index,
+                );
+            }
+        }
+        ready_resource_mask
+    }
+
     pub fn new(
         file: Hashcode,
         ref_renderers: Vec<(u32, Arc<Mutex<EntityRenderer>>)>,
@@ -560,6 +780,9 @@ impl MapFrame {
             viewer: Arc::new(Mutex::new(BaseViewer::new(&gl))),
             sky_ent: String::new(),
             sky_diagnostic: String::new(),
+            native_zone_runtime_map: None,
+            native_zone_runtime: Vec::new(),
+            native_sky_cache: Vec::new(),
             textfield_focused: false,
             vertex_lighting: true,
             global_lighting: true,
@@ -575,6 +798,9 @@ impl MapFrame {
             native_runtime_event_gate: true,
             runtime_event_states: FxHashMap::default(),
             active_camera_trigger: None,
+            apply_native_camera_viewport: true,
+            native_camera_runtime: None,
+            native_camera_last_time: None,
             preview_zone_background: false,
             show_portals: false,
             runtime_path_playback_speed: 1.0,
@@ -727,9 +953,12 @@ impl MapFrame {
 #[cfg(test)]
 mod tests {
     use super::{
-        map_script_time, map_sky_background_fallback, map_sky_entity_transform, map_sky_objects,
-        pickbuffer_pixel_position, MapSkyEntityClass, QueuedEntityRender, ROBOTS_TRIGGER_INFO,
-        TRIGGER_ICON_DATA,
+        map_script_time, map_sky_entity_transform, map_sky_objects, pickbuffer_pixel_position,
+        robots_merge_visual_zone_depth, robots_sky_cache_activate, robots_sky_cache_begin_frame,
+        robots_sky_cache_mark_pending, robots_stream_resource_mask,
+        robots_update_zone_runtime_state, robots_zone_resource_ready, MapSkyEntityClass,
+        MapSkySelection, MapSkyZoneState, NativeMapZoneRuntimeState, NativeSkyCacheEntry,
+        QueuedEntityRender, ROBOTS_TRIGGER_INFO, TRIGGER_ICON_DATA,
     };
     use crate::map_runtime::{
         apply_vehicle_steering_wheel_angle, closest_route_phase, map_trigger_link_index,
@@ -739,15 +968,18 @@ mod tests {
         RuntimeEventPreviewState, RuntimePathNodeEvent, ROBOTS_EVENT_ACTIVATE,
         ROBOTS_EVENT_DEACTIVATE,
     };
-    use crate::maps::{ProcessedMap, ProcessedPath, ProcessedPathNode, ProcessedTrigger};
+    use crate::maps::{
+        read_from_file, ProcessedMap, ProcessedPath, ProcessedPathNode, ProcessedTrigger,
+    };
     use crate::render::{entity::EntityRenderer, RenderStore};
     use egui::{Pos2, Rect};
-    use eurochef_edb::{map::EXGeoTriggerEngineOptions, versions::Platform};
+    use eurochef_edb::{edb::EdbFile, map::EXGeoTriggerEngineOptions, versions::Platform};
     use eurochef_shared::{
         maps::TriggerInformation,
         script::{UXGeoScript, UXGeoScriptCommand, UXGeoScriptCommandData},
     };
-    use glam::{Quat, Vec2, Vec3};
+    use glam::{Mat4, Quat, Vec2, Vec3};
+    use std::{fs::File, io::BufReader};
 
     fn path_node(position: Vec3) -> ProcessedPathNode {
         ProcessedPathNode {
@@ -779,6 +1011,131 @@ mod tests {
             trigger_script: None,
             character_visual: None,
             incoming_links: vec![],
+        }
+    }
+
+    #[test]
+    fn native_visual_depth_merge_matches_signed_runtime_rules() {
+        assert_eq!(robots_merge_visual_zone_depth(0, 0), 0);
+        assert_eq!(robots_merge_visual_zone_depth(-4, 0), -4);
+        assert_eq!(robots_merge_visual_zone_depth(5, 0), 5);
+        assert_eq!(robots_merge_visual_zone_depth(0, 3), 3);
+        assert_eq!(robots_merge_visual_zone_depth(-2, 3), 3);
+        assert_eq!(robots_merge_visual_zone_depth(5, 3), 3);
+        assert_eq!(robots_merge_visual_zone_depth(2, 3), 2);
+        assert_eq!(robots_merge_visual_zone_depth(4, -2), 4);
+        assert_eq!(robots_merge_visual_zone_depth(0, -2), -2);
+        assert_eq!(robots_merge_visual_zone_depth(-1, -3), -3);
+        assert_eq!(robots_merge_visual_zone_depth(-4, -2), -4);
+    }
+
+    #[test]
+    fn native_zone_runtime_separates_stream_latch_from_resource_activation() {
+        let mut state = NativeMapZoneRuntimeState::default();
+        robots_update_zone_runtime_state(&mut state, 0, Some(-3), false, false);
+        assert_eq!(state.visual_depth, -3);
+        assert!(!state.stream_latched);
+        assert!(!state.activated);
+
+        robots_update_zone_runtime_state(&mut state, 2, None, true, true);
+        assert_eq!(state.visual_depth, 2);
+        assert!(state.stream_latched);
+        assert!(state.activated);
+
+        // +0x6C remains latched, but zero-latency editor resource eviction clears
+        // +0x6A once the owning resource is no longer in the ready mask.
+        robots_update_zone_runtime_state(&mut state, 0, None, false, false);
+        assert_eq!(state.visual_depth, 2);
+        assert!(state.stream_latched);
+        assert!(!state.activated);
+    }
+
+    #[test]
+    fn native_zone_resource_ready_uses_resource_bits_not_zone_requests() {
+        let mut ready = [0u32; 4];
+        assert!(robots_zone_resource_ready(0, &ready));
+        assert!(!robots_zone_resource_ready(0x0800_0008, &ready));
+        ready[0] |= 1 << 8;
+        assert!(robots_zone_resource_ready(0x0800_0008, &ready));
+        assert!(!robots_zone_resource_ready(0x0800_0020, &ready));
+        ready[1] |= 1;
+        assert!(robots_zone_resource_ready(0x0800_0020, &ready));
+        assert!(!robots_zone_resource_ready(0x0900_0008, &ready));
+    }
+
+    #[test]
+    fn native_sky_cache_persists_through_no_selection_and_honours_pending_removal() {
+        let mut cache = vec![None, None];
+        let selection = MapSkySelection {
+            object: 0x8400_000D,
+            zone_index: Some(4),
+            sky_index: Some(0),
+            contains_camera: true,
+            root_translation: Vec3::new(10.0, 20.0, 30.0),
+        };
+
+        robots_sky_cache_activate(&mut cache, selection);
+        assert_eq!(
+            cache[0],
+            Some(NativeSkyCacheEntry {
+                object: 0x8400_000D,
+                root_translation: Vec3::new(10.0, 20.0, 30.0),
+                pending_removal: false,
+            })
+        );
+
+        // A no-sky frame performs no 0x004EC921 call. 0x004ECB24 therefore
+        // leaves the already-created animator alive.
+        robots_sky_cache_begin_frame(&mut cache);
+        assert!(cache[0].is_some());
+
+        // 0x0053B371 marks the slot after this frame's 0x004ECB24 pass, so it
+        // still exists for the current frame and is consumed next frame.
+        robots_sky_cache_mark_pending(&mut cache, 0);
+        assert!(cache[0].is_some_and(|entry| entry.pending_removal));
+
+        // Reactivation in the same frame clears the pending bit and preserves
+        // the slot on the next 0x004ECB24 pass.
+        robots_sky_cache_activate(&mut cache, selection);
+        robots_sky_cache_begin_frame(&mut cache);
+        assert!(cache[0].is_some_and(|entry| !entry.pending_removal));
+
+        robots_sky_cache_mark_pending(&mut cache, 0);
+        robots_sky_cache_begin_frame(&mut cache);
+        assert!(cache[0].is_none());
+    }
+
+    #[test]
+    fn real_m03_hub1_no_sky_zone_resource_context_when_requested() {
+        let Ok(path) = std::env::var("EUROCHEF_REAL_M03_HUB1_EDB") else {
+            return;
+        };
+        let file = File::open(path).expect("m03_hub1 fixture is missing");
+        let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+            .expect("m03_hub1 fixture is invalid");
+        let maps = read_from_file(&mut edb);
+        let map = maps.first().expect("m03_hub1 map is missing");
+        assert_eq!(map.skies.first().copied(), Some(0x8400_000D));
+
+        for (zone_index, expected_mask) in [(29usize, 0x10u32), (30usize, 0x20u32)] {
+            let zone = &map.zones[zone_index];
+            assert_eq!(zone.identifier.sky_index, -1);
+            let camera = (Vec3::from(zone.bounds_box[0]) + Vec3::from(zone.bounds_box[1])) * 0.5;
+            let streaming = map.native_streaming_request_zone_indices(camera);
+            assert_eq!(streaming, [zone_index]);
+            let ready = robots_stream_resource_mask(map, &streaming);
+            assert_eq!(ready, [expected_mask, 0, 0, 0]);
+            let ready_sky_zones = map
+                .zones
+                .iter()
+                .enumerate()
+                .filter_map(|(index, candidate)| {
+                    (candidate.identifier.sky_index >= 0
+                        && robots_zone_resource_ready(candidate.zone_resource_ref, &ready))
+                    .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            assert!(ready_sky_zones.is_empty());
         }
     }
 
@@ -1141,125 +1498,432 @@ mod tests {
     }
 
     #[test]
-    fn map_sky_separates_scaled_root_members_from_later_world_assemblies() {
-        let camera = Vec3::new(100.0, 20.0, -40.0);
+    fn map_sky_keeps_native_parent_transform_and_only_scales_the_captured_base_root() {
+        let parent_translation = Vec3::new(100.0, 20.0, -40.0);
         let command_translation = Vec3::new(-53.0, -5.0, 18.0);
-        let scripted = camera + command_translation;
+        let scripted = parent_translation + command_translation;
         let scripted_scale = Vec3::new(2.0, 3.0, 4.0);
 
+        // Serialized Entity flag 0x10 is NoFog. It must not cancel or invent
+        // any part of the Script parent matrix.
         let (position, scale, class) =
-            map_sky_entity_transform(camera, scripted, scripted_scale, 0x10, false);
-        assert_eq!(class, MapSkyEntityClass::CameraRelative);
+            map_sky_entity_transform(parent_translation, scripted, scripted_scale, 0x10, false);
+        assert_eq!(class, MapSkyEntityClass::Ordinary);
         assert_eq!(position, scripted);
         assert_eq!(scale, scripted_scale);
 
         let (position, scale, class) =
-            map_sky_entity_transform(camera, scripted, scripted_scale, 0x300, true);
-        assert_eq!(class, MapSkyEntityClass::NativeScaledCameraRelative);
+            map_sky_entity_transform(parent_translation, scripted, scripted_scale, 0x300, true);
+        assert_eq!(class, MapSkyEntityClass::NativeScaledBaseRoot);
         assert_eq!(position, scripted);
         assert_eq!(
             scale,
-            scripted_scale * super::ROBOTS_NATIVE_SCALED_SKY_FACTOR
+            scripted_scale * super::ROBOTS_CAPTURED_CITY_SKY_SCALE_FACTOR
         );
 
-        for flags in [0, 0x100, 0x300, 0x4000_0000] {
-            let (position, scale, class) =
-                map_sky_entity_transform(camera, scripted, scripted_scale, flags, false);
-            assert_eq!(class, MapSkyEntityClass::WorldSpace, "flags=0x{flags:08X}");
-            assert_eq!(position, command_translation);
+        for flags in [0, 0x10, 0x100, 0x300, 0x4000_0000] {
+            let (position, scale, class) = map_sky_entity_transform(
+                parent_translation,
+                scripted,
+                scripted_scale,
+                flags,
+                false,
+            );
+            assert_eq!(class, MapSkyEntityClass::Ordinary, "flags=0x{flags:08X}");
+            assert_eq!(position, scripted);
             assert_eq!(scale, scripted_scale);
         }
     }
 
     #[test]
-    fn map_sky_missing_zone_assembly_keeps_first_background_source() {
-        let skies = [0x8400_000D, 0x8400_000C];
-        assert_eq!(map_sky_background_fallback(&skies, None), Some(0x8400_000D));
-        assert_eq!(
-            map_sky_background_fallback(
-                &skies,
-                Some(super::MapSkySelection {
-                    object: 0x8400_000C,
-                    zone_index: Some(29),
-                    sky_index: Some(1),
-                    contains_camera: true,
-                }),
-            ),
-            None
-        );
-        assert_eq!(map_sky_background_fallback(&[], None), None);
-    }
-
-    #[test]
-    fn map_sky_uses_the_first_serialized_matching_zone_and_preserves_override() {
+    fn map_sky_uses_the_native_selected_zone_and_preserves_override() {
         let skies = [0x8400_0019, 0x8400_0017, 0x8400_0035, 0x8400_0018];
         let zones = [
-            (Vec3::splat(-100.0), Vec3::splat(100.0), 0),
-            (Vec3::splat(-10.0), Vec3::splat(10.0), 1),
-            (Vec3::splat(-1.0), Vec3::splat(1.0), 3),
-            (Vec3::splat(20.0), Vec3::splat(22.0), 2),
+            MapSkyZoneState {
+                bounds_min: Vec3::splat(-100.0),
+                bounds_max: Vec3::splat(100.0),
+                sky_index: 0,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
+            MapSkyZoneState {
+                bounds_min: Vec3::splat(-10.0),
+                bounds_max: Vec3::splat(10.0),
+                sky_index: 1,
+                identifier_flags: 1,
+                sky_anchor_y: 12.5,
+            },
+            MapSkyZoneState {
+                bounds_min: Vec3::splat(-1.0),
+                bounds_max: Vec3::splat(1.0),
+                sky_index: 3,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
+            MapSkyZoneState {
+                bounds_min: Vec3::splat(20.0),
+                bounds_max: Vec3::splat(22.0),
+                sky_index: 2,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
         ];
 
         assert_eq!(
-            map_sky_objects("", &skies, &zones, Vec3::ZERO),
+            map_sky_objects("", &skies, &zones, &[1], Vec3::ZERO),
             [0x8400_0017]
         );
         assert_eq!(
-            map_sky_objects("not-hex", &skies, &zones, Vec3::splat(21.0)),
+            map_sky_objects("not-hex", &skies, &zones, &[3], Vec3::splat(21.0)),
             [0x8400_0035]
         );
         assert_eq!(
-            map_sky_objects("0200017e", &skies, &zones, Vec3::ZERO),
+            map_sky_objects("0200017e", &skies, &zones, &[1], Vec3::ZERO),
             [0x0200_017E]
         );
     }
 
     #[test]
-    fn map_sky_uses_zone_zero_outside_all_non_default_bounds() {
+    fn map_sky_uses_first_active_zone_with_a_serialized_sky() {
+        let skies = [0x8400_000D, 0x8400_000C];
+        let zones = [
+            MapSkyZoneState {
+                bounds_min: Vec3::ZERO,
+                bounds_max: Vec3::ONE,
+                sky_index: -1,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
+            MapSkyZoneState {
+                bounds_min: Vec3::ZERO,
+                bounds_max: Vec3::ONE,
+                sky_index: 1,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
+            MapSkyZoneState {
+                bounds_min: Vec3::ZERO,
+                bounds_max: Vec3::ONE,
+                sky_index: 0,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
+        ];
+        assert_eq!(
+            map_sky_objects("", &skies, &zones, &[0, 2, 1], Vec3::ZERO),
+            [0x8400_000D]
+        );
+        assert!(map_sky_objects("", &skies, &zones, &[0], Vec3::ZERO).is_empty());
+    }
+
+    #[test]
+    fn map_sky_identifier_flag_one_uses_serialized_y_anchor() {
+        let skies = [0x8400_0019];
+        let zones = [MapSkyZoneState {
+            bounds_min: Vec3::splat(-100.0),
+            bounds_max: Vec3::splat(100.0),
+            sky_index: 0,
+            identifier_flags: 1,
+            sky_anchor_y: 77.25,
+        }];
+        let camera = Vec3::new(12.0, 999.0, -34.0);
+        let selection = super::map_sky_selection("", &skies, &zones, &[0], camera).unwrap();
+        assert_eq!(selection.root_translation, Vec3::new(12.0, 77.25, -34.0));
+    }
+
+    #[test]
+    fn map_sky_without_anchor_override_keeps_identity_root_translation() {
+        let skies = [0x8400_0019];
+        let zones = [MapSkyZoneState {
+            bounds_min: Vec3::splat(-100.0),
+            bounds_max: Vec3::splat(100.0),
+            sky_index: 0,
+            identifier_flags: 0x0001_0000,
+            sky_anchor_y: 0.0,
+        }];
+        let camera = Vec3::new(12.0, 34.0, -56.0);
+        let selection = super::map_sky_selection("", &skies, &zones, &[0], camera).unwrap();
+        assert_eq!(selection.root_translation, Vec3::ZERO);
+    }
+
+    #[test]
+    fn real_m02_city_zones_2_3_and_22_use_native_sky_roots_when_requested() {
+        let Ok(path) = std::env::var("EUROCHEF_REAL_M02_CITY_EDB") else {
+            return;
+        };
+        let file = File::open(&path).expect("m02_city fixture is missing");
+        let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+            .expect("m02_city fixture is not a valid PC EDB");
+        let maps = read_from_file(&mut edb);
+        let map = maps.first().expect("m02_city map is missing");
+        let zones = map
+            .zones
+            .iter()
+            .map(|zone| MapSkyZoneState {
+                bounds_min: Vec3::from(zone.bounds_box[0]),
+                bounds_max: Vec3::from(zone.bounds_box[1]),
+                sky_index: zone.identifier.sky_index,
+                identifier_flags: zone.identifier.flags,
+                sky_anchor_y: zone.identifier.sky_anchor_y,
+            })
+            .collect::<Vec<_>>();
+
+        let reported_camera = Vec3::new(171.425, 9.511, 170.960);
+        assert_eq!(map.native_zone_index(reported_camera), Some(2));
+        assert!(map
+            .zones
+            .iter()
+            .all(|zone| zone.visual_zone_exclusion_mask == [0; 8]));
+        let reported_streaming = map.native_streaming_request_zone_indices(reported_camera);
+        assert_eq!(reported_streaming, [1, 2, 3, 8, 9, 10, 22]);
+        assert_eq!(map.zones[2].zone_resource_ref, 0x0800_0008);
+        assert_eq!(map.zones[2].stream_resource_mask, [0x0000_0900, 0, 0, 0]);
+        assert_eq!(map.zones[3].zone_resource_ref, 0x0800_0008);
+        assert_eq!(map.zones[3].stream_resource_mask, [0x0000_2100, 0, 0, 0]);
+        assert_eq!(map.zones[22].zone_resource_ref, 0x0800_001A);
+        assert_eq!(map.zones[22].stream_resource_mask, [0x1400_0840, 0, 0, 0]);
+        let reported_ready_resources = robots_stream_resource_mask(map, &reported_streaming);
+        assert_eq!(reported_ready_resources, [0x1400_2978, 1, 0, 0]);
+        assert!(robots_zone_resource_ready(
+            map.zones[2].zone_resource_ref,
+            &reported_ready_resources
+        ));
+        assert!(robots_zone_resource_ready(
+            map.zones[3].zone_resource_ref,
+            &reported_ready_resources
+        ));
+        assert!(robots_zone_resource_ready(
+            map.zones[22].zone_resource_ref,
+            &reported_ready_resources
+        ));
+        assert!(!reported_streaming.contains(&0));
+        assert_eq!(map.zones[0].zone_resource_ref, 0x0800_0006);
+        assert!(robots_zone_resource_ready(
+            map.zones[0].zone_resource_ref,
+            &reported_ready_resources
+        ));
+
+        for zone_index in [2usize, 3usize] {
+            let zone = &map.zones[zone_index];
+            assert_eq!(zone.identifier.sky_index, 0);
+            assert_eq!(zone.identifier.flags, 0x0001_0000);
+            let camera = if zone_index == 2 {
+                reported_camera
+            } else {
+                (Vec3::from(zone.bounds_box[0]) + Vec3::from(zone.bounds_box[1])) * 0.5
+            };
+            let visual_zones = map.native_visual_zone_indices(camera, Mat4::IDENTITY);
+            assert_eq!(visual_zones.first().copied(), Some(zone_index));
+            let selection = super::map_sky_selection("", &map.skies, &zones, &visual_zones, camera)
+                .expect("City zone must select its serialized sky");
+            assert_eq!(selection.zone_index, Some(zone_index));
+            assert_eq!(selection.object, 0x8400_0019);
+            assert_eq!(selection.root_translation, Vec3::ZERO);
+        }
+
+        let zone22 = &map.zones[22];
+        assert_eq!(zone22.identifier.sky_index, 5);
+        assert_eq!(zone22.identifier.flags, 0x0001_0000);
+        let zone22_camera =
+            (Vec3::from(zone22.bounds_box[0]) + Vec3::from(zone22.bounds_box[1])) * 0.5;
+        assert_eq!(
+            map.native_streaming_request_zone_indices(zone22_camera),
+            [0, 1, 2, 3, 8, 18, 21, 22]
+        );
+        let zone22_visual = map.native_visual_zone_indices(zone22_camera, Mat4::IDENTITY);
+        assert_eq!(zone22_visual.first().copied(), Some(22));
+        let zone22_selection =
+            super::map_sky_selection("", &map.skies, &zones, &zone22_visual, zone22_camera)
+                .expect("City zone 22 must select its serialized sky");
+        assert_eq!(zone22_selection.zone_index, Some(22));
+        assert_eq!(zone22_selection.object, 0x8400_0036);
+        assert_eq!(zone22_selection.root_translation, Vec3::ZERO);
+
+        let script_file = File::open(std::env::var("EUROCHEF_REAL_M02_CITY_EDB").unwrap())
+            .expect("m02_city script fixture is missing");
+        let mut script_edb = EdbFile::new(Box::new(BufReader::new(script_file)), Platform::Pc)
+            .expect("m02_city script fixture is invalid");
+        let scripts =
+            UXGeoScript::read_all(&mut script_edb).expect("m02_city scripts did not parse");
+
+        let entity_file = File::open(std::env::var("EUROCHEF_REAL_M02_CITY_EDB").unwrap())
+            .expect("m02_city entity fixture is missing");
+        let mut entity_edb = EdbFile::new(Box::new(BufReader::new(entity_file)), Platform::Pc)
+            .expect("m02_city entity fixture is invalid");
+        let (entities, _, _) = crate::entities::read_from_file(&mut entity_edb, None)
+            .expect("m02_city entities did not parse");
+        let entity_status = entities
+            .iter()
+            .map(|(_, entity)| (entity.hashcode, entity.data.is_ok()))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        let expected_sky_entities: &[(u32, &[u32])] = &[
+            (
+                0x8400_0019,
+                &[
+                    0x8200_0030,
+                    0x8200_003C,
+                    0x8200_003D,
+                    0x8200_003E,
+                    0x8200_0031,
+                    0x8200_0032,
+                    0x8200_0033,
+                    0x8200_0034,
+                    0x8200_0035,
+                    0x8200_0036,
+                    0x8200_0037,
+                    0x8200_0038,
+                    0x8200_003B,
+                    0x8200_0039,
+                    0x8200_003A,
+                    0x8200_000D,
+                ],
+            ),
+            (
+                0x8400_0036,
+                &[0x8200_009A, 0x8200_003C, 0x8200_003D, 0x8200_003E],
+            ),
+        ];
+        let mut render_store = RenderStore::new();
+        for script in &scripts {
+            render_store.insert_script(edb.header.hashcode, script.clone());
+        }
+
+        for (sky, expected_entities) in expected_sky_entities {
+            let script = scripts
+                .iter()
+                .find(|script| script.hashcode == *sky)
+                .unwrap();
+            let entity_commands = script
+                .commands
+                .iter()
+                .filter_map(|command| match command.data {
+                    UXGeoScriptCommandData::Entity { hashcode, .. } => Some(hashcode),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(entity_commands.as_slice(), *expected_entities);
+            for hashcode in &entity_commands {
+                assert_eq!(
+                    entity_status.get(hashcode),
+                    Some(&true),
+                    "sky entity 0x{hashcode:08X} did not parse"
+                );
+            }
+
+            let mut queued_entities = Vec::new();
+            super::render_static_script(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                Vec3::ONE,
+                edb.header.hashcode,
+                *sky,
+                script.time_at_frame(1.0),
+                &render_store,
+                &mut |queued| queued_entities.push(queued.entity.1),
+                vec![],
+            );
+            assert_eq!(queued_entities.as_slice(), *expected_entities);
+        }
+    }
+
+    #[test]
+    fn map_sky_accepts_native_zone_zero_leaf_without_fallback_semantics() {
         let skies = [0x8400_0019, 0x8400_0017];
         let zones = [
-            (Vec3::splat(100.0), Vec3::splat(102.0), 1),
-            (Vec3::splat(10.0), Vec3::splat(12.0), 0),
+            MapSkyZoneState {
+                bounds_min: Vec3::splat(100.0),
+                bounds_max: Vec3::splat(102.0),
+                sky_index: 1,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
+            MapSkyZoneState {
+                bounds_min: Vec3::splat(10.0),
+                bounds_max: Vec3::splat(12.0),
+                sky_index: 0,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
         ];
 
         assert_eq!(
-            map_sky_objects("", &skies, &zones, Vec3::ZERO),
+            map_sky_objects("", &skies, &zones, &[0], Vec3::ZERO),
             [0x8400_0017]
         );
     }
 
     #[test]
-    fn map_sky_no_sky_zone_suppresses_parent_facade() {
+    fn map_sky_no_sky_active_set_does_not_invent_base_sky() {
         let skies = [0x8400_0019];
         let zones = [
-            (Vec3::splat(-10.0), Vec3::splat(10.0), 0),
-            (Vec3::splat(-1.0), Vec3::splat(1.0), -1),
+            MapSkyZoneState {
+                bounds_min: Vec3::splat(-10.0),
+                bounds_max: Vec3::splat(10.0),
+                sky_index: 0,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
+            MapSkyZoneState {
+                bounds_min: Vec3::splat(-1.0),
+                bounds_max: Vec3::splat(1.0),
+                sky_index: -1,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
         ];
 
-        assert!(map_sky_objects("", &skies, &zones, Vec3::ZERO).is_empty());
+        assert!(map_sky_objects("", &skies, &zones, &[1], Vec3::ZERO).is_empty());
     }
 
     #[test]
     fn map_sky_invalid_selected_index_does_not_fall_back() {
         let skies = [0x8400_0019];
         let zones = [
-            (Vec3::splat(-1.0), Vec3::splat(1.0), 7),
-            (Vec3::splat(20.0), Vec3::splat(22.0), 0),
+            MapSkyZoneState {
+                bounds_min: Vec3::splat(-1.0),
+                bounds_max: Vec3::splat(1.0),
+                sky_index: 7,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
+            MapSkyZoneState {
+                bounds_min: Vec3::splat(20.0),
+                bounds_max: Vec3::splat(22.0),
+                sky_index: 0,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
         ];
 
-        assert!(map_sky_objects("", &skies, &zones, Vec3::ZERO).is_empty());
-        assert!(map_sky_objects("", &skies, &[], Vec3::ZERO).is_empty());
+        assert!(map_sky_objects("", &skies, &zones, &[0], Vec3::ZERO).is_empty());
+        assert!(map_sky_objects("", &skies, &[], &[], Vec3::ZERO).is_empty());
     }
 
     #[test]
-    fn map_sky_outside_bounds_does_not_use_nearest_valid_sky_zone() {
+    fn map_sky_skips_active_no_sky_zone_before_later_active_sky_zone() {
         let skies = [0x8400_0019];
         let zones = [
-            (Vec3::splat(100.0), Vec3::splat(102.0), -1),
-            (Vec3::splat(20.0), Vec3::splat(22.0), 0),
+            MapSkyZoneState {
+                bounds_min: Vec3::splat(100.0),
+                bounds_max: Vec3::splat(102.0),
+                sky_index: -1,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
+            MapSkyZoneState {
+                bounds_min: Vec3::splat(20.0),
+                bounds_max: Vec3::splat(22.0),
+                sky_index: 0,
+                identifier_flags: 0,
+                sky_anchor_y: 0.0,
+            },
         ];
 
-        assert!(map_sky_objects("", &skies, &zones, Vec3::ZERO).is_empty());
+        assert_eq!(
+            map_sky_objects("", &skies, &zones, &[0, 1], Vec3::ZERO),
+            [0x8400_0019]
+        );
     }
 
     #[test]

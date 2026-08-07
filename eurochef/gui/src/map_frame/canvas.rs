@@ -59,16 +59,52 @@ impl MapFrame {
             context.request_repaint();
         }
 
+        self.sync_native_camera_viewport(map, time);
+        if self
+            .native_camera_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_transitioning())
+        {
+            context.request_repaint();
+        }
+
         let viewer = self.viewer.clone();
-        let (camera_pos, camera_rotation) = {
+        let (camera_pos, camera_rotation, camera_view_projection, camera_orthographic) = {
             let mut v = viewer.lock();
             if !self.textfield_focused {
                 v.update(ui, &response);
             }
 
+            let orbit_orthographic = v.selected_camera == CameraType::Orbit && v.orthographic;
             let camera = v.camera_mut();
             let camera_pos = camera.position();
             let camera_rotation = camera.rotation();
+            let vertical_fov = camera.vertical_fov_radians();
+            let camera_zoom = camera.zoom();
+            let camera_view = camera.calculate_matrix();
+            let aspect_ratio = (rect.width() / rect.height().max(1.0)).max(1.0e-6);
+            let aspect_ratio_vert = (1.0 / aspect_ratio).max(1.0);
+            let orthographic = orbit_orthographic && vertical_fov.is_none();
+            let mut projection = if orthographic {
+                glam::camera::rh::proj::opengl::orthographic(
+                    (-(aspect_ratio * aspect_ratio_vert) * -camera_zoom) * 2.0,
+                    ((aspect_ratio * aspect_ratio_vert) * -camera_zoom) * 2.0,
+                    (aspect_ratio_vert * -camera_zoom) * 2.0,
+                    (-aspect_ratio_vert * -camera_zoom) * 2.0,
+                    -2500.0,
+                    2500.0,
+                )
+            } else {
+                glam::camera::rh::proj::directx::perspective(
+                    vertical_fov.unwrap_or_else(|| 2.0 * aspect_ratio_vert.atan()),
+                    aspect_ratio,
+                    0.02,
+                    2000.0,
+                )
+            };
+            if !orthographic {
+                projection.x_axis = -projection.x_axis;
+            }
 
             if let Some(tween) = &mut self.trigger_focus_tween {
                 if tween.is_finished() {
@@ -79,17 +115,46 @@ impl MapFrame {
                 }
             }
 
-            (camera_pos, camera_rotation)
+            (
+                camera_pos,
+                camera_rotation,
+                projection * camera_view,
+                orthographic,
+            )
         };
 
-        let active_zone_index =
-            robots_map_zone_index_by_bounds(map.zones.len(), camera_pos, |index| {
-                let zone = &map.zones[index];
-                (
-                    Vec3::from(zone.bounds_box[0]),
-                    Vec3::from(zone.bounds_box[1]),
-                )
-            });
+        let active_zone_index = map.native_zone_index(camera_pos);
+        // Robots uses the perspective portal path recovered from 0x004ED38B.
+        // EuroChef's editor-only orthographic camera has no native equivalent,
+        // so keep its visual frame pinned to the BSP root instead of feeding an
+        // incompatible OpenGL-depth projection through the native portal test.
+        let visual_frame = if camera_orthographic {
+            let mut frame_depths = vec![0; map.zones.len()];
+            let ordered = active_zone_index.into_iter().collect::<Vec<_>>();
+            if let Some(root_zone) = ordered.first().copied() {
+                frame_depths[root_zone] = 1;
+            }
+            NativeVisualZoneFrame {
+                ordered,
+                frame_depths,
+                blocked_depth_writes: vec![None; map.zones.len()],
+            }
+        } else {
+            map.native_visual_zone_frame(camera_pos, camera_view_projection)
+        };
+        let streaming_requested = map.native_streaming_request_zone_indices(camera_pos);
+        let ready_resource_mask =
+            self.sync_native_zone_runtime(map, &visual_frame, &streaming_requested);
+        let active_visual_zones = visual_frame
+            .ordered
+            .iter()
+            .copied()
+            .filter(|zone_index| {
+                self.native_zone_runtime
+                    .get(*zone_index)
+                    .is_some_and(|state| state.activated)
+            })
+            .collect::<Vec<_>>();
         let zone_background_color =
             active_zone_index.map(|index| map.zones[index].identifier.rgba_back_ground);
 
@@ -105,57 +170,129 @@ impl MapFrame {
 
         // TODO(cohae): How do we get out of this situation
         let map = map.clone(); // FIXME(cohae): ugh.
-        let zone_skies = map
+        let sky_zones = map
             .zones
             .iter()
-            .map(|zone| {
-                (
-                    Vec3::from(zone.bounds_box[0]),
-                    Vec3::from(zone.bounds_box[1]),
-                    zone.identifier.sky_index,
-                )
+            .map(|zone| super::MapSkyZoneState {
+                bounds_min: Vec3::from(zone.bounds_box[0]),
+                bounds_max: Vec3::from(zone.bounds_box[1]),
+                sky_index: zone.identifier.sky_index,
+                identifier_flags: zone.identifier.flags,
+                sky_anchor_y: zone.identifier.sky_anchor_y,
             })
             .collect::<Vec<_>>();
-        let sky_selection = map_sky_selection(&self.sky_ent, &map.skies, &zone_skies, camera_pos);
-        let sky_background_fallback = map_sky_background_fallback(&map.skies, sky_selection);
+        // Robots.exe 0x004ED203/0x004ED920 builds visual portal record 0 and
+        // 0x004EDDDB flattens it into the +0x28/+0x2C zone-pointer array read by
+        // 0x004EC2AA. This is deliberately distinct from the +0x6E streaming
+        // request traversal built later in the frame.
+        let sky_selection = map_sky_selection(
+            &self.sky_ent,
+            &map.skies,
+            &sky_zones,
+            &active_visual_zones,
+            camera_pos,
+        );
+        if let Some(selection) = sky_selection {
+            robots_sky_cache_activate(&mut self.native_sky_cache, selection);
+        }
+        let sky_cache_diagnostic = self
+            .native_sky_cache
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                entry.map(|entry| (index, entry.object, entry.pending_removal))
+            })
+            .collect::<Vec<_>>();
         let sky_diagnostic = match sky_selection {
-            Some(selection) => format!(
-                "Camera [{:.3}, {:.3}, {:.3}]  zone={}  sky_index={}  object=0x{:08X}  {}",
-                camera_pos.x,
-                camera_pos.y,
-                camera_pos.z,
-                selection
+            Some(selection) => {
+                let runtime_state = selection
                     .zone_index
-                    .map(|index| index.to_string())
-                    .unwrap_or_else(|| "override".to_string()),
-                selection
-                    .sky_index
-                    .map(|index| index.to_string())
-                    .unwrap_or_else(|| "override".to_string()),
-                selection.object,
-                match (selection.zone_index, selection.contains_camera) {
-                    (None, _) => "override",
-                    (Some(0), false) => "zone0-fallback",
-                    (Some(_), true) => "inside",
-                    _ => "selected",
-                }
-            ),
+                    .and_then(|zone_index| self.native_zone_runtime.get(zone_index))
+                    .copied()
+                    .unwrap_or_default();
+                let frame_depth = selection
+                    .zone_index
+                    .and_then(|zone_index| visual_frame.frame_depths.get(zone_index))
+                    .copied()
+                    .unwrap_or(0);
+                let stream_now = selection
+                    .zone_index
+                    .is_some_and(|zone_index| streaming_requested.contains(&zone_index));
+                let resource_ref = selection
+                    .zone_index
+                    .and_then(|zone_index| map.zones.get(zone_index))
+                    .map(|zone| zone.zone_resource_ref)
+                    .unwrap_or(0);
+                format!(
+                    "Camera [{:.3}, {:.3}, {:.3}]  bsp_zone={} visual={:?} active={:?} stream={:?} ready_res={:08X?} sky_cache={:?} sky_zone={} resource=0x{:08X} state[6A={} 6B={} 6C={} 6D={} 6E={}] sky_index={} object=0x{:08X} root=[{:.3}, {:.3}, {:.3}]  {}",
+                    camera_pos.x,
+                    camera_pos.y,
+                    camera_pos.z,
+                    active_zone_index
+                        .map(|index| index.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    visual_frame.ordered,
+                    active_visual_zones,
+                    streaming_requested,
+                    ready_resource_mask,
+                    sky_cache_diagnostic,
+                    selection
+                        .zone_index
+                        .map(|index| index.to_string())
+                        .unwrap_or_else(|| "override".to_string()),
+                    resource_ref,
+                    u8::from(runtime_state.activated),
+                    runtime_state.visual_depth,
+                    u8::from(runtime_state.stream_latched),
+                    frame_depth,
+                    u8::from(stream_now),
+                    selection
+                        .sky_index
+                        .map(|index| index.to_string())
+                        .unwrap_or_else(|| "override".to_string()),
+                    selection.object,
+                    selection.root_translation.x,
+                    selection.root_translation.y,
+                    selection.root_translation.z,
+                    match (selection.zone_index, selection.contains_camera) {
+                        (None, _) => "override",
+                        (Some(zone), true) if Some(zone) == active_zone_index => "bsp root owns sky",
+                        (Some(_), true) => "visible sky zone also contains camera",
+                        (Some(_), false) => "visible portal sky zone",
+                    }
+                )
+            }
             None => format!(
-                "Camera [{:.3}, {:.3}, {:.3}]  no zone assembly; background_fallback={}",
+                "Camera [{:.3}, {:.3}, {:.3}]  bsp_zone={} visual={:?} active={:?} stream={:?} ready_res={:08X?} sky_cache={:?}  no activated visual zone with sky_index >= 0",
                 camera_pos.x,
                 camera_pos.y,
                 camera_pos.z,
-                sky_background_fallback
-                    .map(|object| format!("0x{object:08X}"))
-                    .unwrap_or_else(|| "none".to_string())
+                active_zone_index
+                    .map(|index| index.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                visual_frame.ordered,
+                active_visual_zones,
+                streaming_requested,
+                ready_resource_mask,
+                sky_cache_diagnostic,
             ),
         };
         if self.sky_diagnostic != sky_diagnostic {
             eprintln!("[Robots] map sky selection: {sky_diagnostic}");
             self.sky_diagnostic = sky_diagnostic;
         }
-        let sky_objects = sky_selection
-            .map(|selection| selection.object)
+        // 0x004ECB24 only advances cached animator state through
+        // 0x004ECB98 -> 0x004E9123. The transform/render submit is the distinct
+        // 0x004ECA75 -> 0x004E9188 path invoked by 0x004EC921 for the sky chosen
+        // this frame, so a cached-but-unselected sky must not be drawn.
+        let sky_sources = sky_selection
+            .map(|selection| {
+                (
+                    selection.object,
+                    selection.root_translation,
+                    selection.zone_index,
+                )
+            })
             .into_iter()
             .collect::<Vec<_>>();
         let default_trigger_icon = self.default_trigger_icon;
@@ -231,6 +368,23 @@ impl MapFrame {
                     }
                 })
                 .collect();
+            v.uniforms.native_fog_zones = map
+                .zones
+                .iter()
+                .map(|zone| RobotsFog {
+                    enabled: zone.identifier.fog_method != 0,
+                    near: zone.identifier.fog_near,
+                    far: zone.identifier.fog_far,
+                    min: zone.identifier.fog_min,
+                    max: zone.identifier.fog_max,
+                    colour: Vec3::new(
+                        zone.identifier.rgba_fog[0] as f32,
+                        zone.identifier.rgba_fog[1] as f32,
+                        zone.identifier.rgba_fog[2] as f32,
+                    ) / 255.0,
+                })
+                .collect();
+            v.uniforms.native_fog_zone_override = None;
             let lightmap = {
                 let mut cached = global_lightmap.lock();
                 if cached
@@ -274,6 +428,9 @@ impl MapFrame {
             sky_uniforms.global_lighting = None;
             sky_uniforms.global_lightmap = None;
             sky_uniforms.native_lights_enabled = false;
+            sky_uniforms.native_fog_zone_override = sky_sources
+                .first()
+                .and_then(|(_, _, zone_index)| *zone_index);
             let sky_render_context = RenderContext {
                 shaders: &v.shaders,
                 uniforms: &sky_uniforms,
@@ -286,24 +443,19 @@ impl MapFrame {
             };
 
             let base_sky = map.skies.first().copied();
-            let mut sky_queue = Vec::<(QueuedEntityRender, bool, bool)>::new();
-            for (sky, background_only) in sky_objects
-                .iter()
-                .copied()
-                .map(|sky| (sky, false))
-                .chain(sky_background_fallback.into_iter().map(|sky| (sky, true)))
-            {
+            let mut sky_queue = Vec::<(QueuedEntityRender, bool, Vec3)>::new();
+            for (sky, root_translation, _) in sky_sources.iter().copied() {
                 match sky.base() {
                     0x02000000 => sky_queue.push((
                         QueuedEntityRender {
                             entity: (current_file, sky),
                             entity_alt: None,
-                            position: camera_pos,
+                            position: root_translation,
                             rotation: Quat::IDENTITY,
                             scale: Vec3::ONE,
                         },
-                        background_only,
                         base_sky == Some(sky),
+                        root_translation,
                     )),
                     0x04000000 => {
                         let sky_time = render_store
@@ -314,7 +466,7 @@ impl MapFrame {
                         let native_scaled_source = base_sky == Some(sky);
                         let mut root_member = true;
                         render_static_script(
-                            camera_pos,
+                            root_translation,
                             Quat::IDENTITY,
                             Vec3::ONE,
                             current_file,
@@ -324,8 +476,8 @@ impl MapFrame {
                             &mut |queued| {
                                 sky_queue.push((
                                     queued,
-                                    background_only,
                                     native_scaled_source && root_member,
+                                    root_translation,
                                 ));
                                 root_member = false;
                             },
@@ -338,19 +490,16 @@ impl MapFrame {
 
             let mut sky_world_queue = Vec::<QueuedEntityRender>::new();
             painter.gl().depth_mask(false);
-            for (queued, background_only, root_member) in &sky_queue {
+            for (queued, root_member, root_translation) in &sky_queue {
                 let store = render_store.read();
                 if let Some(entity) = store.get_entity(queued.entity.0, queued.entity.1) {
                     let (position, scale, class) = map_sky_entity_transform(
-                        camera_pos,
+                        *root_translation,
                         queued.position,
                         queued.scale,
                         entity.entity_flags(),
                         *root_member,
                     );
-                    if *background_only && class == MapSkyEntityClass::WorldSpace {
-                        continue;
-                    }
                     let transformed = QueuedEntityRender {
                         entity: queued.entity,
                         entity_alt: queued.entity_alt.clone(),
@@ -358,7 +507,7 @@ impl MapFrame {
                         rotation: queued.rotation,
                         scale,
                     };
-                    if class == MapSkyEntityClass::WorldSpace {
+                    if class == MapSkyEntityClass::Ordinary {
                         sky_world_queue.push(transformed);
                         continue;
                     }

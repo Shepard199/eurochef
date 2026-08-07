@@ -2,6 +2,11 @@
 use binrw::{binrw, BinRead, BinReaderExt};
 use serde::Serialize;
 
+/// Robots.exe 0x005152ED/0x0051602F/0x00518E6B route serialized
+/// `EXGeoBaseEntity.flags & 0x10` to D3D render-state 0x1C (FOGENABLE) with
+/// value zero. It is a per-entity no-fog flag, not a transform/camera flag.
+pub const ROBOTS_ENTITY_FLAG_NO_FOG: u32 = 0x10;
+
 use crate::{
     common::{EXRelPtr, EXVector},
     entity_mesh::EXGeoMeshEntity,

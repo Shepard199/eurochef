@@ -1,4 +1,4 @@
-use glam::{Mat4, Quat, Vec2, Vec3, Vec4, Vec4Swizzles};
+use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4, Vec4Swizzles};
 
 pub trait Camera3D: Sync + Send {
     fn update(&mut self, ui: &egui::Ui, response: Option<&egui::Response>, delta: f32);
@@ -7,6 +7,10 @@ pub trait Camera3D: Sync + Send {
     fn calculate_matrix(&mut self) -> Mat4;
 
     fn zoom(&self) -> f32;
+
+    fn vertical_fov_radians(&self) -> Option<f32> {
+        None
+    }
 
     fn position(&mut self) -> Vec3 {
         self.calculate_matrix()
@@ -25,6 +29,74 @@ pub trait Camera3D: Sync + Send {
 
 fn zoom_factor(zoom_level: f32) -> f32 {
     2.0f32.powf(zoom_level * std::f32::consts::LN_2) - 0.9
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeViewCamera {
+    pub position: Vec3,
+    pub target: Vec3,
+    pub vertical_fov_degrees: f32,
+}
+
+impl NativeViewCamera {
+    pub fn new(position: Vec3, target: Vec3, vertical_fov_degrees: f32) -> Self {
+        Self {
+            position,
+            target,
+            vertical_fov_degrees,
+        }
+    }
+
+    fn direction(self) -> Vec3 {
+        (self.target - self.position).normalize_or_zero()
+    }
+
+    fn basis(self) -> (Vec3, Vec3, Vec3) {
+        let mut forward = self.direction();
+        if forward.length_squared() <= f32::EPSILON {
+            forward = Vec3::Z;
+        }
+        let requested_up = if forward.cross(Vec3::Y).length_squared() <= 1.0e-8 {
+            Vec3::Z
+        } else {
+            Vec3::Y
+        };
+        let right = requested_up.cross(forward).normalize_or_zero();
+        let up = forward.cross(right).normalize_or_zero();
+        (right, up, forward)
+    }
+}
+
+impl Camera3D for NativeViewCamera {
+    fn update(&mut self, _ui: &egui::Ui, _response: Option<&egui::Response>, _delta: f32) {}
+
+    fn calculate_matrix(&mut self) -> Mat4 {
+        let (_, up, forward) = self.basis();
+        glam::camera::rh::view::look_at_mat4(self.position, self.position + forward, up)
+    }
+
+    fn zoom(&self) -> f32 {
+        1.0
+    }
+
+    fn vertical_fov_radians(&self) -> Option<f32> {
+        Some(self.vertical_fov_degrees.to_radians())
+    }
+
+    fn position(&mut self) -> Vec3 {
+        self.position
+    }
+
+    fn rotation(&self) -> Quat {
+        let (right, up, forward) = self.basis();
+        if forward.length_squared() <= f32::EPSILON {
+            Quat::IDENTITY
+        } else {
+            Quat::from_mat3(&Mat3::from_cols(right, up, forward))
+        }
+    }
+
+    fn focus_on_point(&mut self, _point: Vec3, _dist_scale: f32) {}
 }
 
 #[derive(Clone)]
@@ -309,6 +381,33 @@ impl Camera3D for FpsCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_view_camera_uses_exact_pose_and_vertical_fov() {
+        let position = Vec3::new(12.0, 3.0, -7.0);
+        let target = Vec3::new(16.0, 4.0, 2.0);
+        let mut camera = NativeViewCamera::new(position, target, 60.0);
+        let view = camera.calculate_matrix();
+        let reconstructed = view.inverse().transform_point3(Vec3::ZERO);
+
+        assert!(reconstructed.distance(position) < 1.0e-5);
+        assert_eq!(camera.position(), position);
+        assert!((camera.vertical_fov_radians().unwrap() - 60.0f32.to_radians()).abs() < 1.0e-6);
+        let expected_forward = (target - position).normalize();
+        assert!((camera.rotation() * Vec3::Z).distance(expected_forward) < 1.0e-5);
+    }
+
+    #[test]
+    fn native_view_camera_keeps_vertical_and_degenerate_look_finite() {
+        let position = Vec3::new(1.0, 2.0, 3.0);
+        let mut camera = NativeViewCamera::new(position, position + Vec3::Y, 45.0);
+        assert!(camera.calculate_matrix().is_finite());
+        assert!(camera.rotation().is_finite());
+
+        camera.target = position;
+        assert!(camera.calculate_matrix().is_finite());
+        assert!(camera.rotation().is_finite());
+    }
 
     #[test]
     fn fly_camera_pose_uses_the_serialized_direction_without_changing_position() {
