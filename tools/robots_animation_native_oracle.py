@@ -39,9 +39,11 @@ OWNER_OBJECT = SCRATCH_BASE + 0x2000
 DESCRIPTOR = SCRATCH_BASE + 0x3000
 FAKE_RESOURCE = SCRATCH_BASE + 0x4000
 BIND_POSITIONS = SCRATCH_BASE + 0x5000
+OUTPUT_SCALARS = SCRATCH_BASE + 0x7000
+MORPH_GROUPS = SCRATCH_BASE + 0x8000
 
-CACHE_MAGIC = b"RAPCV002"
-CACHE_HEADER = struct.Struct("<8sIIIIIIQ")
+CACHE_MAGIC = b"RAPCV003"
+CACHE_HEADER = struct.Struct("<8sIIIIIIIQ")
 CACHE_POSE = struct.Struct("<7f")
 
 
@@ -109,6 +111,9 @@ class RobotsAnimationOracle:
         self.bone_count = 0
         self.translation_mask = (0, 0, 0, 0)
         self.relative_bind_positions: list[tuple[float, float, float]] = []
+        self.scalar_count = 0
+        self.morph_group_count = 0
+        self.morph_groups = bytes()
 
     @staticmethod
     def _stop_hook(uc: Uc, address: int, size: int, user_data: object) -> None:
@@ -164,6 +169,29 @@ class RobotsAnimationOracle:
             struct.unpack_from("<3f", animskin_edb, relative_address + bone_index * 16)
             for bone_index in range(self.bone_count)
         ]
+
+        self.scalar_count = struct.unpack_from("<I", animskin_edb, request.animskin_offset + 0x80)[0]
+        self.morph_group_count = struct.unpack_from("<i", animskin_edb, request.animskin_offset + 0x84)[0]
+        if self.morph_group_count < 0:
+            raise ValueError(f"negative AnimSkin morph-group count {self.morph_group_count}")
+        group_relative = struct.unpack_from("<i", animskin_edb, request.animskin_offset + 0x88)[0]
+        if self.morph_group_count == 0:
+            self.morph_groups = bytes()
+        else:
+            group_address = request.animskin_offset + 0x88 + group_relative
+            group_bytes = self.morph_group_count * 0x10
+            self.morph_groups = animskin_edb[group_address : group_address + group_bytes]
+            if len(self.morph_groups) != group_bytes:
+                raise ValueError("AnimSkin morph-group table is truncated")
+            for group_index in range(self.morph_group_count):
+                offset = group_index * 0x10
+                scalar_count = struct.unpack_from("<H", self.morph_groups, offset + 0x06)[0]
+                scalar_base = struct.unpack_from("<H", self.morph_groups, offset + 0x08)[0]
+                if scalar_base + scalar_count > self.scalar_count:
+                    raise ValueError(
+                        f"AnimSkin morph group {group_index} scalar range "
+                        f"{scalar_base}+{scalar_count} exceeds {self.scalar_count}"
+                    )
 
         struct.pack_into("<i", anim, 0x04, MOTION_ADDRESS - (CONTEXT_ADDRESS + 0x04))
         self.anim = bytes(anim)
@@ -498,8 +526,12 @@ def assemble_pose(
     current_cache: int,
     next_cache: int,
     fraction: float,
-) -> list[tuple[float, float, float, float, float, float, float]]:
+) -> tuple[list[tuple[float, float, float, float, float, float, float]], list[float]]:
     oracle.uc.mem_write(SCRATCH_BASE, bytes(0x10000))
+    if oracle.scalar_count * 4 > MORPH_GROUPS - OUTPUT_SCALARS:
+        raise ValueError(f"AnimSkin scalar buffer is too large: {oracle.scalar_count}")
+    if len(oracle.morph_groups) > SCRATCH_BASE + 0x10000 - MORPH_GROUPS:
+        raise ValueError(f"AnimSkin morph-group table is too large: {len(oracle.morph_groups)} bytes")
 
     bind_blob = bytearray(oracle.bone_count * 16)
     for bone_index, position in enumerate(oracle.relative_bind_positions):
@@ -508,7 +540,11 @@ def assemble_pose(
 
     resource = bytearray(0x100)
     struct.pack_into("<i", resource, 0x44, BIND_POSITIONS - (FAKE_RESOURCE + 0x44))
-    struct.pack_into("<I", resource, 0x80, 0)
+    struct.pack_into("<I", resource, 0x80, oracle.scalar_count)
+    struct.pack_into("<i", resource, 0x84, oracle.morph_group_count)
+    if oracle.morph_group_count:
+        struct.pack_into("<i", resource, 0x88, MORPH_GROUPS - (FAKE_RESOURCE + 0x88))
+        oracle.uc.mem_write(MORPH_GROUPS, oracle.morph_groups)
     oracle.uc.mem_write(FAKE_RESOURCE, bytes(resource))
 
     oracle.uc.mem_write(
@@ -518,6 +554,8 @@ def assemble_pose(
 
     output_object = bytearray(0x20)
     struct.pack_into("<I", output_object, 0x10, OUTPUT_POSES)
+    if oracle.scalar_count:
+        struct.pack_into("<I", output_object, 0x14, OUTPUT_SCALARS)
     oracle.uc.mem_write(OUTPUT_OBJECT, bytes(output_object))
 
     initial_poses = bytearray(oracle.bone_count * 0x20)
@@ -535,6 +573,13 @@ def assemble_pose(
     struct.pack_into("<I", descriptor, 0x04, next_cache)
     struct.pack_into("<I", descriptor, 0x10, CONTEXT_ADDRESS)
     struct.pack_into("<I", descriptor, 0x14, CONTEXT_ADDRESS)
+    # Scalar interpolation in 0x004FDF2E uses the parallel cache/context pair
+    # at +0x20/+0x24 and +0x30/+0x34. Skeletal-only RAPCV002 never reached
+    # this branch, which is why these slots used to be zero.
+    struct.pack_into("<I", descriptor, 0x20, current_cache)
+    struct.pack_into("<I", descriptor, 0x24, next_cache)
+    struct.pack_into("<I", descriptor, 0x30, CONTEXT_ADDRESS)
+    struct.pack_into("<I", descriptor, 0x34, CONTEXT_ADDRESS)
     struct.pack_into("<f", descriptor, 0x40, fraction)
     struct.pack_into("<f", descriptor, 0x48, 1.0)
     struct.pack_into("<I", descriptor, 0x60, 1)
@@ -565,4 +610,12 @@ def assemble_pose(
         position = values[:3]
         quaternion = values[4:8]
         poses.append((*position, *quaternion))
-    return poses
+    scalars = []
+    if oracle.scalar_count:
+        scalars = list(
+            struct.unpack(
+                f"<{oracle.scalar_count}f",
+                oracle.uc.mem_read(OUTPUT_SCALARS, oracle.scalar_count * 4),
+            )
+        )
+    return poses, scalars

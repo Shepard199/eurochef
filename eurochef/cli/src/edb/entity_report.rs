@@ -12,6 +12,8 @@ use eurochef_edb::{
 };
 use serde::Serialize;
 
+use super::resource_atlas::discover_edb_paths_near_manifest;
+
 #[derive(Debug, Clone)]
 struct ManifestEntry {
     declared_uid: Option<u32>,
@@ -491,6 +493,15 @@ fn read_manifest(path: &Path) -> Result<Vec<ManifestEntry>> {
                 base.join(source_path)
             },
         });
+    }
+    if entries.is_empty() {
+        entries = discover_edb_paths_near_manifest(path)?
+            .into_iter()
+            .map(|source_path| ManifestEntry {
+                declared_uid: None,
+                source_path,
+            })
+            .collect();
     }
     Ok(entries)
 }

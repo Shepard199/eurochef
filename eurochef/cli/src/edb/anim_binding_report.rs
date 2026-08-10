@@ -12,6 +12,8 @@ use eurochef_edb::{
 };
 use serde::Serialize;
 
+use super::resource_atlas::discover_edb_paths_near_manifest;
+
 #[derive(Debug, Clone)]
 struct ManifestEntry {
     declared_uid: Option<u32>,
@@ -31,6 +33,20 @@ struct Summary {
     animation_skin_unresolved: usize,
     component_entities: usize,
     component_entity_out_of_range: usize,
+    component_group_a: usize,
+    component_group_b: usize,
+    component_group_contiguity_mismatches: usize,
+    morph_components: usize,
+    morph_components_group_a: usize,
+    morph_components_group_b: usize,
+    morph_group_records: usize,
+    morph_index_out_of_range: usize,
+    morph_entity_non_mesh: usize,
+    morph_entity_multi_mesh_parts: usize,
+    paired_group_length_mismatches: usize,
+    paired_group_entity_mismatches: usize,
+    paired_group_section_mismatches: usize,
+    paired_group_parts_mismatches: usize,
     weight_payloads: usize,
     weight_stream_bytes: usize,
     weight_stream_empty: usize,
@@ -222,12 +238,26 @@ pub fn execute_command(manifest_path: String, output_folder: Option<String>) -> 
     )?;
 
     info!(
-        "Wrote {} animations, {} AnimSkins and {} component bindings from {} manifest entries to {}",
+        "Wrote {} animations, {} AnimSkins and {} component bindings from {} manifest entries to {}; group_a={} group_b={} morph_components={} (a={} b={}) morph_groups={} morph_oob={} morph_non_mesh={} morph_multi_mesh_parts={} group_contiguity_mismatches={} pair_len_mismatch={} pair_entity_mismatch={} pair_section_mismatch={} pair_parts_mismatch={}",
         report.animations.len(),
         report.animskins.len(),
         report.components.len(),
         report.summary.manifest_entries,
-        output_folder.display()
+        output_folder.display(),
+        report.summary.component_group_a,
+        report.summary.component_group_b,
+        report.summary.morph_components,
+        report.summary.morph_components_group_a,
+        report.summary.morph_components_group_b,
+        report.summary.morph_group_records,
+        report.summary.morph_index_out_of_range,
+        report.summary.morph_entity_non_mesh,
+        report.summary.morph_entity_multi_mesh_parts,
+        report.summary.component_group_contiguity_mismatches,
+        report.summary.paired_group_length_mismatches,
+        report.summary.paired_group_entity_mismatches,
+        report.summary.paired_group_section_mismatches,
+        report.summary.paired_group_parts_mismatches
     );
     Ok(())
 }
@@ -300,15 +330,69 @@ fn scan_file(entry: &ManifestEntry, platform: Platform, report: &mut Report) -> 
                     parse_status: "ok".to_string(),
                 });
 
+                let morph_group_count = skin
+                    .robots_scalar_groups
+                    .as_ref()
+                    .map_or(0, |groups| groups.serialized_len());
+                report.summary.morph_group_records += morph_group_count;
+                if !skin.entities.data().is_empty() && !skin.more_entities.data().is_empty() {
+                    let expected_group_b =
+                        skin.entities.data_offset_absolute() + skin.entities.len() as u64 * 0x14;
+                    if skin.more_entities.data_offset_absolute() != expected_group_b {
+                        report.summary.component_group_contiguity_mismatches += 1;
+                    }
+                }
+                if skin.entities.len() != skin.more_entities.len() {
+                    report.summary.paired_group_length_mismatches += 1;
+                }
+                for (group_a, group_b) in skin.entities.iter().zip(skin.more_entities.iter()) {
+                    if group_a.entity_list_index() != group_b.entity_list_index() {
+                        report.summary.paired_group_entity_mismatches += 1;
+                    }
+                    if group_a.section_index != group_b.section_index {
+                        report.summary.paired_group_section_mismatches += 1;
+                    }
+                    if group_a.parts_count != group_b.parts_count {
+                        report.summary.paired_group_parts_mismatches += 1;
+                    }
+                }
+
                 for (group, entries) in [
-                    ("primary", skin.entities.data().as_slice()),
-                    ("secondary", skin.more_entities.data().as_slice()),
+                    ("group_a", skin.entities.data().as_slice()),
+                    ("group_b", skin.more_entities.data().as_slice()),
                 ] {
                     for (component_index, component) in entries.iter().enumerate() {
-                        let entity_index = component.entity_index & 0x00FF_FFFF;
+                        match group {
+                            "group_a" => report.summary.component_group_a += 1,
+                            "group_b" => report.summary.component_group_b += 1,
+                            _ => unreachable!(),
+                        }
+                        if component.morph_index >= 0 {
+                            report.summary.morph_components += 1;
+                            match group {
+                                "group_a" => report.summary.morph_components_group_a += 1,
+                                "group_b" => report.summary.morph_components_group_b += 1,
+                                _ => unreachable!(),
+                            }
+                            if component.morph_index as usize >= morph_group_count {
+                                report.summary.morph_index_out_of_range += 1;
+                            }
+                        }
+                        let entity_index = component.entity_list_index() as u32;
                         let entity = header.entity_list.data().get(entity_index as usize);
                         if entity.is_none() {
                             report.summary.component_entity_out_of_range += 1;
+                        }
+                        if component.morph_index >= 0 {
+                            if let Some(entity_header) = entity {
+                                edb.seek(std::io::SeekFrom::Start(
+                                    entity_header.common.address as u64,
+                                ))?;
+                                let object_type = edb.read_type::<u32>(edb.endian)?;
+                                if object_type != 0x601 {
+                                    report.summary.morph_entity_non_mesh += 1;
+                                }
+                            }
                         }
                         let mesh_vertex_counts = if entity.is_some() {
                             read_entity_mesh_vertex_counts(
@@ -319,6 +403,9 @@ fn scan_file(entry: &ManifestEntry, platform: Platform, report: &mut Report) -> 
                         } else {
                             Vec::new()
                         };
+                        if component.morph_index >= 0 && mesh_vertex_counts.len() != 1 {
+                            report.summary.morph_entity_multi_mesh_parts += 1;
+                        }
                         report.components.push(ComponentRow {
                             edb_uid: header.hashcode,
                             edb_path: path.clone(),
@@ -607,6 +694,15 @@ fn read_manifest(path: &Path) -> Result<Vec<ManifestEntry>> {
             declared_uid,
             source_path: PathBuf::from(columns[1]),
         });
+    }
+    if entries.is_empty() {
+        entries = discover_edb_paths_near_manifest(path)?
+            .into_iter()
+            .map(|source_path| ManifestEntry {
+                declared_uid: None,
+                source_path,
+            })
+            .collect();
     }
     Ok(entries)
 }

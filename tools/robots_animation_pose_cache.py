@@ -96,9 +96,16 @@ def relocate_mapped_animation(
     oracle.anim = bytes(relocated)
 
 
-def validate_existing_cache(path: Path, request, motion_checksum: int, frames: int, bones: int) -> bool:
+def validate_existing_cache(
+    path: Path,
+    request,
+    motion_checksum: int,
+    frames: int,
+    bones: int,
+    scalars: int,
+) -> bool:
     try:
-        expected_size = CACHE_HEADER.size + frames * bones * CACHE_POSE.size
+        expected_size = CACHE_HEADER.size + frames * (bones * CACHE_POSE.size + scalars * 4)
         if path.stat().st_size != expected_size:
             return False
         with path.open("rb") as handle:
@@ -113,6 +120,7 @@ def validate_existing_cache(path: Path, request, motion_checksum: int, frames: i
             animskin_hashcode,
             cached_frames,
             cached_bones,
+            cached_scalars,
             cached_checksum,
         ) = CACHE_HEADER.unpack(header)
         return (
@@ -123,6 +131,7 @@ def validate_existing_cache(path: Path, request, motion_checksum: int, frames: i
             and animskin_hashcode == request.animskin_hashcode
             and cached_frames == frames
             and cached_bones == bones
+            and cached_scalars == scalars
             and cached_checksum == motion_checksum
         )
     except OSError:
@@ -140,6 +149,14 @@ def validate_poses(poses: list[tuple[float, ...]], frame: int) -> None:
             )
 
 
+def validate_scalars(scalars: list[float], frame: int, expected: int) -> None:
+    if len(scalars) != expected:
+        raise ValueError(f"scalar count frame={frame} {len(scalars)} != {expected}")
+    for scalar_index, value in enumerate(scalars):
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite scalar frame={frame} scalar={scalar_index}")
+
+
 def generate_clip(
     oracle: RobotsAnimationOracle,
     request,
@@ -152,6 +169,7 @@ def generate_clip(
     relocate_mapped_animation(oracle, request, edb)
     frame_count = oracle.frame_count
     bone_count = oracle.bone_count
+    scalar_count = oracle.scalar_count
     if frame_count <= 0 or bone_count <= 0:
         raise ValueError(f"invalid clip dimensions frames={frame_count} bones={bone_count}")
 
@@ -169,6 +187,7 @@ def generate_clip(
         motion_checksum,
         frame_count,
         bone_count,
+        scalar_count,
     ):
         return {
             "edb_uid": f"0x{request.edb_uid:08X}",
@@ -180,6 +199,7 @@ def generate_clip(
             "cache_variant": request.variant_cache,
             "frames": frame_count,
             "bones": bone_count,
+            "scalars": scalar_count,
             "bytes": output_path.stat().st_size,
             "seconds": time.perf_counter() - started,
             "status": "reused",
@@ -202,6 +222,7 @@ def generate_clip(
                 request.animskin_hashcode,
                 frame_count,
                 bone_count,
+                scalar_count,
                 motion_checksum,
             )
         )
@@ -220,17 +241,22 @@ def generate_clip(
             )
             for frame in frames:
                 next_frame = min(frame + 1, frame_count - 1)
-                poses = assemble_pose(
+                poses, scalars = assemble_pose(
                     oracle,
                     entries[frame],
                     entries[next_frame],
                     0.0,
                 )
                 validate_poses(poses, frame)
+                validate_scalars(scalars, frame, scalar_count)
                 for pose in poses:
                     output.write(CACHE_POSE.pack(*pose))
+                if scalars:
+                    output.write(struct.pack(f"<{scalar_count}f", *scalars))
 
-    expected_size = CACHE_HEADER.size + frame_count * bone_count * CACHE_POSE.size
+    expected_size = CACHE_HEADER.size + frame_count * (
+        bone_count * CACHE_POSE.size + scalar_count * 4
+    )
     if temporary_path.stat().st_size != expected_size:
         raise ValueError(
             f"cache size mismatch {temporary_path.stat().st_size} != {expected_size}"
@@ -246,6 +272,7 @@ def generate_clip(
         "cache_variant": request.variant_cache,
         "frames": frame_count,
         "bones": bone_count,
+        "scalars": scalar_count,
         "bytes": output_path.stat().st_size,
         "seconds": time.perf_counter() - started,
         "status": "generated",

@@ -65,7 +65,7 @@ Each AnimSkin produces one model FBX:
 <animskin_name>_[0xUID]_SK.fbx.report.json
 ```
 
-Each Animation with a validated `RAPCV002` pose cache and a valid in-EDB AnimScript timing reference produces a separate animation-only FBX:
+Each Animation with a validated `RAPCV003` native pose/morph cache and a valid in-EDB AnimScript timing reference produces a separate animation FBX:
 
 ```text
 <animskin_name>_[0xUID]__<animation_name>_[0xUID].fbx
@@ -107,21 +107,26 @@ The model FBX contains:
 - normals, UV0, RGBA vertex colors;
 - AnimSkin hierarchy and bind pose;
 - normalized source skin weights through `FbxSkin` and `FbxCluster`;
+- shipped Robots v248 mode-0 morph targets as `FbxBlendShape` channels, using the native Mesh directory ID 2 additive XYZ deltas;
 - no animation stack, embedded textures, generated tangents, or generated physics assets.
 
 ## Animation FBX contract
 
-Each animation-only FBX contains:
+Each animation FBX contains:
 
-- the same bone names, parent hierarchy, local bind translations, axis system, units, and bind pose as its model FBX;
-- no mesh, material, texture, or skin geometry;
+- the same bone names, parent hierarchy, local bind translations, axis system, units, bind pose, meshes and skin deformers as its model FBX;
+- mesh geometry is retained because FBX blend-shape animation is attached to the mesh; materials/textures remain disabled for the animation export;
+- the same shipped Robots v248 mode-0 blend-shape channels as the model FBX;
 - exactly one `FbxAnimStack` and one base `FbxAnimLayer`;
 - translation X/Y/Z, rotation X/Y/Z, and scale X/Y/Z curves for every bone;
-- exactly one key per decoded source pose frame on every curve;
+- one `DeformPercent` curve per native morph channel, driven by `RAPCV003` scalar values multiplied by 100;
+- exactly one key per decoded source pose/morph frame on every curve;
 - linear interpolation with no SDK key reduction;
 - source local translations and rotations, including root tracks, without root-motion extraction;
 - a custom FBX frame rate equal to the serialized AnimScript FPS;
 - a time span equal to `command.length / script.framerate`.
+
+The shipped Robots PC v248 corpus contains 200 morph groups and all 200 use native mode 0. Mode 1 exists in `Robots.exe` but is not present in the shipped corpus, so the exporter deliberately does not claim or fabricate mode-1 support.
 
 Source coordinates are converted once as:
 
@@ -137,7 +142,7 @@ If an AnimSkin contains several source roots, one deterministic unweighted `Euro
 
 ## Validation
 
-After model export, the helper reimports the FBX through Autodesk FBX SDK and verifies bone, vertex, triangle, cluster, and bind-pose counts.
+After model export, the helper reimports the FBX through Autodesk FBX SDK and verifies bone, vertex, triangle, cluster, blend-shape-channel, and bind-pose counts.
 
 After animation export, it reimports the FBX and verifies:
 
@@ -145,8 +150,9 @@ After animation export, it reimports the FBX and verifies:
 - complete skeleton and bind pose;
 - custom frame rate and exact time span;
 - nine curves per bone;
+- every expected blend-shape channel and its `DeformPercent` curve;
 - exact key count on every curve;
-- first and last key time/value for translation, rotation, and scale;
-- total curve and key counts.
+- first and last key time/value for translation, rotation, scale, and morph weights;
+- total skeletal+morph curve and key counts.
 
 A report is written only after the matching round-trip validation succeeds.

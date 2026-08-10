@@ -286,7 +286,7 @@ pub fn read_from_file(
 
         if let Ok(parsed) = &skin {
             for entry in parsed.entities.iter().chain(parsed.more_entities.iter()) {
-                let index = (entry.entity_index & 0x00ff_ffff) as usize;
+                let index = entry.entity_list_index();
                 if index < header.entity_list.len() && !skin_entity_indices.contains(&index) {
                     skin_entity_indices.push(index);
                 }

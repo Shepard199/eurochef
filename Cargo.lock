@@ -1086,6 +1086,7 @@ dependencies = [
  "eurochef-edb",
  "eurochef-filelist",
  "eurochef-shared",
+ "glam",
  "glob",
  "gltf",
  "hex",

@@ -105,6 +105,29 @@ pub(crate) fn skin_vertices(
     part_skins: &[AnimationPartSkin],
     skin_matrices: &[Mat4],
 ) -> Option<()> {
+    skin_vertices_with_morph(
+        original,
+        output,
+        part_vertex_ranges,
+        part_skins,
+        skin_matrices,
+        &[],
+        None,
+    )
+}
+
+/// Applies the shipped Robots v248 additive position morph before skeletal skinning.
+/// Native `FUN_005186BD` copies each 0x20-byte base vertex, adds only XYZ from
+/// 0x10-byte morph-shape records, then the normal skeletal/render path runs.
+pub(crate) fn skin_vertices_with_morph(
+    original: &[UXVertex],
+    output: &mut [UXVertex],
+    part_vertex_ranges: &[Range<usize>],
+    part_skins: &[AnimationPartSkin],
+    skin_matrices: &[Mat4],
+    morph_scalars: &[f32],
+    morph_scalar_base: Option<usize>,
+) -> Option<()> {
     if original.len() != output.len() || part_vertex_ranges.len() != part_skins.len() {
         return None;
     }
@@ -115,14 +138,30 @@ pub(crate) fn skin_vertices(
             || range.end > original.len()
             || range.len() != part_skin.vertex_count
             || range.len() != part_skin.influences.len()
+            || part_skin
+                .morph_shapes
+                .iter()
+                .any(|shape| shape.len() != range.len())
         {
+            return None;
+        }
+        if !part_skin.morph_shapes.is_empty() && morph_scalar_base.is_none() {
             return None;
         }
 
         for (vertex_offset, influence) in part_skin.influences.iter().enumerate() {
             let vertex_index = range.start + vertex_offset;
             let source = original[vertex_index];
-            let source_position = Vec3::from_array(source.pos);
+            let mut source_position = Vec3::from_array(source.pos);
+            if let Some(scalar_base) = morph_scalar_base {
+                for (shape_index, shape) in part_skin.morph_shapes.iter().enumerate() {
+                    let scalar = *morph_scalars.get(scalar_base.checked_add(shape_index)?)?;
+                    if !scalar.is_finite() {
+                        return None;
+                    }
+                    source_position += shape[vertex_offset] * scalar;
+                }
+            }
             let source_normal = Vec3::from_array(source.norm);
             let mut position = Vec3::ZERO;
             let mut normal = Vec3::ZERO;
@@ -225,6 +264,7 @@ mod tests {
                 bone_indices: [0, 0, 0, 0],
                 weights: [1.0, 0.0, 0.0, 0.0],
             }],
+            morph_shapes: Vec::new(),
         }];
         skin_vertices(&original, &mut output, &[0..1], &parts, &[Mat4::IDENTITY])
             .expect("valid identity skinning");
@@ -245,6 +285,7 @@ mod tests {
                 bone_indices: [0, 1, 0, 0],
                 weights: [0.25, 0.75, 0.0, 0.0],
             }],
+            morph_shapes: Vec::new(),
         }];
         let matrices = [
             Mat4::from_translation(Vec3::X),
@@ -254,6 +295,37 @@ mod tests {
             .expect("valid blended skinning");
         assert!(Vec3::from_array(output[0].pos).distance(Vec3::new(0.25, 1.5, 0.0)) <= 1.0e-6);
         assert!(Vec3::from_array(output[0].norm).distance(Vec3::Z) <= 1.0e-6);
+        assert_eq!(output[0].uv, original[0].uv);
+        assert_eq!(output[0].color, original[0].color);
+    }
+
+    #[test]
+    fn robots_morph_is_applied_before_skeletal_skinning() {
+        let mut source = test_vertex();
+        source.pos = [1.0, 0.0, 0.0];
+        let original = [source];
+        let mut output = [source];
+        let parts = [AnimationPartSkin {
+            part_index: 0,
+            vertex_count: 1,
+            influences: vec![AnimationVertexInfluence {
+                bone_indices: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
+            }],
+            morph_shapes: vec![vec![Vec3::new(2.0, 0.0, 0.0)]],
+        }];
+        skin_vertices_with_morph(
+            &original,
+            &mut output,
+            &[0..1],
+            &parts,
+            &[Mat4::from_translation(Vec3::Y)],
+            &[0.5],
+            Some(0),
+        )
+        .expect("valid Robots morph + skinning");
+        assert!(Vec3::from_array(output[0].pos).distance(Vec3::new(2.0, 1.0, 0.0)) <= 1.0e-6);
+        assert_eq!(output[0].norm, original[0].norm);
         assert_eq!(output[0].uv, original[0].uv);
         assert_eq!(output[0].color, original[0].color);
     }

@@ -32,7 +32,10 @@ $buildRoot = Join-Path $projectRoot 'target\fbx-exporter-build'
 $outputRoot = Join-Path $projectRoot ("target\{0}\tools\fbx" -f $Configuration.ToLowerInvariant())
 New-Item -ItemType Directory -Force -Path $buildRoot, $outputRoot | Out-Null
 
-& cmake.exe -S $PSScriptRoot -B $buildRoot -A x64 "-DFBX_SDK_ROOT=$FbxSdkRoot"
+# `--fresh` discards only CMake's generated cache/files before configuring. This
+# keeps the helper reproducible when a previous session used a different Visual
+# Studio generator (for example VS 2026 vs the current VS 2022 toolchain).
+& cmake.exe --fresh -S $PSScriptRoot -B $buildRoot -A x64 "-DFBX_SDK_ROOT=$FbxSdkRoot"
 if ($LASTEXITCODE -ne 0) {
     throw "CMake configure failed with exit code $LASTEXITCODE"
 }

@@ -8,15 +8,137 @@ use serde::Serialize;
 pub const ROBOTS_ENTITY_FLAG_NO_FOG: u32 = 0x10;
 
 use crate::{
-    common::{EXRelPtr, EXVector},
+    common::{EXRelPtr, EXVector, EXVector3},
     entity_mesh::EXGeoMeshEntity,
     versions::Platform,
 };
 
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+pub struct RobotsMeshDirectoryEntry {
+    pub id: u8,
+    pub relative_offset: u32,
+    pub entry_offset_absolute: u64,
+}
+
+impl RobotsMeshDirectoryEntry {
+    pub fn data_offset_absolute(&self) -> u64 {
+        self.entry_offset_absolute + u64::from(self.relative_offset)
+    }
+}
+
+/// Resolves one native Robots v248 Mesh directory entry.
+///
+/// Robots.exe `FUN_005134D0` tests the bitmask at object +0x88, then scans
+/// packed DWORDs from +0x90. The low byte is the directory ID and the upper
+/// 24 bits are an unsigned self-relative byte offset from that DWORD.
+pub fn read_robots_mesh_directory_entry<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+    endian: binrw::Endian,
+    mesh_object_address: u64,
+    wanted_id: u8,
+) -> binrw::BinResult<Option<RobotsMeshDirectoryEntry>> {
+    let saved_position = reader.stream_position()?;
+    let result = (|| {
+        reader.seek(std::io::SeekFrom::Start(mesh_object_address + 0x88))?;
+        let directory_mask = reader.read_type::<u16>(endian)?;
+        if wanted_id >= 16 || directory_mask & (1u16 << wanted_id) == 0 {
+            return Ok(None);
+        }
+        reader.seek(std::io::SeekFrom::Start(mesh_object_address + 0x90))?;
+        for _ in 0..directory_mask.count_ones() {
+            let entry_offset_absolute = reader.stream_position()?;
+            let packed = reader.read_type::<u32>(endian)?;
+            let id = (packed & 0xff) as u8;
+            let relative_offset = packed >> 8;
+            if id == wanted_id {
+                return Ok(Some(RobotsMeshDirectoryEntry {
+                    id,
+                    relative_offset,
+                    entry_offset_absolute,
+                }));
+            }
+        }
+        Err(binrw::Error::AssertFail {
+            pos: mesh_object_address + 0x90,
+            message: format!(
+                "Robots Mesh directory mask 0x{directory_mask:04X} advertises id {wanted_id} but no packed entry exists"
+            ),
+        })
+    })();
+    reader.seek(std::io::SeekFrom::Start(saved_position))?;
+    result
+}
+
+/// Reads the additive morph-position samples used by shipped Robots PC v248.
+///
+/// Native `FUN_005186BD` requests Mesh directory ID 2. Its payload is an array
+/// of self-relative i32 shape pointers. Each shape stores one 0x10-byte record
+/// per mesh vertex; only XYZ at +0/+4/+8 are added to the base vertex position.
+pub fn read_robots_v248_morph_shape_deltas<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+    endian: binrw::Endian,
+    mesh_object_address: u64,
+    vertex_count: usize,
+    shape_count: usize,
+) -> binrw::BinResult<Vec<Vec<EXVector3>>> {
+    let saved_position = reader.stream_position()?;
+    let result = (|| {
+        if shape_count == 0 {
+            return Ok(Vec::new());
+        }
+        if shape_count > 4096 {
+            return Err(binrw::Error::AssertFail {
+                pos: mesh_object_address,
+                message: format!("implausible Robots morph shape count {shape_count}"),
+            });
+        }
+        let directory = read_robots_mesh_directory_entry(reader, endian, mesh_object_address, 2)?
+            .ok_or_else(|| binrw::Error::AssertFail {
+            pos: mesh_object_address + 0x88,
+            message: "Robots morph-bearing Mesh has no directory ID 2".to_string(),
+        })?;
+        let directory_address = directory.data_offset_absolute();
+        let mut shapes = Vec::with_capacity(shape_count);
+        for shape_index in 0..shape_count {
+            let pointer_address = directory_address + shape_index as u64 * 4;
+            reader.seek(std::io::SeekFrom::Start(pointer_address))?;
+            let relative = reader.read_type::<i32>(endian)?;
+            let shape_address = (pointer_address as i64)
+                .checked_add(i64::from(relative))
+                .filter(|address| *address >= 0)
+                .ok_or_else(|| binrw::Error::AssertFail {
+                    pos: pointer_address,
+                    message: format!("invalid Robots morph shape pointer {relative}"),
+                })? as u64;
+            reader.seek(std::io::SeekFrom::Start(shape_address))?;
+            let mut deltas = Vec::with_capacity(vertex_count);
+            for _ in 0..vertex_count {
+                let x = reader.read_type::<f32>(endian)?;
+                let y = reader.read_type::<f32>(endian)?;
+                let z = reader.read_type::<f32>(endian)?;
+                let _unused = reader.read_type::<f32>(endian)?;
+                if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+                    return Err(binrw::Error::AssertFail {
+                        pos: reader.stream_position()?.saturating_sub(16),
+                        message: "non-finite Robots morph shape delta".to_string(),
+                    });
+                }
+                deltas.push([x, y, z]);
+            }
+            shapes.push(deltas);
+        }
+        Ok(shapes)
+    })();
+    reader.seek(std::io::SeekFrom::Start(saved_position))?;
+    result
+}
+
 #[binrw]
 #[derive(Debug, Serialize, Clone)]
 #[brw(import(version: u32))]
-// TODO: Format is slightly different on versions 248 and below
+// Robots PC v248 serialized base layout is native-proven at object offsets
+// +0x04..+0x53. Earlier EngineX layouts remain version-specific and are outside
+// the Robots-only contract; do not generalize the v248 layout backwards.
 pub struct EXGeoBaseEntity {
     pub flags: u32,       // 0x4
     pub sort_value: u16,  // 0x8
@@ -461,5 +583,188 @@ impl BinRead for EXGeoEntity {
                 })
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs::File,
+        io::{BufReader, Read, Seek, SeekFrom},
+        path::Path,
+    };
+
+    use super::*;
+    use crate::edb::EdbFile;
+
+    #[test]
+    fn real_robots_v248_morph_mesh_directory_tail_when_game_root_is_configured() {
+        let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
+            return;
+        };
+        let path = Path::new(&game_root)
+            .join("_eurotools_out/extracted_main/robots/binary/_bin_pc/bo2_sewe.edb");
+        let file = File::open(&path).expect("open bo2_sewe.edb");
+        let mut edb =
+            EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc).expect("parse bo2_sewe.edb");
+        assert_eq!(edb.header.version, 248);
+
+        for entity_index in [1usize, 2usize] {
+            let header = edb.header.entity_list.data()[entity_index].clone();
+            let mut tail = [0u8; 0x20];
+            edb.seek(SeekFrom::Start(header.common.address as u64 + 0x84))
+                .expect("seek morph mesh tail");
+            edb.read_exact(&mut tail).expect("read morph mesh tail");
+            let raw_84 = u32::from_le_bytes(tail[0..4].try_into().unwrap());
+            let directory_mask = u16::from_le_bytes(tail[4..6].try_into().unwrap());
+            let packed_90 = u32::from_le_bytes(tail[12..16].try_into().unwrap());
+            eprintln!(
+                "Robots morph Mesh entity={} uid=0x{:08X} +84=0x{raw_84:08X} +88_mask=0x{directory_mask:04X} +90=0x{packed_90:08X} tail={:02X?}",
+                entity_index,
+                header.common.hashcode,
+                tail
+            );
+            assert_ne!(directory_mask & (1 << 2), 0, "morph directory ID 2 absent");
+            assert_eq!(packed_90 & 0xff, 2, "first packed directory is not ID 2");
+            assert_ne!(
+                packed_90 >> 8,
+                0,
+                "morph directory self-relative offset is zero"
+            );
+            let endian = edb.endian;
+            let shapes = read_robots_v248_morph_shape_deltas(
+                &mut edb,
+                endian,
+                header.common.address as u64,
+                20,
+                1,
+            )
+            .expect("read eyelid morph shape");
+            assert_eq!(shapes.len(), 1);
+            assert_eq!(shapes[0].len(), 20);
+            assert!(
+                shapes[0]
+                    .iter()
+                    .flatten()
+                    .any(|value| value.abs() > f32::EPSILON),
+                "eyelid morph shape is unexpectedly all zero"
+            );
+        }
+    }
+
+    #[test]
+    fn real_robots_v248_mesh_directory_header_corpus_when_game_root_is_configured() {
+        let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
+            return;
+        };
+        let source_root =
+            Path::new(&game_root).join("_eurotools_out/extracted_main/robots/binary/_bin_pc");
+        let mut paths = Vec::new();
+        collect_edb_files(&source_root, &mut paths);
+        assert!(
+            !paths.is_empty(),
+            "no Robots EDB files under {}",
+            source_root.display()
+        );
+
+        let mut meshes = 0usize;
+        let mut directory_meshes = 0usize;
+        let mut morph_directory_meshes = 0usize;
+        let mut max_raw_84 = 0u32;
+        let mut max_directory_entries = 0u32;
+        for path in paths {
+            let file = File::open(&path)
+                .unwrap_or_else(|error| panic!("open {}: {error}", path.display()));
+            let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+                .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+            if edb.header.version != 248 {
+                continue;
+            }
+            let headers = edb.header.entity_list.data().clone();
+            for header in headers {
+                edb.seek(SeekFrom::Start(header.common.address as u64))
+                    .expect("seek Entity type");
+                let object_type = edb.read_type::<u32>(edb.endian).expect("read Entity type");
+                if object_type != 0x601 {
+                    continue;
+                }
+                meshes += 1;
+                edb.seek(SeekFrom::Start(header.common.address as u64 + 0x84))
+                    .expect("seek Mesh directory header");
+                let raw_84 = edb.read_type::<u32>(edb.endian).expect("read Mesh +0x84");
+                let directory_mask = edb
+                    .read_type::<u16>(edb.endian)
+                    .expect("read directory mask");
+                let reserved_8a = edb.read_type::<u16>(edb.endian).expect("read +0x8A");
+                let reserved_8c = edb.read_type::<u32>(edb.endian).expect("read +0x8C");
+                let directory_entries = directory_mask.count_ones();
+                max_raw_84 = max_raw_84.max(raw_84);
+                max_directory_entries = max_directory_entries.max(directory_entries);
+                assert_eq!(
+                    reserved_8a,
+                    0,
+                    "nonzero Mesh +0x8A in {} uid=0x{:08X}",
+                    path.display(),
+                    header.common.hashcode
+                );
+                assert_eq!(
+                    reserved_8c,
+                    0,
+                    "nonzero Mesh +0x8C in {} uid=0x{:08X}",
+                    path.display(),
+                    header.common.hashcode
+                );
+                if directory_entries != 0 {
+                    directory_meshes += 1;
+                }
+                let mut seen_ids = 0u16;
+                for _ in 0..directory_entries {
+                    let packed = edb
+                        .read_type::<u32>(edb.endian)
+                        .expect("read packed Mesh directory");
+                    let id = (packed & 0xff) as u8;
+                    assert!(id < 16, "Mesh directory id {id} is outside mask width");
+                    assert_ne!(
+                        directory_mask & (1u16 << id),
+                        0,
+                        "Mesh directory id {id} absent from mask"
+                    );
+                    assert_eq!(
+                        seen_ids & (1u16 << id),
+                        0,
+                        "duplicate Mesh directory id {id}"
+                    );
+                    assert_ne!(packed >> 8, 0, "zero Mesh directory relative offset");
+                    seen_ids |= 1u16 << id;
+                }
+                assert_eq!(
+                    seen_ids, directory_mask,
+                    "Mesh directory entries do not cover mask"
+                );
+                if directory_mask & (1 << 2) != 0 {
+                    morph_directory_meshes += 1;
+                }
+            }
+        }
+        assert!(meshes > 0);
+        assert!(morph_directory_meshes > 0);
+        eprintln!("Robots v248 Mesh directory corpus: meshes={meshes} directory_meshes={directory_meshes} morph_id2_meshes={morph_directory_meshes} max_raw_84={max_raw_84} max_directory_entries={max_directory_entries}");
+    }
+
+    fn collect_edb_files(root: &Path, output: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_edb_files(&path, output);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("edb"))
+            {
+                output.push(path);
+            }
+        }
     }
 }

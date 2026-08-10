@@ -12,7 +12,7 @@ use eurochef_edb::{
     anim::{EXGeoAnimSkinEntity, EXGeoBaseAnimSkin},
     binrw::BinReaderExt,
     edb::EdbFile,
-    entity::EXGeoEntity,
+    entity::{read_robots_v248_morph_shape_deltas, EXGeoEntity},
     versions::Platform,
     HashcodeUtils,
 };
@@ -27,13 +27,13 @@ use crate::PlatformArg;
 
 use super::{resource_file_stem, resource_file_stem_in_edb, resource_label, resource_name};
 
-const IR_MAGIC: &[u8; 8] = b"ECFBX002";
-const IR_VERSION: u32 = 2;
+const IR_MAGIC: &[u8; 8] = b"ECFBX003";
+const IR_VERSION: u32 = 3;
 const MAX_ENTITY_DEPTH: u32 = 32;
 const MAX_MOTION_BYTES: usize = 64 * 1024 * 1024;
 const WEIGHT_EPSILON: f32 = 1.0e-4;
-const POSE_CACHE_MAGIC: &[u8; 8] = b"RAPCV002";
-const POSE_CACHE_HEADER_SIZE: usize = 40;
+const POSE_CACHE_MAGIC: &[u8; 8] = b"RAPCV003";
+const POSE_CACHE_HEADER_SIZE: usize = 44;
 const POSE_CACHE_VALUES_PER_BONE: usize = 7;
 const POSE_CACHE_BYTES_PER_BONE: usize = POSE_CACHE_VALUES_PER_BONE * size_of::<f32>();
 const MAX_POSE_CACHE_BYTES: usize = 512 * 1024 * 1024;
@@ -60,6 +60,12 @@ struct MaterialIr {
 }
 
 #[derive(Debug, Clone)]
+struct MorphShapeIr {
+    name: String,
+    deltas: Vec<[f32; 3]>,
+}
+
+#[derive(Debug, Clone)]
 struct MeshIr {
     name: String,
     vertices: Vec<UXVertex>,
@@ -67,6 +73,8 @@ struct MeshIr {
     indices: Vec<u32>,
     triangle_materials: Vec<u32>,
     materials: Vec<MaterialIr>,
+    morph_scalar_base: Option<u32>,
+    morph_shapes: Vec<MorphShapeIr>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -103,6 +111,8 @@ struct AnimationClipIr {
     root_motion_mode: String,
     pose_cache_path: PathBuf,
     poses: Vec<PoseIr>,
+    scalar_count: u32,
+    morph_scalars: Vec<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -177,7 +187,9 @@ struct PoseCacheData {
     source_path: PathBuf,
     frame_count: usize,
     bone_count: usize,
+    scalar_count: usize,
     poses: Vec<PoseIr>,
+    scalars: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -371,7 +383,7 @@ pub fn execute_command(
                 sample_rate = ir.clips[clip_index].sample_rate,
                 frames = ir.clips[clip_index].frame_count,
                 output = %fbx_path.display(),
-                "exported animation-only FBX"
+                "exported FBX animation"
             );
         }
 
@@ -1022,6 +1034,10 @@ fn build_animation_clips(
                 continue;
             }
         };
+        debug_assert_eq!(
+            cache.scalars.len(),
+            cache.frame_count.saturating_mul(cache.scalar_count)
+        );
         if cache.bone_count != source_bone_count {
             skipped.push(SkippedAnimationIr {
                 animation_uid,
@@ -1110,6 +1126,8 @@ fn build_animation_clips(
                 root_motion_mode: "preserve_local_pose_cache_tracks".to_string(),
                 pose_cache_path: cache.source_path.clone(),
                 poses,
+                scalar_count: checked_u32(cache.scalar_count, "animation scalar count")?,
+                morph_scalars: cache.scalars.clone(),
             });
         }
     }
@@ -1197,12 +1215,16 @@ fn build_animation_clips(
                     animation_source_path: source_path.clone(),
                     source_animation_index: animation_index,
                     reason: format!(
-                        "cache_missing_for_script_bound_skin: Animation 0x{animation_uid:08X} from EDB 0x{animation_source_edb_uid:08X} is bound by Script to AnimSkin 0x{animskin_uid:08X}; regenerate RAPCV002 for this exact pair: {error}"
+                        "cache_missing_for_script_bound_skin: Animation 0x{animation_uid:08X} from EDB 0x{animation_source_edb_uid:08X} is bound by Script to AnimSkin 0x{animskin_uid:08X}; regenerate RAPCV003 for this exact pair: {error}"
                     ),
                 });
                 continue;
             }
         };
+        debug_assert_eq!(
+            cache.scalars.len(),
+            cache.frame_count.saturating_mul(cache.scalar_count)
+        );
         if cache.bone_count != source_bone_count {
             skipped.push(SkippedAnimationIr {
                 animation_uid,
@@ -1264,6 +1286,8 @@ fn build_animation_clips(
                 root_motion_mode: "preserve_local_pose_cache_tracks".to_string(),
                 pose_cache_path: cache.source_path.clone(),
                 poses,
+                scalar_count: checked_u32(cache.scalar_count, "animation scalar count")?,
+                morph_scalars: cache.scalars.clone(),
             });
         }
     }
@@ -1445,7 +1469,7 @@ fn load_pose_cache(
         }
     }
     Err(format!(
-        "RAPCV002 pose cache is missing; searched {}",
+        "RAPCV003 pose cache is missing; searched {}",
         searched
             .iter()
             .map(|path| path.display().to_string())
@@ -1476,7 +1500,7 @@ fn parse_pose_cache(
         ));
     }
     if bytes.get(..POSE_CACHE_MAGIC.len()) != Some(POSE_CACHE_MAGIC) {
-        return Err("pose cache magic is not RAPCV002".to_string());
+        return Err("pose cache magic is not RAPCV003".to_string());
     }
     let edb_uid = read_u32_le(bytes, 0x08)?;
     let animation_index = read_u32_le(bytes, 0x0C)? as usize;
@@ -1484,7 +1508,8 @@ fn parse_pose_cache(
     let animskin_uid = read_u32_le(bytes, 0x14)?;
     let frame_count = read_u32_le(bytes, 0x18)? as usize;
     let bone_count = read_u32_le(bytes, 0x1C)? as usize;
-    let motion_checksum = read_u64_le(bytes, 0x20)?;
+    let scalar_count = read_u32_le(bytes, 0x20)? as usize;
+    let motion_checksum = read_u64_le(bytes, 0x24)?;
     if edb_uid != expected_edb_uid
         || animation_index != expected_animation_index
         || animation_uid != expected_animation_uid
@@ -1503,8 +1528,17 @@ fn parse_pose_cache(
     let pose_count = frame_count
         .checked_mul(bone_count)
         .ok_or_else(|| "pose cache dimensions overflow".to_string())?;
-    let payload_size = pose_count
+    let pose_frame_size = bone_count
         .checked_mul(POSE_CACHE_BYTES_PER_BONE)
+        .ok_or_else(|| "pose cache pose frame size overflows".to_string())?;
+    let scalar_frame_size = scalar_count
+        .checked_mul(size_of::<f32>())
+        .ok_or_else(|| "pose cache scalar frame size overflows".to_string())?;
+    let frame_stride = pose_frame_size
+        .checked_add(scalar_frame_size)
+        .ok_or_else(|| "pose cache frame stride overflows".to_string())?;
+    let payload_size = frame_count
+        .checked_mul(frame_stride)
         .ok_or_else(|| "pose cache payload size overflows".to_string())?;
     let expected_size = POSE_CACHE_HEADER_SIZE
         .checked_add(payload_size)
@@ -1517,47 +1551,64 @@ fn parse_pose_cache(
     }
 
     let mut poses = Vec::with_capacity(pose_count);
-    for pose_index in 0..pose_count {
-        let offset = POSE_CACHE_HEADER_SIZE + pose_index * POSE_CACHE_BYTES_PER_BONE;
-        let position = [
-            read_f32_le(bytes, offset)?,
-            read_f32_le(bytes, offset + 4)?,
-            read_f32_le(bytes, offset + 8)?,
-        ];
-        let rotation = [
-            read_f32_le(bytes, offset + 12)?,
-            read_f32_le(bytes, offset + 16)?,
-            read_f32_le(bytes, offset + 20)?,
-            read_f32_le(bytes, offset + 24)?,
-        ];
-        if !position
-            .iter()
-            .chain(rotation.iter())
-            .all(|value| value.is_finite())
-        {
-            return Err(format!("non-finite pose at flattened index {pose_index}"));
+    let mut scalars = Vec::with_capacity(frame_count.saturating_mul(scalar_count));
+    for frame_index in 0..frame_count {
+        let frame_offset = POSE_CACHE_HEADER_SIZE + frame_index * frame_stride;
+        for bone_index in 0..bone_count {
+            let pose_index = frame_index * bone_count + bone_index;
+            let offset = frame_offset + bone_index * POSE_CACHE_BYTES_PER_BONE;
+            let position = [
+                read_f32_le(bytes, offset)?,
+                read_f32_le(bytes, offset + 4)?,
+                read_f32_le(bytes, offset + 8)?,
+            ];
+            let rotation = [
+                read_f32_le(bytes, offset + 12)?,
+                read_f32_le(bytes, offset + 16)?,
+                read_f32_le(bytes, offset + 20)?,
+                read_f32_le(bytes, offset + 24)?,
+            ];
+            if !position
+                .iter()
+                .chain(rotation.iter())
+                .all(|value| value.is_finite())
+            {
+                return Err(format!("non-finite pose at flattened index {pose_index}"));
+            }
+            let rotation_length = rotation
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt();
+            if (rotation_length - 1.0).abs() > 2.0e-3 {
+                return Err(format!(
+                    "non-unit quaternion at flattened index {pose_index}: {rotation_length}"
+                ));
+            }
+            poses.push(PoseIr {
+                position,
+                rotation,
+                scale: [1.0; 3],
+            });
         }
-        let rotation_length = rotation
-            .iter()
-            .map(|value| value * value)
-            .sum::<f32>()
-            .sqrt();
-        if (rotation_length - 1.0).abs() > 2.0e-3 {
-            return Err(format!(
-                "non-unit quaternion at flattened index {pose_index}: {rotation_length}"
-            ));
+        let scalar_offset = frame_offset + pose_frame_size;
+        for scalar_index in 0..scalar_count {
+            let value = read_f32_le(bytes, scalar_offset + scalar_index * size_of::<f32>())?;
+            if !value.is_finite() {
+                return Err(format!(
+                    "non-finite morph scalar at frame {frame_index} index {scalar_index}"
+                ));
+            }
+            scalars.push(value);
         }
-        poses.push(PoseIr {
-            position,
-            rotation,
-            scale: [1.0; 3],
-        });
     }
     Ok(PoseCacheData {
         source_path: source_path.to_path_buf(),
         frame_count,
         bone_count,
+        scalar_count,
         poses,
+        scalars,
     })
 }
 
@@ -1621,7 +1672,7 @@ fn build_component_mesh(
     texture_paths: &HashMap<u32, String>,
 ) -> anyhow::Result<MeshIr> {
     let header = edb.header.clone();
-    let entity_index = (component.entity_index & 0x00ff_ffff) as usize;
+    let entity_index = component.entity_list_index();
     let entity_header = header
         .entity_list
         .data()
@@ -1630,14 +1681,42 @@ fn build_component_mesh(
     edb.seek(SeekFrom::Start(entity_header.common.address as u64))?;
     let entity: EXGeoEntity = edb.read_type_args(edb.endian, (header.version, edb.platform))?;
 
-    let mut part_vertex_counts = Vec::new();
-    collect_mesh_vertex_counts(&entity, &mut part_vertex_counts);
+    let mut mesh_parts = Vec::new();
+    collect_mesh_parts(
+        &entity,
+        entity_header.common.address as u64,
+        &mut mesh_parts,
+    );
     ensure!(
-        component.skin_data.len() == part_vertex_counts.len(),
+        component.skin_data.len() == mesh_parts.len(),
         "component {group_name}:{component_index} has {} weight parts but Entity has {} mesh parts",
         component.skin_data.len(),
-        part_vertex_counts.len()
+        mesh_parts.len()
     );
+    let morph_group =
+        if header.version == 248 && edb.platform == Platform::Pc && component.morph_index >= 0 {
+            let groups = skin
+                .robots_scalar_groups
+                .as_ref()
+                .context("Robots FBX morph component has no scalar-group table")?;
+            let group = groups
+                .data()
+                .get(component.morph_index as usize)
+                .context("Robots FBX morph index outside scalar-group table")?;
+            ensure!(
+                group.mode == 0,
+                "unsupported shipped Robots FBX morph mode {}",
+                group.mode
+            );
+            ensure!(
+                usize::from(group.scalar_base) + usize::from(group.scalar_count)
+                    <= skin.robots_scalar_value_count as usize,
+                "Robots FBX morph scalar range outside AnimSkin buffer"
+            );
+            Some(group)
+        } else {
+            None
+        };
 
     let mut vertices = Vec::new();
     let mut source_indices = Vec::new();
@@ -1658,12 +1737,13 @@ fn build_component_mesh(
     );
 
     let mut influences = Vec::with_capacity(vertices.len());
-    for (part_index, (weights, vertex_count)) in component
+    for (part_index, (weights, mesh_part)) in component
         .skin_data
         .iter()
-        .zip(part_vertex_counts.iter().copied())
+        .zip(mesh_parts.iter().copied())
         .enumerate()
     {
+        let vertex_count = mesh_part.vertex_count;
         let palette = weights.bone_palette.as_slice();
         let part_influences = weights
             .read_vertex_influences(edb, edb.endian, vertex_count)
@@ -1751,6 +1831,42 @@ fn build_component_mesh(
     }
     ensure!(!indices.is_empty(), "component Entity has no triangles");
 
+    let morph_scalar_base = morph_group.map(|group| u32::from(group.scalar_base));
+    let mut morph_shapes = if let Some(group) = morph_group {
+        (0..usize::from(group.scalar_count))
+            .map(|shape_index| MorphShapeIr {
+                name: format!("Morph_{shape_index:03}"),
+                deltas: Vec::with_capacity(vertices.len()),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if let Some(group) = morph_group {
+        let endian = edb.endian;
+        for mesh_part in &mesh_parts {
+            let part_shapes = read_robots_v248_morph_shape_deltas(
+                edb,
+                endian,
+                mesh_part.object_address,
+                mesh_part.vertex_count,
+                usize::from(group.scalar_count),
+            )?;
+            for (shape, part_deltas) in morph_shapes.iter_mut().zip(part_shapes) {
+                shape.deltas.extend(part_deltas);
+            }
+        }
+        for shape in &morph_shapes {
+            ensure!(
+                shape.deltas.len() == vertices.len(),
+                "Robots FBX morph shape {} has {} deltas for {} vertices",
+                shape.name,
+                shape.deltas.len(),
+                vertices.len()
+            );
+        }
+    }
+
     Ok(MeshIr {
         name: format!(
             "{}_{group_name}_{component_index:03}",
@@ -1761,15 +1877,26 @@ fn build_component_mesh(
         indices,
         triangle_materials,
         materials,
+        morph_scalar_base,
+        morph_shapes,
     })
 }
 
-fn collect_mesh_vertex_counts(entity: &EXGeoEntity, counts: &mut Vec<usize>) {
+#[derive(Debug, Clone, Copy)]
+struct MeshPartInfo {
+    object_address: u64,
+    vertex_count: usize,
+}
+
+fn collect_mesh_parts(entity: &EXGeoEntity, object_address: u64, parts: &mut Vec<MeshPartInfo>) {
     match entity {
-        EXGeoEntity::Mesh(mesh) => counts.push(mesh.vertices.len()),
+        EXGeoEntity::Mesh(mesh) => parts.push(MeshPartInfo {
+            object_address,
+            vertex_count: mesh.vertices.len(),
+        }),
         EXGeoEntity::Split(split) => {
             for child in &split.entities {
-                collect_mesh_vertex_counts(child, counts);
+                collect_mesh_parts(child, child.offset_absolute(), parts);
             }
         }
         _ => {}
@@ -1829,6 +1956,25 @@ fn validate_character_ir(ir: &CharacterIr) -> anyhow::Result<()> {
             mesh.triangle_materials.len() == mesh.indices.len() / 3,
             "mesh triangle/material mismatch"
         );
+        ensure!(
+            mesh.morph_scalar_base.is_some() == !mesh.morph_shapes.is_empty(),
+            "mesh {} morph scalar base/shape presence mismatch",
+            mesh.name
+        );
+        for shape in &mesh.morph_shapes {
+            ensure!(
+                shape.deltas.len() == mesh.vertices.len(),
+                "mesh {} morph shape {} delta count mismatch",
+                mesh.name,
+                shape.name
+            );
+            ensure!(
+                shape.deltas.iter().flatten().all(|value| value.is_finite()),
+                "mesh {} morph shape {} contains non-finite deltas",
+                mesh.name,
+                shape.name
+            );
+        }
         for (index, vertex) in mesh.vertices.iter().enumerate() {
             ensure!(
                 vertex
@@ -1901,6 +2047,26 @@ fn validate_character_ir(ir: &CharacterIr) -> anyhow::Result<()> {
             "animation {} pose dimensions do not match frames and bones",
             clip.name
         );
+        ensure!(
+            clip.morph_scalars.len() == clip.frame_count as usize * clip.scalar_count as usize,
+            "animation {} morph scalar dimensions do not match frames and scalar count",
+            clip.name
+        );
+        ensure!(
+            clip.morph_scalars.iter().all(|value| value.is_finite()),
+            "animation {} contains non-finite morph scalars",
+            clip.name
+        );
+        for mesh in &ir.meshes {
+            if let Some(base) = mesh.morph_scalar_base {
+                ensure!(
+                    base as usize + mesh.morph_shapes.len() <= clip.scalar_count as usize,
+                    "animation {} scalar count does not cover mesh {} morph channels",
+                    clip.name,
+                    mesh.name
+                );
+            }
+        }
         for (pose_index, pose) in clip.poses.iter().enumerate() {
             ensure!(
                 pose.position
@@ -1982,6 +2148,17 @@ fn write_ir(path: &Path, ir: &CharacterIr) -> anyhow::Result<()> {
             write_string(&mut out, &material.name)?;
             write_string(&mut out, &material.texture_path)?;
         }
+        write_u32(&mut out, mesh.morph_scalar_base.unwrap_or(u32::MAX))?;
+        write_u32(
+            &mut out,
+            checked_u32(mesh.morph_shapes.len(), "morph shape count")?,
+        )?;
+        for shape in &mesh.morph_shapes {
+            write_string(&mut out, &shape.name)?;
+            for delta in &shape.deltas {
+                write_f32_slice(&mut out, delta)?;
+            }
+        }
     }
     write_u32(
         &mut out,
@@ -2009,6 +2186,8 @@ fn write_ir(path: &Path, ir: &CharacterIr) -> anyhow::Result<()> {
             write_f32_slice(&mut out, &pose.rotation)?;
             write_f32_slice(&mut out, &pose.scale)?;
         }
+        write_u32(&mut out, clip.scalar_count)?;
+        write_f32_slice(&mut out, &clip.morph_scalars)?;
     }
     out.flush()?;
     Ok(())
@@ -2109,7 +2288,7 @@ fn write_ir_manifest(
         "animation_clip_count": ir.clips.len(),
         "animations": animations,
         "skipped_animations": skipped_animations,
-        "animation_timing_policy": "one animation-only FBX per unique AnimScript FPS/duration; key times span command_length/script_fps including first and last pose frame; no implicit 30 FPS",
+        "animation_timing_policy": "one animation FBX per unique AnimScript FPS/duration; bone and morph keys span command_length/script_fps including first and last decoded frame; no implicit 30 FPS",
     });
     fs::write(path, serde_json::to_vec_pretty(&manifest)?)?;
     Ok(())

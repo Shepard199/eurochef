@@ -112,10 +112,12 @@ impl BinRead for EXGeoMeshEntity {
                         }
                     }
                     _ => {
-                        // TODO(cohae): This should be an error, not a panic
-                        panic!(
-                            "Vertex format for version {version} is not known yet, report to cohae!"
-                        );
+                        return Err(binrw::Error::AssertFail {
+                            pos: reader.stream_position()?,
+                            message: format!(
+                                "vertex format for EngineX version {version} is not known"
+                            ),
+                        });
                     }
                 }
             }

@@ -9,8 +9,9 @@ use crate::array::EXGeoCommonArrayElement;
 pub type EXVector3 = [f32; 3]; // TODO: Replace with structs
 pub type EXVector = [f32; 4];
 pub type EXVector2 = [f32; 2];
+/// 16-bit relative pointer used by compact EngineX tables.
+pub type EXRelPtr16<T = (), const OFFSET: i64 = 0> = EXRelPtr<T, i16, OFFSET>;
 
-// TODO: RelPtr16 generic
 #[derive(Clone)]
 pub struct EXRelPtr<T: BinRead = (), OT: BinRead + NumCast + NumSize = i32, const OFFSET: i64 = 0> {
     offset: OT,

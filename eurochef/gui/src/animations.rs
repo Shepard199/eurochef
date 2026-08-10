@@ -13,12 +13,17 @@ use egui::{
     RichText,
 };
 use eurochef_edb::{
-    anim::EXGeoBaseAnimSkin, binrw::BinReaderExt, edb::EdbFile, entity::EXGeoEntity,
-    header::EXGeoHeader, versions::Platform, Hashcode, HashcodeUtils,
+    anim::EXGeoBaseAnimSkin,
+    binrw::BinReaderExt,
+    edb::EdbFile,
+    entity::{read_robots_v248_morph_shape_deltas, EXGeoEntity},
+    header::EXGeoHeader,
+    versions::Platform,
+    Hashcode, HashcodeUtils,
 };
 use eurochef_shared::{
     entities::UXVertex,
-    maps::{format_hashcode, format_hashcode_with_id},
+    maps::{format_hashcode_with_id, format_typed_hashcode_with_id},
     script::{UXGeoScript, UXGeoScriptCommandData},
     IdentifiableResult,
 };
@@ -41,13 +46,13 @@ mod skinning;
 
 use skinning::{
     bind_pose_skin_matrices, build_skin_matrices, matrix_max_abs_difference, skin_vertices,
-    AnimationBonePose,
+    skin_vertices_with_morph, AnimationBonePose,
 };
 
 const MAX_CAPTURED_MOTION_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_PREVIEW_SECONDS: f32 = 1.0;
-const POSE_CACHE_MAGIC: &[u8; 8] = b"RAPCV002";
-const POSE_CACHE_HEADER_SIZE: usize = 40;
+const POSE_CACHE_MAGIC: &[u8; 8] = b"RAPCV003";
+const POSE_CACHE_HEADER_SIZE: usize = 44;
 const POSE_CACHE_VALUES_PER_BONE: usize = 7;
 const POSE_CACHE_BYTES_PER_BONE: usize = POSE_CACHE_VALUES_PER_BONE * size_of::<f32>();
 const MAX_POSE_CACHE_BYTES: usize = 512 * 1024 * 1024;
@@ -66,8 +71,10 @@ pub struct AnimationPoseCache {
     pub source_path: PathBuf,
     pub frame_count: usize,
     pub bone_count: usize,
+    pub scalar_count: usize,
     pub motion_checksum: u64,
     poses: Vec<AnimationBonePose>,
+    scalars: Vec<f32>,
 }
 
 impl AnimationPoseCache {
@@ -80,6 +87,42 @@ impl AnimationPoseCache {
 
     fn sample_phase(&self, phase: f32) -> Option<Vec<AnimationBonePose>> {
         self.sample_frame(self.frame_at_phase(phase))
+    }
+
+    pub fn sample_scalar_phase(&self, phase: f32) -> Option<Vec<f32>> {
+        self.sample_scalar_frame(self.frame_at_phase(phase))
+    }
+
+    fn sample_scalar_frame(&self, raw_frame: f32) -> Option<Vec<f32>> {
+        if self.scalar_count == 0 {
+            return Some(Vec::new());
+        }
+        if self.frame_count == 0
+            || self.scalars.len() != self.frame_count.checked_mul(self.scalar_count)?
+        {
+            return None;
+        }
+        let clamped = raw_frame
+            .max(0.0)
+            .min((self.frame_count.saturating_sub(1)) as f32);
+        let current_frame = clamped.floor() as usize;
+        let next_frame = (current_frame + 1).min(self.frame_count - 1);
+        let fraction = clamped.fract();
+        let current_start = current_frame.checked_mul(self.scalar_count)?;
+        let next_start = next_frame.checked_mul(self.scalar_count)?;
+        let current = self
+            .scalars
+            .get(current_start..current_start.checked_add(self.scalar_count)?)?;
+        let next = self
+            .scalars
+            .get(next_start..next_start.checked_add(self.scalar_count)?)?;
+        Some(
+            current
+                .iter()
+                .zip(next)
+                .map(|(current, next)| current + (next - current) * fraction)
+                .collect(),
+        )
     }
 
     fn sample_frame(&self, raw_frame: f32) -> Option<Vec<AnimationBonePose>> {
@@ -139,6 +182,8 @@ pub struct AnimationPartSkin {
     pub part_index: usize,
     pub vertex_count: usize,
     pub influences: Vec<AnimationVertexInfluence>,
+    /// Robots v248 additive position deltas, one complete vertex array per native morph scalar.
+    pub morph_shapes: Vec<Vec<Vec3>>,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +196,8 @@ pub struct AnimationComponent {
     pub section_index: u32,
     pub parts_count: u32,
     pub morph_index: i32,
+    /// First native scalar channel used by this component's additive morph group.
+    pub morph_scalar_base: Option<usize>,
     pub part_skins: Vec<AnimationPartSkin>,
 }
 
@@ -290,7 +337,7 @@ fn parse_pose_cache(
         ));
     }
     if bytes.get(..POSE_CACHE_MAGIC.len()) != Some(POSE_CACHE_MAGIC) {
-        return Err("pose cache magic is not RAPCV002".to_string());
+        return Err("pose cache magic is not RAPCV003".to_string());
     }
 
     let edb_uid = read_u32_le(bytes, 0x08)?;
@@ -299,7 +346,8 @@ fn parse_pose_cache(
     let animskin_hashcode = read_u32_le(bytes, 0x14)?;
     let frame_count = read_u32_le(bytes, 0x18)? as usize;
     let bone_count = read_u32_le(bytes, 0x1C)? as usize;
-    let motion_checksum = read_u64_le(bytes, 0x20)?;
+    let scalar_count = read_u32_le(bytes, 0x20)? as usize;
+    let motion_checksum = read_u64_le(bytes, 0x24)?;
 
     if edb_uid != expected_edb_uid {
         return Err(format!(
@@ -335,8 +383,17 @@ fn parse_pose_cache(
     let pose_count = frame_count
         .checked_mul(bone_count)
         .ok_or_else(|| "pose cache dimensions overflow".to_string())?;
-    let payload_size = pose_count
+    let pose_frame_size = bone_count
         .checked_mul(POSE_CACHE_BYTES_PER_BONE)
+        .ok_or_else(|| "pose cache pose frame size overflows".to_string())?;
+    let scalar_frame_size = scalar_count
+        .checked_mul(size_of::<f32>())
+        .ok_or_else(|| "pose cache scalar frame size overflows".to_string())?;
+    let frame_stride = pose_frame_size
+        .checked_add(scalar_frame_size)
+        .ok_or_else(|| "pose cache frame stride overflows".to_string())?;
+    let payload_size = frame_count
+        .checked_mul(frame_stride)
         .ok_or_else(|| "pose cache payload size overflows".to_string())?;
     let expected_size = POSE_CACHE_HEADER_SIZE
         .checked_add(payload_size)
@@ -349,40 +406,57 @@ fn parse_pose_cache(
     }
 
     let mut poses = Vec::with_capacity(pose_count);
-    for pose_index in 0..pose_count {
-        let offset = POSE_CACHE_HEADER_SIZE + pose_index * POSE_CACHE_BYTES_PER_BONE;
-        let position = Vec3::new(
-            read_f32_le(bytes, offset)?,
-            read_f32_le(bytes, offset + 4)?,
-            read_f32_le(bytes, offset + 8)?,
-        );
-        let rotation = Quat::from_xyzw(
-            read_f32_le(bytes, offset + 12)?,
-            read_f32_le(bytes, offset + 16)?,
-            read_f32_le(bytes, offset + 20)?,
-            read_f32_le(bytes, offset + 24)?,
-        );
-        if !position.is_finite() || !rotation.is_finite() {
-            return Err(format!("non-finite pose at flattened index {pose_index}"));
+    let mut scalars = Vec::with_capacity(frame_count.saturating_mul(scalar_count));
+    for frame_index in 0..frame_count {
+        let frame_offset = POSE_CACHE_HEADER_SIZE + frame_index * frame_stride;
+        for bone_index in 0..bone_count {
+            let pose_index = frame_index * bone_count + bone_index;
+            let offset = frame_offset + bone_index * POSE_CACHE_BYTES_PER_BONE;
+            let position = Vec3::new(
+                read_f32_le(bytes, offset)?,
+                read_f32_le(bytes, offset + 4)?,
+                read_f32_le(bytes, offset + 8)?,
+            );
+            let rotation = Quat::from_xyzw(
+                read_f32_le(bytes, offset + 12)?,
+                read_f32_le(bytes, offset + 16)?,
+                read_f32_le(bytes, offset + 20)?,
+                read_f32_le(bytes, offset + 24)?,
+            );
+            if !position.is_finite() || !rotation.is_finite() {
+                return Err(format!("non-finite pose at flattened index {pose_index}"));
+            }
+            let length = rotation.length();
+            if (length - 1.0).abs() > 2.0e-3 {
+                return Err(format!(
+                    "non-unit quaternion at flattened index {pose_index}: {length}"
+                ));
+            }
+            poses.push(AnimationBonePose {
+                position,
+                rotation: rotation.normalize(),
+            });
         }
-        let length = rotation.length();
-        if (length - 1.0).abs() > 2.0e-3 {
-            return Err(format!(
-                "non-unit quaternion at flattened index {pose_index}: {length}"
-            ));
+        let scalar_offset = frame_offset + pose_frame_size;
+        for scalar_index in 0..scalar_count {
+            let value = read_f32_le(bytes, scalar_offset + scalar_index * size_of::<f32>())?;
+            if !value.is_finite() {
+                return Err(format!(
+                    "non-finite morph scalar at frame {frame_index} index {scalar_index}"
+                ));
+            }
+            scalars.push(value);
         }
-        poses.push(AnimationBonePose {
-            position,
-            rotation: rotation.normalize(),
-        });
     }
 
     Ok(AnimationPoseCache {
         source_path: source_path.to_path_buf(),
         frame_count,
         bone_count,
+        scalar_count,
         motion_checksum,
         poses,
+        scalars,
     })
 }
 
@@ -395,12 +469,13 @@ fn load_pose_cache(
 ) -> (Option<AnimationPoseCache>, Option<String>) {
     let relative =
         PathBuf::from(format!("{edb_uid:08X}")).join(format!("{animation_index:04}.rapc"));
+    let mut errors = Vec::new();
     for root in pose_cache_roots() {
         let path = root.join(&relative);
         if !path.is_file() {
             continue;
         }
-        return match fs::read(&path) {
+        match fs::read(&path) {
             Ok(bytes) => match parse_pose_cache(
                 &path,
                 &bytes,
@@ -410,23 +485,24 @@ fn load_pose_cache(
                 animskin_hashcode,
                 motion_checksum,
             ) {
-                Ok(cache) => (Some(cache), None),
-                Err(error) => (None, Some(format!("{}: {error}", path.display()))),
+                Ok(cache) => return (Some(cache), None),
+                Err(error) => errors.push(format!("{}: {error}", path.display())),
             },
-            Err(error) => (
-                None,
-                Some(format!("could not read {}: {error}", path.display())),
-            ),
-        };
+            Err(error) => errors.push(format!("could not read {}: {error}", path.display())),
+        }
     }
-    (None, None)
+    if errors.is_empty() {
+        (None, None)
+    } else {
+        (None, Some(errors.join("; ")))
+    }
 }
 
 pub fn read_from_file(edb: &mut EdbFile) -> anyhow::Result<AnimationCatalog> {
     let header = edb.header.clone();
     let saved_position = edb.stream_position()?;
     let mut skins = Vec::with_capacity(header.animskin_list.len());
-    let mut entity_part_vertex_counts: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut entity_mesh_parts: HashMap<usize, Vec<AnimationEntityMeshPartInfo>> = HashMap::new();
 
     for (index, skin_header) in header.animskin_list.iter().enumerate() {
         edb.seek(SeekFrom::Start(skin_header.common.address as u64))?;
@@ -437,7 +513,7 @@ pub fn read_from_file(edb: &mut EdbFile) -> anyhow::Result<AnimationCatalog> {
         };
 
         let components = if let Some(skin) = parsed.as_ref() {
-            collect_components(edb, &header, skin, &mut entity_part_vertex_counts)?
+            collect_components(edb, &header, skin, &mut entity_mesh_parts)?
         } else {
             Vec::new()
         };
@@ -509,50 +585,89 @@ pub fn read_from_file(edb: &mut EdbFile) -> anyhow::Result<AnimationCatalog> {
     Ok(AnimationCatalog { clips, skins })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AnimationEntityMeshPartInfo {
+    object_address: u64,
+    vertex_count: usize,
+}
+
 fn collect_components(
     edb: &mut EdbFile,
     header: &EXGeoHeader,
     skin: &EXGeoBaseAnimSkin,
-    vertex_count_cache: &mut HashMap<usize, Vec<usize>>,
+    mesh_part_cache: &mut HashMap<usize, Vec<AnimationEntityMeshPartInfo>>,
 ) -> anyhow::Result<Vec<AnimationComponent>> {
     let mut components = Vec::new();
     let endian = edb.endian;
     for (group, entries) in [
-        ("primary", skin.entities.data().as_slice()),
-        ("secondary", skin.more_entities.data().as_slice()),
+        ("group A (+0x68)", skin.entities.data().as_slice()),
+        (
+            "group B (+0x70, morph-bearing)",
+            skin.more_entities.data().as_slice(),
+        ),
     ] {
         for (component_index, component) in entries.iter().enumerate() {
-            let entity_index = (component.entity_index & 0x00ff_ffff) as usize;
+            let entity_index = component.entity_list_index();
             let entity_hashcode = header
                 .entity_list
                 .data()
                 .get(entity_index)
                 .map(|entity| entity.common.hashcode);
-            let vertex_counts = if let Some(counts) = vertex_count_cache.get(&entity_index) {
-                counts.clone()
+            let mesh_parts = if let Some(parts) = mesh_part_cache.get(&entity_index) {
+                parts.clone()
             } else {
-                let counts = read_entity_mesh_vertex_counts(edb, header, entity_index)?;
-                vertex_count_cache.insert(entity_index, counts.clone());
-                counts
+                let parts = read_entity_mesh_parts(edb, header, entity_index)?;
+                mesh_part_cache.insert(entity_index, parts.clone());
+                parts
             };
+            let morph_group = if header.version == 248
+                && edb.platform == Platform::Pc
+                && component.morph_index >= 0
+            {
+                let groups = skin
+                    .robots_scalar_groups
+                    .as_ref()
+                    .context("Robots morph component has no scalar-group table")?;
+                let morph_group = groups
+                    .data()
+                    .get(component.morph_index as usize)
+                    .context("Robots morph index outside scalar-group table")?;
+                anyhow::ensure!(
+                    morph_group.mode == 0,
+                    "unsupported shipped Robots morph mode {} at component {}:{}",
+                    morph_group.mode,
+                    group,
+                    component_index
+                );
+                anyhow::ensure!(
+                    usize::from(morph_group.scalar_base) + usize::from(morph_group.scalar_count)
+                        <= skin.robots_scalar_value_count as usize,
+                    "Robots morph scalar range outside AnimSkin buffer"
+                );
+                Some(morph_group)
+            } else {
+                None
+            };
+            let morph_scalar_base = morph_group.map(|group| usize::from(group.scalar_base));
 
             anyhow::ensure!(
-                component.skin_data.len() == vertex_counts.len(),
+                component.skin_data.len() == mesh_parts.len(),
                 "AnimSkin component {}:{} has {} weight payloads but Entity {} has {} mesh parts",
                 group,
                 component_index,
                 component.skin_data.len(),
                 entity_index,
-                vertex_counts.len()
+                mesh_parts.len()
             );
 
-            let mut part_skins = Vec::with_capacity(vertex_counts.len());
-            for (part_index, (payload, vertex_count)) in component
+            let mut part_skins = Vec::with_capacity(mesh_parts.len());
+            for (part_index, (payload, mesh_part)) in component
                 .skin_data
                 .iter()
-                .zip(vertex_counts.iter().copied())
+                .zip(mesh_parts.iter().copied())
                 .enumerate()
             {
+                let vertex_count = mesh_part.vertex_count;
                 let palette = payload.bone_palette.as_slice();
                 let influences = payload
                     .read_vertex_influences(edb, endian, vertex_count)?
@@ -590,10 +705,25 @@ fn collect_components(
                         })
                     })
                     .collect::<anyhow::Result<Vec<_>>>()?;
+                let morph_shapes = if let Some(morph_group) = morph_group {
+                    read_robots_v248_morph_shape_deltas(
+                        edb,
+                        endian,
+                        mesh_part.object_address,
+                        vertex_count,
+                        usize::from(morph_group.scalar_count),
+                    )?
+                    .into_iter()
+                    .map(|shape| shape.into_iter().map(Vec3::from_array).collect::<Vec<_>>())
+                    .collect()
+                } else {
+                    Vec::new()
+                };
                 part_skins.push(AnimationPartSkin {
                     part_index,
                     vertex_count,
                     influences,
+                    morph_shapes,
                 });
             }
 
@@ -606,6 +736,7 @@ fn collect_components(
                 section_index: component.section_index,
                 parts_count: component.parts_count,
                 morph_index: component.morph_index,
+                morph_scalar_base,
                 part_skins,
             });
         }
@@ -613,32 +744,40 @@ fn collect_components(
     Ok(components)
 }
 
-fn read_entity_mesh_vertex_counts(
+fn read_entity_mesh_parts(
     edb: &mut EdbFile,
     header: &EXGeoHeader,
     entity_index: usize,
-) -> anyhow::Result<Vec<usize>> {
+) -> anyhow::Result<Vec<AnimationEntityMeshPartInfo>> {
     let entity_header = header
         .entity_list
         .data()
         .get(entity_index)
         .context("AnimSkin Entity index outside Entity list")?;
     let saved_position = edb.stream_position()?;
-    edb.seek(SeekFrom::Start(entity_header.common.address as u64))?;
+    let object_address = entity_header.common.address as u64;
+    edb.seek(SeekFrom::Start(object_address))?;
     let entity: EXGeoEntity = edb.read_type_args(edb.endian, (header.version, edb.platform))?;
     edb.seek(SeekFrom::Start(saved_position))?;
 
-    let mut counts = Vec::new();
-    collect_entity_mesh_vertex_counts(&entity, &mut counts);
-    Ok(counts)
+    let mut parts = Vec::new();
+    collect_entity_mesh_parts(&entity, object_address, &mut parts);
+    Ok(parts)
 }
 
-fn collect_entity_mesh_vertex_counts(entity: &EXGeoEntity, counts: &mut Vec<usize>) {
+fn collect_entity_mesh_parts(
+    entity: &EXGeoEntity,
+    object_address: u64,
+    parts: &mut Vec<AnimationEntityMeshPartInfo>,
+) {
     match entity {
-        EXGeoEntity::Mesh(mesh) => counts.push(mesh.vertices.len()),
+        EXGeoEntity::Mesh(mesh) => parts.push(AnimationEntityMeshPartInfo {
+            object_address,
+            vertex_count: mesh.vertices.len(),
+        }),
         EXGeoEntity::Split(split) => {
             for child in &split.entities {
-                collect_entity_mesh_vertex_counts(child, counts);
+                collect_entity_mesh_parts(child, child.offset_absolute(), parts);
             }
         }
         _ => {}
@@ -785,6 +924,7 @@ struct AnimationSkinnedEntity {
     skinned_vertices: Vec<UXVertex>,
     part_vertex_ranges: Vec<std::ops::Range<usize>>,
     part_skins: Vec<AnimationPartSkin>,
+    morph_scalar_base: Option<usize>,
 }
 
 fn build_skin_renderers(
@@ -828,6 +968,7 @@ fn build_skin_renderers(
                         skinned_vertices: mesh.vertex_data.clone(),
                         part_vertex_ranges: mesh.part_vertex_ranges.clone(),
                         part_skins: component.part_skins.clone(),
+                        morph_scalar_base: component.morph_scalar_base,
                     })
                 })
                 .collect()
@@ -960,6 +1101,9 @@ impl AnimationRuntime {
         let Some(poses) = cache.sample_phase(phase) else {
             return AnimationRuntimeStatus::InvalidPose;
         };
+        let Some(morph_scalars) = cache.sample_scalar_phase(phase) else {
+            return AnimationRuntimeStatus::InvalidPose;
+        };
         let Some(skin) = self
             .catalog
             .skins
@@ -980,12 +1124,14 @@ impl AnimationRuntime {
         }
 
         for entity in entities.iter_mut() {
-            if skin_vertices(
+            if skin_vertices_with_morph(
                 &entity.original_vertices,
                 &mut entity.skinned_vertices,
                 &entity.part_vertex_ranges,
                 &entity.part_skins,
                 &skin_matrices,
+                &morph_scalars,
+                entity.morph_scalar_base,
             )
             .is_some()
             {
@@ -1025,14 +1171,7 @@ fn semantic_script_reference(
     hashcodes: &IntMap<Hashcode, String>,
     script_hashcode: Hashcode,
 ) -> String {
-    if script_hashcode.is_local() {
-        format!(
-            "Script #{} [0x{script_hashcode:08X}]",
-            script_hashcode.index()
-        )
-    } else {
-        format_hashcode_with_id(hashcodes, script_hashcode)
-    }
+    format_typed_hashcode_with_id(hashcodes, "Script", script_hashcode)
 }
 
 fn semantic_animation_label(
@@ -1040,28 +1179,21 @@ fn semantic_animation_label(
     clip: &AnimationClipRecord,
     hashcodes: &IntMap<Hashcode, String>,
 ) -> String {
-    if !clip.hashcode.is_local() {
-        let name = format_hashcode(hashcodes, clip.hashcode);
-        if !name.contains("_Unknown_") && !name.contains("HT_Invalid") {
-            return name;
-        }
-    }
-
-    let mut parts = vec![format!("Animation #{}", clip.index)];
+    let mut parts = vec![
+        format_typed_hashcode_with_id(hashcodes, "Animation", clip.hashcode),
+        format!("index {}", clip.index),
+    ];
     if let Some(cache) = clip.pose_cache.as_ref() {
         parts.push(format!("{} asset frames", cache.frame_count));
+        if cache.scalar_count != 0 {
+            parts.push(format!("{} native morph scalars", cache.scalar_count));
+        }
     }
     if let Some(skin_index) = clip.skin_index {
         let skin_label = catalog
             .skins
             .get(skin_index)
-            .map(|skin| {
-                if skin.hashcode.is_local() {
-                    format!("AnimSkin #{} [0x{:08X}]", skin.index, skin.hashcode)
-                } else {
-                    format_hashcode_with_id(hashcodes, skin.hashcode)
-                }
-            })
+            .map(|skin| format_typed_hashcode_with_id(hashcodes, "AnimSkin", skin.hashcode))
             .unwrap_or_else(|| format!("AnimSkin index {skin_index}"));
         parts.push(skin_label);
     } else {
@@ -1188,16 +1320,8 @@ impl AnimationListPanel {
                         .show(ui, |ui| {
                             for index in 0..self.catalog.clips.len() {
                                 let clip = &self.catalog.clips[index];
-                                let semantic =
+                                let label =
                                     semantic_animation_label(&self.catalog, clip, &self.hashcodes);
-                                let decoded = format_hashcode(&self.hashcodes, clip.hashcode);
-                                let canonical =
-                                    format_hashcode_with_id(&self.hashcodes, clip.hashcode);
-                                let label = if semantic == decoded {
-                                    canonical
-                                } else {
-                                    format!("{canonical} · {semantic}")
-                                };
                                 if !filter.is_empty()
                                     && !label.to_ascii_lowercase().contains(&filter)
                                 {
@@ -1532,14 +1656,7 @@ impl AnimationListPanel {
             ui.label("No animation selected");
             return;
         };
-        let semantic = semantic_animation_label(&self.catalog, clip, &self.hashcodes);
-        let decoded = format_hashcode(&self.hashcodes, clip.hashcode);
-        let canonical = format_hashcode_with_id(&self.hashcodes, clip.hashcode);
-        let heading = if semantic == decoded {
-            canonical
-        } else {
-            format!("{canonical} · {semantic}")
-        };
+        let heading = semantic_animation_label(&self.catalog, clip, &self.hashcodes);
 
         ui.heading(heading);
         ui.horizontal_wrapped(|ui| {
@@ -1560,8 +1677,8 @@ impl AnimationListPanel {
             ui.colored_label(
                 egui::Color32::LIGHT_GREEN,
                 format!(
-                    "Native pose cache active: {} frames, {} bones. CPU skinning and frame interpolation are enabled.",
-                    cache.frame_count, cache.bone_count
+                    "Native RAPCV003 cache active: {} frames, {} bones, {} morph scalars. CPU skinning, native morph timing and frame interpolation are enabled.",
+                    cache.frame_count, cache.bone_count, cache.scalar_count
                 ),
             );
             ui.monospace(format!(
@@ -1569,6 +1686,24 @@ impl AnimationListPanel {
                 cache.source_path.display(),
                 cache.motion_checksum
             ));
+            if cache.scalar_count != 0 {
+                if let Some(values) = cache.sample_scalar_frame(self.selected_asset_frame()) {
+                    let preview = values
+                        .iter()
+                        .enumerate()
+                        .take(16)
+                        .map(|(index, value)| format!("s{index}={value:.4}"))
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    ui.monospace(format!("native morph scalars: {preview}"));
+                    if values.len() > 16 {
+                        ui.label(format!(
+                            "… {} additional scalar channels",
+                            values.len() - 16
+                        ));
+                    }
+                }
+            }
         } else if let Some(error) = &clip.pose_cache_error {
             ui.colored_label(
                 egui::Color32::LIGHT_RED,
@@ -1717,8 +1852,9 @@ impl AnimationListPanel {
                                             component
                                                 .entity_hashcode
                                                 .map(|hashcode| {
-                                                    format_hashcode_with_id(
+                                                    format_typed_hashcode_with_id(
                                                         &self.hashcodes,
+                                                        "Entity",
                                                         hashcode,
                                                     )
                                                 })
@@ -1767,15 +1903,19 @@ impl AnimationListPanel {
                         if usage.skin_hashcode == u32::MAX {
                             "implicit Animation binding [0xFFFFFFFF]".to_string()
                         } else if usage.skin_hashcode.is_local() {
-                            format!(
-                                "AnimSkin #{} [0x{:08X}]",
-                                usage.skin_hashcode.index(),
-                                usage.skin_hashcode
+                            format_typed_hashcode_with_id(
+                                &self.hashcodes,
+                                "AnimSkin",
+                                usage.skin_hashcode,
                             )
                         } else {
                             format!(
                                 "{} @ {}",
-                                format_hashcode_with_id(&self.hashcodes, usage.skin_hashcode),
+                                format_typed_hashcode_with_id(
+                                    &self.hashcodes,
+                                    "AnimSkin",
+                                    usage.skin_hashcode,
+                                ),
                                 format_hashcode_with_id(&self.hashcodes, usage.skin_file)
                             )
                         }
@@ -1871,14 +2011,16 @@ mod tests {
         bytes.extend_from_slice(&animskin_hashcode.to_le_bytes());
         bytes.extend_from_slice(&2u32.to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.extend_from_slice(&checksum.to_le_bytes());
-        for values in [
-            [0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
-            [2.0f32, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0],
+        for (values, scalar) in [
+            ([0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], 0.0f32),
+            ([2.0f32, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0], 1.0f32),
         ] {
             for value in values {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
+            bytes.extend_from_slice(&scalar.to_le_bytes());
         }
 
         let cache = parse_pose_cache(
@@ -1897,6 +2039,11 @@ mod tests {
         assert!((sample[0].rotation.length() - 1.0).abs() < 1.0e-6);
         assert!((sample[0].rotation.z.abs() - std::f32::consts::FRAC_1_SQRT_2).abs() < 1.0e-5);
         assert!((sample[0].rotation.w.abs() - std::f32::consts::FRAC_1_SQRT_2).abs() < 1.0e-5);
+        let scalars = cache
+            .sample_scalar_frame(0.5)
+            .expect("interpolated morph scalar sample");
+        assert_eq!(scalars.len(), 1);
+        assert!((scalars[0] - 0.5).abs() < 1.0e-6);
 
         let last = cache.sample_phase(1.0).expect("last pose sample");
         assert!((last[0].position.x - 2.0).abs() < 1.0e-6);
@@ -1955,12 +2102,55 @@ mod tests {
             );
         }
     }
+    fn collect_test_edb_paths(root: &Path, output: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_test_edb_paths(&path, output);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("edb"))
+            {
+                output.push(path);
+            }
+        }
+    }
+
     #[test]
     fn real_animation_manifest_when_requested() {
         let Ok(manifest_path) = std::env::var("ROBOTS_ANIMATION_MANIFEST") else {
             return;
         };
         let manifest = std::fs::read_to_string(&manifest_path).expect("read animation manifest");
+        let mut edb_paths = manifest
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                line.split_once('\t')
+                    .map(|(_, path)| PathBuf::from(path.trim()))
+            })
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("edb"))
+            })
+            .collect::<Vec<_>>();
+        if edb_paths.is_empty() {
+            let manifest_path = Path::new(&manifest_path);
+            let source_root = manifest_path
+                .parent()
+                .and_then(Path::parent)
+                .expect("canonical manifest should live below _eurotools_out")
+                .join("extracted_main/robots/binary/_bin_pc");
+            collect_test_edb_paths(&source_root, &mut edb_paths);
+        }
+        edb_paths.sort();
+        edb_paths.dedup();
+
         let mut files = 0usize;
         let mut clips = 0usize;
         let mut skins = 0usize;
@@ -1968,17 +2158,10 @@ mod tests {
         let mut skin_failures = Vec::new();
         let mut bind_pose_failures = Vec::new();
 
-        for line in manifest.lines().skip(1) {
-            let Some((_, path)) = line.split_once('\t') else {
-                continue;
-            };
-            let path = path.trim();
-            if path.is_empty() {
-                continue;
-            }
-            let platform = eurochef_edb::versions::Platform::from_path(path)
+        for path in edb_paths {
+            let platform = eurochef_edb::versions::Platform::from_path(&path)
                 .expect("manifest EDB platform should be detectable");
-            let file = std::fs::File::open(path).expect("open manifest EDB");
+            let file = std::fs::File::open(&path).expect("open manifest EDB");
             let reader = std::io::BufReader::new(file);
             let mut edb = EdbFile::new(Box::new(reader), platform).expect("parse manifest EDB");
             let catalog = read_from_file(&mut edb).expect("read manifest animation catalog");
@@ -1988,12 +2171,20 @@ mod tests {
 
             for clip in catalog.clips {
                 if let Some(error) = clip.motion.read_error {
-                    motion_failures.push(format!("{path}: animation {}: {error}", clip.index));
+                    motion_failures.push(format!(
+                        "{}: animation {}: {error}",
+                        path.display(),
+                        clip.index
+                    ));
                 }
             }
             for skin in catalog.skins {
                 if let Some(error) = skin.parse_error {
-                    skin_failures.push(format!("{path}: AnimSkin {}: {error}", skin.index));
+                    skin_failures.push(format!(
+                        "{}: AnimSkin {}: {error}",
+                        path.display(),
+                        skin.index
+                    ));
                 }
                 if let Some(parsed) = &skin.parsed {
                     match bind_pose_skin_matrices(parsed) {
@@ -2006,13 +2197,15 @@ mod tests {
                                 .fold(0.0, f32::max);
                             if error > 1.0e-4 {
                                 bind_pose_failures.push(format!(
-                                    "{path}: AnimSkin {}: max identity error {error}",
+                                    "{}: AnimSkin {}: max identity error {error}",
+                                    path.display(),
                                     skin.index
                                 ));
                             }
                         }
                         None => bind_pose_failures.push(format!(
-                            "{path}: AnimSkin {}: invalid bind hierarchy",
+                            "{}: AnimSkin {}: invalid bind hierarchy",
+                            path.display(),
                             skin.index
                         )),
                     }

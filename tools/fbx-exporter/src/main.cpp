@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -22,8 +23,8 @@
 
 namespace {
 
-constexpr std::array<char, 8> kMagic{'E', 'C', 'F', 'B', 'X', '0', '0', '2'};
-constexpr std::uint32_t kVersion = 2;
+constexpr std::array<char, 8> kMagic{'E', 'C', 'F', 'B', 'X', '0', '0', '3'};
+constexpr std::uint32_t kVersion = 3;
 constexpr std::uint32_t kMaxBones = 4096;
 constexpr std::uint32_t kMaxMeshes = 4096;
 constexpr std::uint32_t kMaxClips = 100'000;
@@ -31,6 +32,8 @@ constexpr std::uint32_t kMaxFrames = 1'000'000;
 constexpr std::uint32_t kMaxVertices = 20'000'000;
 constexpr std::uint32_t kMaxIndices = 60'000'000;
 constexpr std::uint32_t kMaxMaterials = 65'536;
+constexpr std::uint32_t kMaxMorphShapes = 65'536;
+constexpr std::uint32_t kMaxMorphScalars = 65'536;
 constexpr std::uint32_t kMaxStringBytes = 1'048'576;
 constexpr double kUnitScale = 100.0;
 constexpr double kTimeTolerance = 1.0e-7;
@@ -86,6 +89,12 @@ struct Bone {
 struct Material {
     std::uint32_t hashcode{};
     std::string name;
+    std::string texture_path;
+};
+
+struct MorphShape {
+    std::string name;
+    std::vector<Vec3> deltas;
 };
 
 struct Mesh {
@@ -94,6 +103,8 @@ struct Mesh {
     std::vector<std::uint32_t> indices;
     std::vector<std::uint32_t> triangle_materials;
     std::vector<Material> materials;
+    std::uint32_t morph_scalar_base{std::numeric_limits<std::uint32_t>::max()};
+    std::vector<MorphShape> morph_shapes;
 };
 
 struct Pose {
@@ -116,6 +127,8 @@ struct AnimationClip {
     float duration_seconds{};
     std::string root_motion_mode;
     std::vector<Pose> poses;
+    std::uint32_t scalar_count{};
+    std::vector<float> morph_scalars;
 };
 
 struct Character {
@@ -317,12 +330,42 @@ Character read_character(const std::filesystem::path& path) {
         }
         mesh.materials.reserve(material_count);
         for (std::uint32_t material = 0; material < material_count; ++material) {
-            mesh.materials.push_back({reader.read<std::uint32_t>(), reader.read_string()});
+            mesh.materials.push_back({
+                reader.read<std::uint32_t>(),
+                reader.read_string(),
+                reader.read_string(),
+            });
         }
         for (const auto slot : mesh.triangle_materials) {
             if (slot >= material_count) {
                 throw std::runtime_error("triangle references invalid material slot");
             }
+        }
+        mesh.morph_scalar_base = reader.read<std::uint32_t>();
+        const auto morph_shape_count = reader.read<std::uint32_t>();
+        if (morph_shape_count > kMaxMorphShapes) {
+            throw std::runtime_error("invalid IR morph shape count");
+        }
+        if ((morph_shape_count == 0)
+            != (mesh.morph_scalar_base == std::numeric_limits<std::uint32_t>::max())) {
+            throw std::runtime_error("IR morph scalar base/shape presence mismatch");
+        }
+        mesh.morph_shapes.reserve(morph_shape_count);
+        for (std::uint32_t shape_index = 0; shape_index < morph_shape_count; ++shape_index) {
+            MorphShape shape;
+            shape.name = reader.read_string();
+            if (shape.name.empty()) {
+                throw std::runtime_error("empty IR morph shape name");
+            }
+            shape.deltas.reserve(vertex_count);
+            for (std::uint32_t vertex_index = 0; vertex_index < vertex_count; ++vertex_index) {
+                const Vec3 delta = read_vec3(reader);
+                ensure_finite(delta.x, "morph delta");
+                ensure_finite(delta.y, "morph delta");
+                ensure_finite(delta.z, "morph delta");
+                shape.deltas.push_back(delta);
+            }
+            mesh.morph_shapes.push_back(std::move(shape));
         }
         character.meshes.push_back(std::move(mesh));
     }
@@ -384,6 +427,31 @@ Character read_character(const std::filesystem::path& path) {
                 throw std::runtime_error("animation scale must be positive");
             }
             clip.poses.push_back(pose);
+        }
+        clip.scalar_count = reader.read<std::uint32_t>();
+        if (clip.scalar_count > kMaxMorphScalars) {
+            throw std::runtime_error("invalid IR morph scalar count");
+        }
+        const std::uint64_t scalar_value_count =
+            static_cast<std::uint64_t>(clip.frame_count) * clip.scalar_count;
+        if (scalar_value_count > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::runtime_error("IR morph scalar payload exceeds safety limit");
+        }
+        clip.morph_scalars.reserve(static_cast<std::size_t>(scalar_value_count));
+        for (std::uint64_t scalar_index = 0; scalar_index < scalar_value_count; ++scalar_index) {
+            const float value = reader.read<float>();
+            ensure_finite(value, "animation morph scalar");
+            clip.morph_scalars.push_back(value);
+        }
+        for (const Mesh& mesh : character.meshes) {
+            if (mesh.morph_shapes.empty()) {
+                continue;
+            }
+            if (mesh.morph_scalar_base >= clip.scalar_count
+                || static_cast<std::uint64_t>(mesh.morph_scalar_base) + mesh.morph_shapes.size()
+                    > clip.scalar_count) {
+                throw std::runtime_error("animation scalar payload does not cover mesh morph channels");
+            }
         }
         character.clips.push_back(std::move(clip));
     }
@@ -611,6 +679,7 @@ struct ModelBuildResult {
     std::uint64_t triangle_count{};
     std::uint64_t vertex_count{};
     std::uint64_t cluster_count{};
+    std::uint64_t morph_shape_count{};
 };
 
 ModelBuildResult build_model_scene(FbxScene* scene, const Character& character) {
@@ -635,6 +704,34 @@ ModelBuildResult build_model_scene(FbxScene* scene, const Character& character) 
             control_points[index] = convert_point(source.vertices[index].position);
         }
 
+        if (!source.morph_shapes.empty()) {
+            FbxBlendShape* blend_shape =
+                FbxBlendShape::Create(scene, (source.name + "_BlendShape").c_str());
+            for (std::size_t shape_index = 0; shape_index < source.morph_shapes.size(); ++shape_index) {
+                const MorphShape& source_shape = source.morph_shapes[shape_index];
+                const std::string channel_name = source.name + "_" + source_shape.name;
+                FbxBlendShapeChannel* channel =
+                    FbxBlendShapeChannel::Create(scene, channel_name.c_str());
+                FbxShape* shape = FbxShape::Create(scene, (channel_name + "_Target").c_str());
+                shape->InitControlPoints(static_cast<int>(source.vertices.size()));
+                FbxVector4* shape_points = shape->GetControlPoints();
+                for (std::size_t vertex_index = 0; vertex_index < source.vertices.size(); ++vertex_index) {
+                    const Vertex& base = source.vertices[vertex_index];
+                    const Vec3& delta = source_shape.deltas[vertex_index];
+                    const Vec3 target{
+                        base.position.x + delta.x,
+                        base.position.y + delta.y,
+                        base.position.z + delta.z,
+                    };
+                    shape_points[vertex_index] = convert_point(target);
+                }
+                channel->AddTargetShape(shape, 100.0);
+                blend_shape->AddBlendShapeChannel(channel);
+                ++result.morph_shape_count;
+            }
+            mesh->AddDeformer(blend_shape);
+        }
+
         FbxGeometryElementNormal* normals = mesh->CreateElementNormal();
         normals->SetMappingMode(FbxGeometryElement::eByPolygonVertex);
         normals->SetReferenceMode(FbxGeometryElement::eDirect);
@@ -644,6 +741,9 @@ ModelBuildResult build_model_scene(FbxScene* scene, const Character& character) 
         FbxGeometryElementVertexColor* colors = mesh->CreateElementVertexColor();
         colors->SetMappingMode(FbxGeometryElement::eByPolygonVertex);
         colors->SetReferenceMode(FbxGeometryElement::eDirect);
+        FbxGeometryElementSmoothing* smoothing = mesh->CreateElementSmoothing();
+        smoothing->SetMappingMode(FbxGeometryElement::eByPolygon);
+        smoothing->SetReferenceMode(FbxGeometryElement::eDirect);
         FbxGeometryElementMaterial* material_element = mesh->CreateElementMaterial();
         material_element->SetMappingMode(FbxGeometryElement::eByPolygon);
         material_element->SetReferenceMode(FbxGeometryElement::eIndexToDirect);
@@ -653,6 +753,20 @@ ModelBuildResult build_model_scene(FbxScene* scene, const Character& character) 
             phong->Diffuse.Set(FbxDouble3(1.0, 1.0, 1.0));
             phong->DiffuseFactor.Set(1.0);
             phong->ShadingModel.Set("Phong");
+            if (!material.texture_path.empty()) {
+                FbxFileTexture* texture =
+                    FbxFileTexture::Create(scene, (material.name + "_Diffuse").c_str());
+                texture->SetFileName(material.texture_path.c_str());
+                texture->SetRelativeFileName(material.texture_path.c_str());
+                texture->SetTextureUse(FbxTexture::eStandard);
+                texture->SetMappingType(FbxTexture::eUV);
+                texture->SetMaterialUse(FbxFileTexture::eModelMaterial);
+                texture->SetSwapUV(false);
+                texture->SetTranslation(0.0, 0.0);
+                texture->SetScale(1.0, 1.0);
+                texture->SetRotation(0.0, 0.0);
+                phong->Diffuse.ConnectSrcObject(texture);
+            }
             mesh_node->AddMaterial(phong);
         }
 
@@ -660,7 +774,8 @@ ModelBuildResult build_model_scene(FbxScene* scene, const Character& character) 
         for (std::size_t triangle = 0; triangle < triangle_count; ++triangle) {
             const std::uint32_t material_slot = source.triangle_materials[triangle];
             material_element->GetIndexArray().Add(static_cast<int>(material_slot));
-            mesh->BeginPolygon(-1, -1, -1, false);
+            smoothing->GetDirectArray().Add(1);
+            mesh->BeginPolygon(static_cast<int>(material_slot), -1, -1, false);
             const std::array<std::size_t, 3> order{0, 2, 1};
             for (const std::size_t corner : order) {
                 const std::uint32_t control_point = source.indices[triangle * 3 + corner];
@@ -756,6 +871,12 @@ void write_curve_keys(
     curve->KeyModifyEnd();
 }
 
+double fbx_animation_duration_seconds(const AnimationClip& clip) {
+    return clip.frame_count > 1
+        ? static_cast<double>(clip.frame_count - 1) / clip.sample_rate
+        : 0.0;
+}
+
 struct AnimationBuildResult {
     std::uint64_t curve_count{};
     std::uint64_t key_count{};
@@ -766,20 +887,27 @@ AnimationBuildResult build_animation_scene(
     const Character& character,
     const AnimationClip& clip) {
     FbxTime::SetGlobalTimeMode(FbxTime::eCustom, clip.sample_rate);
-    scene->GetGlobalSettings().SetAxisSystem(FbxAxisSystem::MayaZUp);
-    scene->GetGlobalSettings().SetSystemUnit(FbxSystemUnit::cm);
+    build_model_scene(scene, character);
     scene->GetGlobalSettings().SetTimeMode(FbxTime::eCustom);
     scene->GetGlobalSettings().SetCustomFrameRate(clip.sample_rate);
-    const SkeletonScene skeleton = build_skeleton(scene, character);
-    add_bind_pose(scene, character, skeleton, {});
+    SkeletonScene skeleton;
+    skeleton.nodes.reserve(character.bones.size());
+    for (const Bone& bone : character.bones) {
+        FbxNode* node = scene->GetRootNode()->FindChild(bone.name.c_str(), true);
+        if (!node) {
+            throw std::runtime_error("animation scene skeleton node missing after model build");
+        }
+        skeleton.nodes.push_back(node);
+    }
 
     FbxAnimStack* stack = FbxAnimStack::Create(scene, clip.name.c_str());
     FbxAnimLayer* layer = FbxAnimLayer::Create(scene, (clip.name + "_BaseLayer").c_str());
     stack->AddMember(layer);
+    const double fbx_duration_seconds = fbx_animation_duration_seconds(clip);
     FbxTime start;
     start.SetSecondDouble(0.0);
     FbxTime stop;
-    stop.SetSecondDouble(clip.duration_seconds);
+    stop.SetSecondDouble(fbx_duration_seconds);
     FbxTimeSpan span(start, stop);
     stack->SetLocalTimeSpan(span);
     scene->GetGlobalSettings().SetTimelineDefaultTimeSpan(span);
@@ -822,9 +950,46 @@ AnimationBuildResult build_animation_scene(
             node->LclScaling.GetCurve(layer, FBXSDK_CURVENODE_COMPONENT_Z, true),
         };
         for (std::size_t channel = 0; channel < curves.size(); ++channel) {
-            write_curve_keys(curves[channel], channels[channel], clip.duration_seconds);
+            write_curve_keys(curves[channel], channels[channel], fbx_duration_seconds);
             ++result.curve_count;
             result.key_count += channels[channel].size();
+        }
+    }
+
+    for (const Mesh& source : character.meshes) {
+        if (source.morph_shapes.empty()) {
+            continue;
+        }
+        FbxNode* node = scene->GetRootNode()->FindChild(source.name.c_str(), true);
+        if (!node) {
+            throw std::runtime_error("animation scene morph mesh node missing after model build");
+        }
+        FbxMesh* mesh = node->GetMesh();
+        if (!mesh || mesh->GetDeformerCount(FbxDeformer::eBlendShape) != 1) {
+            throw std::runtime_error("animation scene morph mesh blend shape missing");
+        }
+        FbxBlendShape* blend_shape = static_cast<FbxBlendShape*>(
+            mesh->GetDeformer(0, FbxDeformer::eBlendShape));
+        if (!blend_shape
+            || blend_shape->GetBlendShapeChannelCount()
+                != static_cast<int>(source.morph_shapes.size())) {
+            throw std::runtime_error("animation scene morph channel count mismatch");
+        }
+        for (std::size_t shape_index = 0; shape_index < source.morph_shapes.size(); ++shape_index) {
+            const std::size_t scalar_index =
+                static_cast<std::size_t>(source.morph_scalar_base) + shape_index;
+            std::vector<double> values;
+            values.reserve(clip.frame_count);
+            for (std::size_t frame = 0; frame < clip.frame_count; ++frame) {
+                const float scalar = clip.morph_scalars[frame * clip.scalar_count + scalar_index];
+                values.push_back(static_cast<double>(scalar) * 100.0);
+            }
+            FbxBlendShapeChannel* channel =
+                blend_shape->GetBlendShapeChannel(static_cast<int>(shape_index));
+            FbxAnimCurve* curve = channel->DeformPercent.GetCurve(layer, true);
+            write_curve_keys(curve, values, fbx_duration_seconds);
+            ++result.curve_count;
+            result.key_count += values.size();
         }
     }
     return result;
@@ -836,7 +1001,7 @@ void configure_export_io(FbxManager* manager, bool animation_only) {
     settings->SetBoolProp(EXP_FBX_MATERIAL, !animation_only);
     settings->SetBoolProp(EXP_FBX_TEXTURE, false);
     settings->SetBoolProp(EXP_FBX_EMBEDDED, false);
-    settings->SetBoolProp(EXP_FBX_SHAPE, !animation_only);
+    settings->SetBoolProp(EXP_FBX_SHAPE, true);
     settings->SetBoolProp(EXP_FBX_GOBO, false);
     settings->SetBoolProp(EXP_FBX_ANIMATION, animation_only);
     settings->SetBoolProp(EXP_FBX_GLOBAL_SETTINGS, true);
@@ -847,6 +1012,7 @@ struct ModelRoundTripResult {
     std::uint64_t vertex_count{};
     std::uint64_t bone_count{};
     std::uint64_t cluster_count{};
+    std::uint64_t morph_shape_count{};
     std::uint64_t bind_pose_count{};
 };
 
@@ -865,6 +1031,13 @@ void inspect_model_node(FbxNode* node, ModelRoundTripResult& result) {
             for (int skin_index = 0; skin_index < skin_count; ++skin_index) {
                 auto* skin = static_cast<FbxSkin*>(mesh->GetDeformer(skin_index, FbxDeformer::eSkin));
                 result.cluster_count += static_cast<std::uint64_t>(skin->GetClusterCount());
+            }
+            const int blend_shape_count = mesh->GetDeformerCount(FbxDeformer::eBlendShape);
+            for (int blend_index = 0; blend_index < blend_shape_count; ++blend_index) {
+                auto* blend_shape = static_cast<FbxBlendShape*>(
+                    mesh->GetDeformer(blend_index, FbxDeformer::eBlendShape));
+                result.morph_shape_count +=
+                    static_cast<std::uint64_t>(blend_shape->GetBlendShapeChannelCount());
             }
         }
     }
@@ -986,6 +1159,7 @@ AnimationRoundTripResult validate_animation_round_trip(
     FbxTimeSpan span = stack->GetLocalTimeSpan();
     result.start_seconds = span.GetStart().GetSecondDouble();
     result.stop_seconds = span.GetStop().GetSecondDouble();
+    const double fbx_duration_seconds = fbx_animation_duration_seconds(clip);
     const std::vector<FbxVector4> euler_tracks =
         build_unwrapped_euler_tracks(clip, character.bones.size());
 
@@ -1052,19 +1226,60 @@ AnimationRoundTripResult validate_animation_round_trip(
                 ? kTranslationToleranceCm
                 : (angular ? kRotationToleranceDegrees : kScaleTolerance);
             validate_curve(
-                curves[channel], expected[channel], clip.duration_seconds, tolerance, angular);
+                curves[channel], expected[channel], fbx_duration_seconds, tolerance, angular);
             ++result.curve_count;
             result.key_count += curves[channel]->KeyGetCount();
         }
     }
 
+    for (const Mesh& source : character.meshes) {
+        if (source.morph_shapes.empty()) {
+            continue;
+        }
+        FbxNode* node = imported->GetRootNode()->FindChild(source.name.c_str(), true);
+        if (!node || !node->GetMesh()) {
+            imported->Destroy();
+            throw std::runtime_error("animation round-trip morph mesh missing");
+        }
+        FbxMesh* mesh = node->GetMesh();
+        if (mesh->GetDeformerCount(FbxDeformer::eBlendShape) != 1) {
+            imported->Destroy();
+            throw std::runtime_error("animation round-trip morph deformer missing");
+        }
+        auto* blend_shape = static_cast<FbxBlendShape*>(
+            mesh->GetDeformer(0, FbxDeformer::eBlendShape));
+        if (!blend_shape
+            || blend_shape->GetBlendShapeChannelCount()
+                != static_cast<int>(source.morph_shapes.size())) {
+            imported->Destroy();
+            throw std::runtime_error("animation round-trip morph channel count mismatch");
+        }
+        for (std::size_t shape_index = 0; shape_index < source.morph_shapes.size(); ++shape_index) {
+            const std::size_t scalar_index =
+                static_cast<std::size_t>(source.morph_scalar_base) + shape_index;
+            std::vector<double> expected;
+            expected.reserve(clip.frame_count);
+            for (std::size_t frame = 0; frame < clip.frame_count; ++frame) {
+                expected.push_back(
+                    static_cast<double>(clip.morph_scalars[frame * clip.scalar_count + scalar_index])
+                    * 100.0);
+            }
+            FbxBlendShapeChannel* channel =
+                blend_shape->GetBlendShapeChannel(static_cast<int>(shape_index));
+            FbxAnimCurve* curve = channel->DeformPercent.GetCurve(layer, false);
+            validate_curve(curve, expected, fbx_duration_seconds, 1.0e-3, false);
+            ++result.curve_count;
+            result.key_count += curve->KeyGetCount();
+        }
+    }
+
     if (result.bone_count != character.bones.size()
-        || result.mesh_count != 0
+        || result.mesh_count == 0
         || result.bind_pose_count == 0
         || !result.custom_time_mode
         || std::abs(result.custom_frame_rate - clip.sample_rate) > 1.0e-6
         || std::abs(result.start_seconds) > kTimeTolerance
-        || std::abs(result.stop_seconds - clip.duration_seconds) > kTimeTolerance) {
+        || std::abs(result.stop_seconds - fbx_duration_seconds) > kTimeTolerance) {
         imported->Destroy();
         throw std::runtime_error("animation round-trip metadata mismatch");
     }
@@ -1109,7 +1324,7 @@ void write_model_report(
         throw std::runtime_error("cannot create report: " + report_path.string());
     }
     out << "{\n"
-        << "  \"schema\": \"eurochef-fbx-character-report-v2\",\n"
+        << "  \"schema\": \"eurochef-fbx-character-report-v3\",\n"
         << "  \"asset_type\": \"skeletal_mesh\",\n"
         << "  \"source_ir\": \"" << json_escape(input_path.string()) << "\",\n"
         << "  \"output_file\": \"" << json_escape(output_path.string()) << "\",\n"
@@ -1131,13 +1346,15 @@ void write_model_report(
         << "    \"bones\": " << character.bones.size() << ",\n"
         << "    \"vertices\": " << expected.vertex_count << ",\n"
         << "    \"triangles\": " << expected.triangle_count << ",\n"
-        << "    \"clusters\": " << expected.cluster_count << "\n"
+        << "    \"clusters\": " << expected.cluster_count << ",\n"
+        << "    \"morph_shapes\": " << expected.morph_shape_count << "\n"
         << "  },\n"
         << "  \"round_trip\": {\n"
         << "    \"bones\": " << actual.bone_count << ",\n"
         << "    \"vertices\": " << actual.vertex_count << ",\n"
         << "    \"triangles\": " << actual.triangle_count << ",\n"
         << "    \"clusters\": " << actual.cluster_count << ",\n"
+        << "    \"morph_shapes\": " << actual.morph_shape_count << ",\n"
         << "    \"bind_poses\": " << actual.bind_pose_count << ",\n"
         << "    \"status\": \"pass\"\n"
         << "  }\n"
@@ -1158,8 +1375,15 @@ void write_animation_report(
     if (!out) {
         throw std::runtime_error("cannot create report: " + report_path.string());
     }
+    const std::uint64_t expected_morph_curves = std::accumulate(
+        character.meshes.begin(), character.meshes.end(), std::uint64_t{0},
+        [](std::uint64_t total, const Mesh& mesh) {
+            return total + static_cast<std::uint64_t>(mesh.morph_shapes.size());
+        });
+    const std::uint64_t actual_morph_curves =
+        actual.curve_count - static_cast<std::uint64_t>(character.bones.size()) * 9;
     out << "{\n"
-        << "  \"schema\": \"eurochef-fbx-animation-report-v1\",\n"
+        << "  \"schema\": \"eurochef-fbx-animation-report-v2\",\n"
         << "  \"asset_type\": \"animation_only\",\n"
         << "  \"source_ir\": \"" << json_escape(input_path.string()) << "\",\n"
         << "  \"output_file\": \"" << json_escape(output_path.string()) << "\",\n"
@@ -1189,6 +1413,7 @@ void write_animation_report(
         << "  \"units\": \"centimeters\",\n"
         << "  \"expected\": {\n"
         << "    \"bones\": " << character.bones.size() << ",\n"
+        << "    \"morph_curves\": " << expected_morph_curves << ",\n"
         << "    \"curves\": " << expected.curve_count << ",\n"
         << "    \"keys\": " << expected.key_count << "\n"
         << "  },\n"
@@ -1197,6 +1422,7 @@ void write_animation_report(
         << "    \"meshes\": " << actual.mesh_count << ",\n"
         << "    \"anim_stacks\": " << actual.stack_count << ",\n"
         << "    \"anim_layers\": " << actual.layer_count << ",\n"
+        << "    \"morph_curves\": " << actual_morph_curves << ",\n"
         << "    \"curves\": " << actual.curve_count << ",\n"
         << "    \"keys\": " << actual.key_count << ",\n"
         << "    \"bind_poses\": " << actual.bind_pose_count << ",\n"
@@ -1219,13 +1445,15 @@ void validate_model_counts(
         || actual.vertex_count != expected.vertex_count
         || actual.triangle_count != expected.triangle_count
         || actual.cluster_count != expected.cluster_count
+        || actual.morph_shape_count != expected.morph_shape_count
         || actual.bind_pose_count == 0) {
         std::ostringstream message;
         message << "FBX model round-trip mismatch: bones " << actual.bone_count << "/"
                 << character.bones.size() << ", vertices " << actual.vertex_count << "/"
                 << expected.vertex_count << ", triangles " << actual.triangle_count << "/"
                 << expected.triangle_count << ", clusters " << actual.cluster_count << "/"
-                << expected.cluster_count << ", bind poses " << actual.bind_pose_count;
+                << expected.cluster_count << ", morph shapes " << actual.morph_shape_count << "/"
+                << expected.morph_shape_count << ", bind poses " << actual.bind_pose_count;
         throw std::runtime_error(message.str());
     }
 }

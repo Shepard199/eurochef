@@ -1,6 +1,10 @@
 use binrw::binrw;
 
-use crate::{array::EXGeoCommonArrayElement, common::EXRelPtr, versions::Platform};
+use crate::{
+    array::EXGeoCommonArrayElement,
+    common::{EXRelPtr, EXRelPtr16},
+    versions::Platform,
+};
 
 #[binrw]
 #[derive(Debug, Clone)]
@@ -43,20 +47,23 @@ pub struct EXGeoTexture {
     #[br(if(version >= 250))]
     pub external_file: Option<u32>, // 0x1c
 
-    animseq_data: EXRelPtr<(), i16>, // 0x1c, OFFSET.W ANIMSEQDATA
-    value_data: EXRelPtr<(), i16>,   // 0x1e, OFFSET.W VALUEDATA
+    animseq_data: EXRelPtr16, // 0x1c, OFFSET.W ANIMSEQDATA
+    value_data: EXRelPtr16,   // 0x1e, OFFSET.W VALUEDATA
     #[br(if(version > 163))]
-    fur_data: Option<EXRelPtr<(), i16>>, // 0x20, OFFSET.W FURDATA
+    fur_data: Option<EXRelPtr16>, // 0x20, OFFSET.W FURDATA
     #[br(if(version > 163))]
-    region_data: Option<EXRelPtr<(), i16>>, // 0x22, OFFSET.W REGIONDATA
+    region_data: Option<EXRelPtr16>, // 0x22, OFFSET.W REGIONDATA
 
     #[brw(if(platform == Platform::Ps2 && version != 248 && version != 177 && version != 168))]
     // #[brw(if(platform == Platform::Ps2 && (version <= 163 || version == 213)))]
     _unk2: u32, // 0x24
 
-    // ! FIXME(cohae): Robots hack, this is the same as the above field, check if this works on other platforms and surrounding versions
+    /// Robots PC v248 byte size of one base image payload. Robots.exe
+    /// 0x0057240D reads frame relative pointers from +0x28, while the shipped
+    /// corpus proves this +0x24 DWORD equals width*height*depth*bpp/8 for all
+    /// 3963 decoded Textures.
     #[brw(if(version == 248))]
-    _unk2_rbts: u32,
+    pub robots_base_image_size: u32,
 
     #[brw(if(platform == Platform::Ps2))]
     pub clut_offset: Option<EXRelPtr>,
@@ -69,4 +76,104 @@ pub struct EXGeoTexture {
 
     #[br(count = image_count)]
     pub frame_offsets: Vec<EXRelPtr>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::BufReader, io::Seek, path::Path};
+
+    use binrw::BinReaderExt;
+
+    use super::*;
+    use crate::edb::EdbFile;
+
+    #[test]
+    fn real_robots_v248_texture_base_image_size_and_frame_table_parse_when_game_root_is_configured()
+    {
+        let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
+            return;
+        };
+        let source_root = Path::new(&game_root)
+            .join("_eurotools_out")
+            .join("extracted_main")
+            .join("robots")
+            .join("binary")
+            .join("_bin_pc");
+        let mut files = Vec::new();
+        collect_edb_files(&source_root, &mut files);
+        assert!(
+            !files.is_empty(),
+            "no Robots EDB files under {}",
+            source_root.display()
+        );
+
+        let mut textures = 0usize;
+        for path in files {
+            let file = File::open(&path)
+                .unwrap_or_else(|error| panic!("open {}: {error}", path.display()));
+            let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+                .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+            if edb.header.version != 248 {
+                continue;
+            }
+            let headers = edb.header.texture_list.data().clone();
+            for header in headers {
+                edb.seek(std::io::SeekFrom::Start(header.common.address as u64))
+                    .unwrap();
+                let texture = edb
+                    .read_type_args::<EXGeoTexture>(edb.endian, (248, Platform::Pc))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "parse Texture 0x{:08X} in {}: {error}",
+                            header.common.hashcode,
+                            path.display()
+                        )
+                    });
+                assert_eq!(texture.frame_offsets.len(), texture.image_count as usize);
+                let bpp = match texture.format {
+                    0 | 1 | 5 => 16u64,
+                    2 | 3 => 4u64,
+                    4 | 7 | 8 | 9 => 8u64,
+                    6 => 32u64,
+                    format => panic!("unexpected Robots PC Texture format 0x{format:02X}"),
+                };
+                let expected_base_image_size = (u64::from(texture.width)
+                    * u64::from(texture.height)
+                    * u64::from(texture.depth)
+                    * bpp
+                    + 7)
+                    / 8;
+                assert_eq!(
+                    u64::from(texture.robots_base_image_size),
+                    expected_base_image_size,
+                    "Texture 0x{:08X} in {} has unexpected +0x24 base image size",
+                    header.common.hashcode,
+                    path.display()
+                );
+                textures += 1;
+            }
+        }
+
+        assert!(textures > 0, "Robots corpus contained no v248 Textures");
+        eprintln!(
+            "Robots v248 Texture corpus: textures={textures} base_image_size={textures}/{textures} exact"
+        );
+    }
+
+    fn collect_edb_files(root: &Path, output: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_edb_files(&path, output);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("edb"))
+            {
+                output.push(path);
+            }
+        }
+    }
 }

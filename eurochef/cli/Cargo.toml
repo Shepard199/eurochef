@@ -32,6 +32,7 @@ gltf = { version = "1.4.1", default-features = false, features = [
     "names",
     "KHR_materials_pbrSpecularGlossiness",
 ] }
+glam = "0.33.2"
 pathdiff = "0.2.3"
 qoi = "0.4.1"
 serde_json = "1"
