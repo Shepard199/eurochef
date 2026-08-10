@@ -9,6 +9,8 @@ pub mod header;
 pub mod map;
 pub mod particle;
 pub mod robots_provenance;
+pub mod robots_texture_aliases;
+pub mod robots_texture_identity;
 pub mod script;
 pub mod text;
 pub mod texture;

@@ -1,18 +1,89 @@
 use std::{
     fs::File,
     io::{BufReader, Read, Seek, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::Context;
 use eurochef_edb::{
-    binrw::BinReaderExt,
+    binrw::{BinReaderExt, Endian},
     versions::{transform_windows_path, Platform},
 };
-use eurochef_filelist::UXFileList;
+use eurochef_filelist::{unified::UXFileLoc, UXFileList};
 use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
 
 use crate::filelist::TICK_STRINGS;
+
+fn read_payload_at(
+    data_file: &mut File,
+    location: UXFileLoc,
+    serialized_length: u32,
+    endian: Endian,
+) -> anyhow::Result<Vec<u8>> {
+    data_file.seek(std::io::SeekFrom::Start(location.addr as u64))?;
+
+    let magic: u32 = data_file.read_type(endian)?;
+    let mut filesize = serialized_length;
+    if magic == 0x47454F4D {
+        data_file.seek(std::io::SeekFrom::Current(0x10))?;
+        filesize = data_file.read_type(endian)?;
+    }
+
+    data_file.seek(std::io::SeekFrom::Start(location.addr as u64))?;
+    let mut data = vec![0u8; filesize as usize];
+    data_file.read_exact(&mut data)?;
+    Ok(data)
+}
+
+fn read_payload_from_locations(
+    data_files: &mut [Option<File>],
+    data_file_paths: &[PathBuf],
+    locations: &[UXFileLoc],
+    serialized_length: u32,
+    endian: Endian,
+    filename: &str,
+    hashcode: u32,
+) -> anyhow::Result<Vec<u8>> {
+    let mut failures = Vec::new();
+    let mut attempted = Vec::<UXFileLoc>::new();
+
+    for location in locations.iter().copied() {
+        // Robots v7 repeats slot zero when fewer than four runtime slots are
+        // serialized. A synchronous extractor gains nothing by retrying the
+        // exact same archive/offset, so keep native order but skip duplicates.
+        if attempted.contains(&location) {
+            continue;
+        }
+        attempted.push(location);
+
+        let data_file_index = location.filelist_num.unwrap_or(0) as usize;
+        let path = data_file_paths
+            .get(data_file_index)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| format!("archive #{data_file_index}"));
+        let Some(Some(data_file)) = data_files.get_mut(data_file_index) else {
+            failures.push(format!(
+                "location archive={} addr=0x{:X}: data file {} is unavailable",
+                data_file_index, location.addr, path
+            ));
+            continue;
+        };
+
+        match read_payload_at(data_file, location, serialized_length, endian) {
+            Ok(data) => return Ok(data),
+            Err(error) => failures.push(format!(
+                "location archive={} addr=0x{:X} ({}): {error:#}",
+                data_file_index, location.addr, path
+            )),
+        }
+    }
+
+    anyhow::bail!(
+        "FileList entry {filename} (hash {hashcode:08x}) failed at all {} serialized location(s): {}",
+        attempted.len(),
+        failures.join("; ")
+    )
+}
 
 pub fn execute_command(
     filename: String,
@@ -86,17 +157,18 @@ pub fn execute_command(
     }
 
     let file_base = &filename[..filename.len() - 3];
-    let mut data_files = vec![];
+    let mut data_file_paths = vec![];
     if let Some(num_filelists) = filelist.num_filelists {
         for i in 0..(num_filelists + 1) {
-            data_files.push(
-                File::open(format!("{}{:03}", file_base, i))
-                    .context(format!("Failed to open {}{:03}", file_base, i))?,
-            );
+            data_file_paths.push(PathBuf::from(format!("{}{:03}", file_base, i)));
         }
     } else {
-        data_files.push(File::open(format!("{}DAT", file_base))?);
+        data_file_paths.push(PathBuf::from(format!("{}DAT", file_base)));
     }
+    let mut data_files = data_file_paths
+        .iter()
+        .map(|path| File::open(path).ok())
+        .collect::<Vec<_>>();
 
     let pb = ProgressBar::new(filelist.files.len() as u64);
     pb.set_style(
@@ -125,27 +197,16 @@ pub fn execute_command(
             continue;
         }
 
-        let df = &mut data_files[info.filelist_num.unwrap_or(0) as usize];
-
-        df.seek(std::io::SeekFrom::Start(info.addr as u64))?;
-
-        let magic: u32 = df
-            .read_type(filelist.endian)
-            .expect("Failed to read file header");
-
-        let mut filesize = info.length;
-
-        if magic == 0x47454F4D {
-            df.seek(std::io::SeekFrom::Current(0x10))?;
-            filesize = df
-                .read_type(filelist.endian)
-                .expect("Failed to read GeoFile size");
-        }
-
-        df.seek(std::io::SeekFrom::Start(info.addr as u64))?;
-
-        let mut data = vec![0u8; filesize as usize];
-        df.read_exact(&mut data)?;
+        let data = read_payload_from_locations(
+            &mut data_files,
+            &data_file_paths,
+            &info.filelocs,
+            info.length,
+            filelist.endian,
+            filename,
+            info.hashcode,
+        )
+        .with_context(|| format!("failed to extract FileList entry {i}"))?;
 
         let fpath_noprefix = Path::new(&output_folder).join(&fpath.to_str().unwrap()[3..]);
         std::fs::create_dir_all(fpath_noprefix.parent().unwrap())?;
@@ -157,4 +218,61 @@ pub fn execute_command(
     println!("Successfully extracted {} files", filelist.files.len());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+
+    #[test]
+    fn extractor_falls_back_to_later_serialized_location() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "eurochef-filelist-fallback-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let bad = root.join("Filelist.000");
+        let good = root.join("Filelist.001");
+        fs::write(&bad, [0u8; 4]).unwrap();
+        fs::write(&good, b"ABCDEFGH").unwrap();
+
+        let paths = vec![bad.clone(), good.clone()];
+        let mut files = vec![
+            Some(File::open(&bad).unwrap()),
+            Some(File::open(&good).unwrap()),
+        ];
+        let locations = vec![
+            UXFileLoc {
+                addr: 0x100,
+                filelist_num: Some(0),
+            },
+            UXFileLoc {
+                addr: 0,
+                filelist_num: Some(1),
+            },
+        ];
+
+        let data = read_payload_from_locations(
+            &mut files,
+            &paths,
+            &locations,
+            8,
+            Endian::Little,
+            "fallback.bin",
+            0x1234_5678,
+        )
+        .unwrap();
+        assert_eq!(data, b"ABCDEFGH");
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }

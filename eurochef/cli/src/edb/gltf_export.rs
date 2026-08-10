@@ -3,7 +3,7 @@ use eurochef_shared::entities::{TriStrip, UXVertex};
 use gltf::json::{self as gjson, validation::Checked};
 use std::collections::HashMap;
 
-use super::entities::Transparency;
+use super::{entities::Transparency, resource_file_stem_in_edb};
 
 // pub fn write_glb<W: Write>(gltf: &gjson::Root, out: &mut W) -> anyhow::Result<()> {
 //     let json_string = gjson::serialize::to_string(gltf).context("glTF serialization error")?;
@@ -80,24 +80,27 @@ pub fn add_mesh_to_scene(
     strips: &[TriStrip],
     use_normals: bool,
     texture_map: &HashMap<u32, (String, Transparency)>,
-    _file_hash: u32,
+    file_hash: u32,
 ) {
     let mut material_map: HashMap<u32, u32> = HashMap::new();
-    // Restore material map
+    // Restore material map. New exports use decoded names ending in [0xUID],
+    // while older scenes may still contain a bare hexadecimal material name.
     for (i, m) in root.materials.iter().enumerate() {
-        let msplit = m.name.as_ref().unwrap().split('_').next().unwrap();
-        let mhashcode = u32::from_str_radix(msplit, 16).unwrap();
-        material_map.insert(mhashcode, i as u32);
+        let Some(name) = m.name.as_deref() else {
+            continue;
+        };
+        if let Some(mhashcode) = texture_uid_from_name(name) {
+            material_map.insert(mhashcode, i as u32);
+        }
     }
 
     for t in strips {
         if let std::collections::hash_map::Entry::Vacant(e) = material_map.entry(t.texture_index) {
+            let texture_name = resource_file_stem_in_edb("Texture", file_hash, t.texture_index);
             let (img_uri, transparency) = texture_map
                 .get(&t.texture_index)
                 .cloned()
-                .unwrap_or((format!("{:08x}.png", t.texture_index), Transparency::Opaque));
-
-            let texture_name = format!("{:08x}", t.texture_index);
+                .unwrap_or((format!("{texture_name}.png"), Transparency::Opaque));
 
             root.images.push(gjson::Image {
                 uri: Some(img_uri),
@@ -365,6 +368,15 @@ fn bounding_coords(vertices: &[UXVertex]) -> ([f32; 3], [f32; 3]) {
     (min, max)
 }
 
+fn texture_uid_from_name(name: &str) -> Option<u32> {
+    if let Some(start) = name.rfind("[0x").or_else(|| name.rfind("[0X")) {
+        let hex = name.get(start + 3..)?.strip_suffix(']')?;
+        return u32::from_str_radix(hex, 16).ok();
+    }
+    let hex = name.split('_').next().unwrap_or(name);
+    u32::from_str_radix(hex, 16).ok()
+}
+
 fn create_data_uri(data: &[u8]) -> String {
     let mut uri = "data:application/octet-stream;base64,".to_string();
     base64::engine::general_purpose::STANDARD.encode_string(data, &mut uri);
@@ -421,8 +433,14 @@ mod tests {
             0x0100_0012,
         );
 
-        assert_eq!(root.images[0].name.as_deref(), Some("8600013a"));
-        assert_eq!(root.materials[0].name.as_deref(), Some("8600013a"));
+        assert_eq!(
+            root.images[0].name.as_deref(),
+            Some("HT_Local_Texture_8600013A_[0x8600013A]")
+        );
+        assert_eq!(
+            root.materials[0].name.as_deref(),
+            Some("HT_Local_Texture_8600013A_[0x8600013A]")
+        );
         assert!(root.extensions_used.is_empty());
         let primitive = &root.meshes[0].primitives[0];
         assert_eq!(primitive.mode, Checked::Valid(gjson::mesh::Mode::Triangles));

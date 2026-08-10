@@ -6,6 +6,7 @@ use binrw::{BinReaderExt, Endian};
 use crate::{EXFileList4, EXFileList5, EXFileList9};
 
 pub struct UXFileList {
+    pub version: u32,
     /// `None` when using a single '.dat' file
     pub num_filelists: Option<u16>,
     pub build_type: Option<u16>,
@@ -14,14 +15,43 @@ pub struct UXFileList {
 }
 
 pub struct UXFileInfo {
+    /// Compatibility view of the first serialized location.
     pub addr: u32,
+    /// Compatibility view of the first serialized location.
     pub filelist_num: Option<u32>,
+
+    /// All serialized locations, in native record order.
+    pub filelocs: Vec<UXFileLoc>,
 
     pub length: u32,
     pub hashcode: u32,
     pub version: u32,
     pub flags: u32,
-    // ? Should we consider multiple filelocs?
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UXFileLoc {
+    pub addr: u32,
+    pub filelist_num: Option<u32>,
+}
+
+impl UXFileInfo {
+    pub fn primary_fileloc(&self) -> Option<UXFileLoc> {
+        self.filelocs.first().copied()
+    }
+
+    /// Robots.exe v7 loader `0x0052DA6E` expands each serialized file-location
+    /// list to four runtime slots. Missing slots repeat location zero. The read
+    /// path at `0x0052D76E` submits all four resulting offsets to the native I/O
+    /// backend together, so callers must not discard slots 1..3 as metadata.
+    pub fn native_v7_fileloc_slots(&self) -> Option<[UXFileLoc; 4]> {
+        let first = self.primary_fileloc()?;
+        let mut slots = [first; 4];
+        for (slot, location) in slots.iter_mut().zip(self.filelocs.iter().copied()) {
+            *slot = location;
+        }
+        Some(slots)
+    }
 }
 
 // TODO: We should probably have our own error types, considering that this is a library

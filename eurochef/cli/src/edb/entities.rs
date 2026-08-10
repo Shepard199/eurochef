@@ -18,7 +18,7 @@ use image::ImageFormat;
 use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
 
 use crate::{
-    edb::{gltf_export, TICK_STRINGS},
+    edb::{gltf_export, resource_file_stem, resource_file_stem_in_edb, TICK_STRINGS},
     PlatformArg,
 };
 
@@ -310,7 +310,10 @@ pub fn execute_command(
             texture_uri_map.insert(
                 t.common.hashcode,
                 (
-                    format!("{:08x}_frame0.png", t.common.hashcode),
+                    format!(
+                        "{}_frame0.png",
+                        resource_file_stem_in_edb("Texture", header.hashcode, t.common.hashcode,)
+                    ),
                     Transparency::Opaque,
                 ),
             );
@@ -375,7 +378,12 @@ pub fn execute_command(
     let mut entity_offsets: Vec<(u64, String)> = header
         .entity_list
         .iter()
-        .map(|e| (e.common.address as u64, format!("{:x}", e.common.hashcode)))
+        .map(|e| {
+            (
+                e.common.address as u64,
+                resource_file_stem("Entity", e.common.hashcode),
+            )
+        })
         .collect();
 
     // Find entities in refpointers

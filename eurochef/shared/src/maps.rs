@@ -223,6 +223,74 @@ pub fn format_hashcode_with_id(hashcodes: &IntMap<Hashcode, String>, hc: Hashcod
     format!("{} [0x{hc:08X}]", format_hashcode(hashcodes, hc))
 }
 
+/// Formats a resource when the caller knows its concrete namespace.
+///
+/// GUI panels such as Textures/Animations/Scripts/Entities know the resource kind even
+/// when a local `0x8.......` UID has no standalone HashDB symbol. Keeping that type
+/// information prevents valid local resources from degrading to `HT_Local_Invalid_*`.
+pub fn format_typed_hashcode(
+    hashcodes: &IntMap<Hashcode, String>,
+    kind: &str,
+    hc: Hashcode,
+) -> String {
+    if hc == Hashcode::MAX {
+        return "HT_None".to_string();
+    }
+    if hc == 0 {
+        return "HT_Zero".to_string();
+    }
+    if let Some(name) = hashcodes.get(&hc) {
+        return name.clone();
+    }
+    if let Some(name) = eurochef_edb::robots_hashdb::resolve(hc) {
+        return name.to_string();
+    }
+    if (hc & 0x8000_0000) != 0 {
+        return format!("HT_Local_{kind}_{hc:08X}");
+    }
+    format!("HT_{kind}_Unknown_{hc:08X}")
+}
+
+pub fn format_typed_hashcode_with_id(
+    hashcodes: &IntMap<Hashcode, String>,
+    kind: &str,
+    hc: Hashcode,
+) -> String {
+    format!(
+        "{} [0x{hc:08X}]",
+        format_typed_hashcode(hashcodes, kind, hc)
+    )
+}
+
+/// Owner-aware form used for local Texture UIDs whose content has been proven to be an
+/// exact alias of a named global Texture. The local UID remains visible because it is the
+/// serialized identity inside the owning EDB.
+pub fn format_typed_hashcode_in_edb(
+    hashcodes: &IntMap<Hashcode, String>,
+    owner_edb_uid: Hashcode,
+    kind: &str,
+    hc: Hashcode,
+) -> String {
+    if kind == "Texture" {
+        if let Some(global_uid) = eurochef_edb::robots_texture_aliases::resolve(owner_edb_uid, hc) {
+            return format_typed_hashcode(hashcodes, kind, global_uid);
+        }
+    }
+    format_typed_hashcode(hashcodes, kind, hc)
+}
+
+pub fn format_typed_hashcode_with_id_in_edb(
+    hashcodes: &IntMap<Hashcode, String>,
+    owner_edb_uid: Hashcode,
+    kind: &str,
+    hc: Hashcode,
+) -> String {
+    format!(
+        "{} [0x{hc:08X}]",
+        format_typed_hashcode_in_edb(hashcodes, owner_edb_uid, kind, hc)
+    )
+}
+
 // https://github.com/Swyter/poptools/blob/9a22651d7cb16a1edb7894c36e9695138b25b2c1/pop_djinn_sav.bt#L32
 fn human_num(v: u32) -> String {
     let i = v as i32;
@@ -260,6 +328,32 @@ mod tests {
         assert_eq!(
             format_hashcode_with_id(&hashcodes, 0x8200_009A),
             "HT_Local_Entity_8200009A [0x8200009A]"
+        );
+    }
+
+    #[test]
+    fn typed_resource_label_keeps_namespace_without_external_hashcodes() {
+        let hashcodes = IntMap::default();
+        assert_eq!(
+            format_typed_hashcode_with_id(&hashcodes, "Texture", 0x8600_013A),
+            "HT_Local_Texture_8600013A [0x8600013A]"
+        );
+        assert_eq!(
+            format_typed_hashcode_with_id(&hashcodes, "Script", 0x8400_0009),
+            "HT_Local_Script_84000009 [0x84000009]"
+        );
+    }
+
+    #[test]
+    fn owner_aware_texture_label_uses_only_proven_aliases() {
+        let hashcodes = IntMap::default();
+        assert_eq!(
+            format_typed_hashcode_with_id_in_edb(&hashcodes, 0x0100_0071, "Texture", 0x8600_00D7,),
+            "HT_Texture_BlankWhite [0x860000D7]"
+        );
+        assert_eq!(
+            format_typed_hashcode_with_id_in_edb(&hashcodes, 0x0100_0012, "Texture", 0x8600_00D7,),
+            "HT_Local_Texture_860000D7 [0x860000D7]"
         );
     }
 }

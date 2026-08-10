@@ -224,7 +224,8 @@ impl EurochefApp {
         // Textures should come last, since textures refer to nothing (aside from a few external references)
         let internal_refs = edb.internal_references.clone();
         let textures = UXGeoTexture::read_hashcodes(edb, &internal_refs);
-        for (i, t) in entities::EntityListPanel::load_textures(&self.gl, &textures) {
+        for (i, t) in entities::EntityListPanel::load_textures(&self.gl, header.hashcode, &textures)
+        {
             rs_lock.insert_texture(header.hashcode, t.hashcode, i, t);
         }
 
@@ -465,7 +466,9 @@ impl EurochefApp {
         let textures = UXGeoTexture::read_all(&mut edb);
         {
             let mut rs_lock = self.render_store.write();
-            for (i, t) in entities::EntityListPanel::load_textures(&self.gl, &textures).into_iter()
+            for (i, t) in
+                entities::EntityListPanel::load_textures(&self.gl, header.hashcode, &textures)
+                    .into_iter()
             {
                 rs_lock.insert_texture(header.hashcode, t.hashcode, i, t);
             }
@@ -476,6 +479,7 @@ impl EurochefApp {
         } else {
             self.textures = Some(textures::TextureList::new(
                 ctx,
+                header.hashcode,
                 textures.into_iter().map(|(_, t)| t).collect(),
                 self.hashcodes.clone(),
             ));

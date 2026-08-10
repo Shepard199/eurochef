@@ -8,7 +8,7 @@ use eurochef_edb::{
 };
 use eurochef_shared::{
     entities::{read_entity, TriStrip, UXVertex},
-    maps::format_hashcode_with_id,
+    maps::format_typed_hashcode_with_id,
     textures::UXGeoTexture,
     IdentifiableResult,
 };
@@ -160,14 +160,29 @@ impl EntityListPanel {
     // TODO(cohae): Move
     pub fn load_textures(
         gl: &glow::Context,
+        owner_edb_uid: Hashcode,
         textures: &[(usize, IdentifiableResult<UXGeoTexture>)],
     ) -> Vec<(usize, RenderableTexture)> {
-        textures
-            .iter()
-            .map(|(i, it)| unsafe {
-                if let Ok(t) = &it.data {
-                    let mut frames = vec![];
+        let mut exact_groups: FnvHashMap<String, RenderableTexture> = FnvHashMap::default();
+        let mut output = Vec::with_capacity(textures.len());
 
+        for (i, it) in textures {
+            let renderable = unsafe {
+                if let Ok(t) = &it.data {
+                    let identity = eurochef_edb::robots_texture_identity::active_record(
+                        owner_edb_uid,
+                        it.hashcode,
+                    );
+                    if let Some(identity) = &identity {
+                        if let Some(existing) = exact_groups.get(&identity.exact_group) {
+                            let mut reused = existing.clone();
+                            reused.hashcode = it.hashcode;
+                            output.push((*i, reused));
+                            continue;
+                        }
+                    }
+
+                    let mut frames = vec![];
                     for d in &t.frames {
                         let handle = gl_helper::load_texture(
                             gl,
@@ -180,22 +195,20 @@ impl EntityListPanel {
                         frames.push(handle);
                     }
 
-                    (
-                        *i,
-                        RenderableTexture {
-                            external_reference: t.external_texture,
-                            frames,
-                            framerate: t.framerate as usize,
-                            frame_count: t.frame_count as usize,
-                            flags: t.flags,
-                            // EngineX(T) calculates these as step per frame by dividing each axis by 30000. We're calculating this with seconds instead of frames
-                            scroll: Vec2::new(
-                                t.scroll[0] as f32 / 500.0,
-                                t.scroll[1] as f32 / 500.0,
-                            ),
-                            hashcode: it.hashcode,
-                        },
-                    )
+                    let renderable = RenderableTexture {
+                        external_reference: t.external_texture,
+                        frames,
+                        framerate: t.framerate as usize,
+                        frame_count: t.frame_count as usize,
+                        flags: t.flags,
+                        // EngineX(T) calculates these as step per frame by dividing each axis by 30000. We're calculating this with seconds instead of frames
+                        scroll: Vec2::new(t.scroll[0] as f32 / 500.0, t.scroll[1] as f32 / 500.0),
+                        hashcode: it.hashcode,
+                    };
+                    if let Some(identity) = identity {
+                        exact_groups.insert(identity.exact_group, renderable.clone());
+                    }
+                    renderable
                 } else {
                     let handle = gl_helper::load_texture(
                         gl,
@@ -208,21 +221,21 @@ impl EntityListPanel {
                         0,
                     );
 
-                    (
-                        *i,
-                        RenderableTexture {
-                            external_reference: None,
-                            frames: vec![handle],
-                            framerate: 0,
-                            frame_count: 0,
-                            flags: 0,
-                            scroll: Vec2::ZERO,
-                            hashcode: it.hashcode,
-                        },
-                    )
+                    RenderableTexture {
+                        external_reference: None,
+                        frames: vec![handle],
+                        framerate: 0,
+                        frame_count: 0,
+                        flags: 0,
+                        scroll: Vec2::ZERO,
+                        hashcode: it.hashcode,
+                    }
                 }
-            })
-            .collect()
+            };
+            output.push((*i, renderable));
+        }
+
+        output
     }
 }
 fn entity_is_requested(

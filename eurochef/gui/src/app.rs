@@ -161,6 +161,24 @@ impl EurochefApp {
         let platform = Platform::from_path(&path);
         self.current_source_path = Some(path.clone());
 
+        match eurochef_edb::robots_texture_identity::install_discovered(&path) {
+            Ok(Some(catalog_path)) => tracing::info!(
+                "Loaded Robots Texture identity catalog {}",
+                catalog_path.display()
+            ),
+            Ok(None) => tracing::debug!(
+                "No Robots Texture identity catalog discovered for {}",
+                path.display()
+            ),
+            Err(error) => {
+                eurochef_edb::robots_texture_identity::clear();
+                tracing::warn!(
+                    "Failed to load Robots Texture identity catalog for {}: {error:#}",
+                    path.display()
+                );
+            }
+        }
+
         // ROBOTS_PATCH_0023_PIPELINE_REFERENCE_INDEX
         // Rebuild the cache for every explicitly opened EDB. Otherwise opening a
         // file from _eurotools_out can leave no usable external-reference index.

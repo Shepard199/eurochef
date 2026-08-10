@@ -1,9 +1,31 @@
+use std::io::{Read, Seek, SeekFrom};
+
+use anyhow::{bail, Result};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FilenameEncoding {
+    Plain,
+    V7,
+    V10,
+}
+
+fn decode_filename_byte_v7(file_index: u32, byte_index: u32, byte: u8) -> u8 {
+    (byte as u32)
+        .wrapping_add(0x16)
+        .wrapping_sub(file_index)
+        .wrapping_sub(byte_index) as u8
+}
+
+fn decode_filename_byte_v10(file_index: u32, byte_index: u32, byte: u8) -> u8 {
+    (byte as u32)
+        .wrapping_sub(0x6a)
+        .wrapping_sub(file_index * 4)
+        .wrapping_sub(byte_index * 4) as u8
+}
+
 pub fn unscramble_filename_v7(file_index: u32, bytes: &mut [u8]) {
     for (i, b) in bytes.iter_mut().enumerate() {
-        *b = (*b as u32)
-            .wrapping_add(0x16)
-            .wrapping_sub(file_index)
-            .wrapping_sub(i as u32) as u8;
+        *b = decode_filename_byte_v7(file_index, i as u32, *b);
 
         if *b == 0 {
             break;
@@ -23,15 +45,57 @@ pub fn scramble_filename_v7(file_index: u32, bytes: &mut [u8]) {
 
 pub fn unscramble_filename_v10(file_index: u32, bytes: &mut [u8]) {
     for (i, b) in bytes.iter_mut().enumerate() {
-        *b = (*b as u32)
-            .wrapping_sub(0x6a)
-            .wrapping_sub(file_index * 4)
-            .wrapping_sub(i as u32 * 4) as u8;
+        *b = decode_filename_byte_v10(file_index, i as u32, *b);
 
         if *b == 0 {
             break;
         }
     }
+}
+
+/// Reads one filename through its self-relative offset without assuming that
+/// the filename strings are laid out in record order.
+///
+/// Robots.exe `0x0052DA6E` walks the v7 filename offset table in original file
+/// record order and applies the cipher with that original record index. A
+/// sorted-offset pass therefore changes the cipher key and can associate a
+/// filename with the wrong file record when strings are not physically
+/// monotonic.
+pub(crate) fn read_filename<R: Read + Seek>(
+    reader: &mut R,
+    start: u64,
+    file_end: u64,
+    file_index: u32,
+    encoding: FilenameEncoding,
+) -> Result<String> {
+    if start >= file_end {
+        bail!(
+            "filename {} starts outside filelist: 0x{:X} >= 0x{:X}",
+            file_index,
+            start,
+            file_end
+        );
+    }
+
+    reader.seek(SeekFrom::Start(start))?;
+    let mut decoded = Vec::new();
+    for byte_index in 0..(file_end - start) {
+        let mut raw = [0u8; 1];
+        reader.read_exact(&mut raw)?;
+        let byte = match encoding {
+            FilenameEncoding::Plain => raw[0],
+            FilenameEncoding::V7 => decode_filename_byte_v7(file_index, byte_index as u32, raw[0]),
+            FilenameEncoding::V10 => {
+                decode_filename_byte_v10(file_index, byte_index as u32, raw[0])
+            }
+        };
+        if byte == 0 {
+            return Ok(String::from_utf8_lossy(&decoded).into_owned());
+        }
+        decoded.push(byte);
+    }
+
+    bail!("filename {} is missing a null terminator", file_index)
 }
 
 #[cfg(test)]

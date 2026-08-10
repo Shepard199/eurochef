@@ -123,6 +123,14 @@ enum EdbCommand {
         /// Output folder (default: "./resource_atlas/")
         output_folder: Option<String>,
     },
+    /// Build an owner-scoped Texture identity, exact-duplicate and global-alias catalog
+    TextureAliasReport {
+        /// Pipeline manifest.tsv used to discover the canonical EDB corpus
+        manifest: String,
+
+        /// Output folder (default: "./texture_alias_report/")
+        output_folder: Option<String>,
+    },
     /// Build a shipped-corpus AnimScript health report from a pipeline manifest
     ScriptHealth {
         /// Pipeline manifest.tsv containing EDB UID and source path columns
@@ -195,6 +203,18 @@ enum EdbCommand {
         #[arg(long)]
         overwrite: bool,
     },
+    /// Extract Scripts as individually named JSON resources
+    Scripts {
+        /// .edb file to read
+        filename: String,
+
+        /// Output folder for Scripts (default: "./scripts/{filename}/")
+        output_folder: Option<String>,
+
+        /// Override for platform detection
+        #[arg(value_enum, short, long, ignore_case = true)]
+        platform: Option<PlatformArg>,
+    },
     /// Extract textures
     Textures {
         /// .edb file to read
@@ -216,12 +236,12 @@ enum EdbCommand {
         #[arg(long)]
         no_apngs: bool,
     },
-    /// Extract animations (!!MAJOR WIP!!)
+    /// Extract Animation metadata/raw motion payloads and AnimSkin geometry
     Animations {
         /// .edb file to read
         filename: String,
 
-        /// Output folder for textures (default: "./entities/{filename}/")
+        /// Output folder for animations (default: "./animations/{filename}/")
         output_folder: Option<String>,
 
         // TODO(cohae): can we move this up to the edb command?
@@ -323,6 +343,10 @@ fn handle_edb(cmd: EdbCommand) -> anyhow::Result<()> {
             manifest,
             output_folder,
         } => edb::resource_atlas::execute_command(manifest, output_folder),
+        EdbCommand::TextureAliasReport {
+            manifest,
+            output_folder,
+        } => edb::texture_alias_report::execute_command(manifest, output_folder),
         EdbCommand::ScriptHealth {
             manifest,
             output_folder,
@@ -365,6 +389,11 @@ fn handle_edb(cmd: EdbCommand) -> anyhow::Result<()> {
             filename,
             output_folder,
         } => edb::spreadsheets::execute_command(filename, output_folder),
+        EdbCommand::Scripts {
+            filename,
+            platform,
+            output_folder,
+        } => edb::scripts::execute_command(filename, platform, output_folder),
         EdbCommand::Textures {
             filename,
             platform,

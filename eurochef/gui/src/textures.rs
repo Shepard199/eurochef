@@ -2,7 +2,13 @@ use std::sync::Arc;
 
 use egui::{Color32, RichText, Widget};
 use eurochef_edb::Hashcode;
-use eurochef_shared::{maps::format_hashcode_with_id, textures::UXGeoTexture, IdentifiableResult};
+use eurochef_shared::{
+    maps::{
+        format_hashcode_with_id, format_typed_hashcode_in_edb, format_typed_hashcode_with_id_in_edb,
+    },
+    textures::UXGeoTexture,
+    IdentifiableResult,
+};
 use fnv::FnvHashMap;
 use instant::Instant;
 use nohash_hasher::IntMap;
@@ -10,11 +16,15 @@ use nohash_hasher::IntMap;
 use crate::strip_ansi_codes;
 
 pub struct TextureList {
+    file: Hashcode,
     textures: Vec<IdentifiableResult<UXGeoTexture>>,
     hashcodes: Arc<IntMap<Hashcode, String>>,
 
-    // Each texture is a collection of frame textures
+    // Each serialized Texture UID keeps its own identity, while exact TXG
+    // duplicates may share the same GPU TextureHandles.
     egui_textures: FnvHashMap<u32, Vec<egui::TextureHandle>>,
+    identity_group_count: usize,
+    identity_reused_texture_count: usize,
 
     start_time: Instant,
 
@@ -33,13 +43,17 @@ impl TextureList {
 
     pub fn new(
         ctx: &egui::Context,
+        file: Hashcode,
         textures: Vec<IdentifiableResult<UXGeoTexture>>,
         hashcodes: Arc<IntMap<Hashcode, String>>,
     ) -> Self {
         let mut s = Self {
+            file,
             textures,
             hashcodes,
             egui_textures: FnvHashMap::default(),
+            identity_group_count: 0,
+            identity_reused_texture_count: 0,
             start_time: Instant::now(),
 
             zoom: 1.0,
@@ -61,14 +75,35 @@ impl TextureList {
     }
 
     pub fn load_textures(&mut self, ctx: &egui::Context) {
+        self.egui_textures.clear();
+        self.identity_group_count = 0;
+        self.identity_reused_texture_count = 0;
+        let mut exact_group_handles: FnvHashMap<String, Vec<egui::TextureHandle>> =
+            FnvHashMap::default();
+
         for it in &self.textures {
             if let Ok(t) = &it.data {
+                let texture_identity =
+                    eurochef_edb::robots_texture_identity::active_record(self.file, it.hashcode);
+                if let Some(identity) = &texture_identity {
+                    if let Some(handles) = exact_group_handles.get(&identity.exact_group) {
+                        self.egui_textures.insert(it.hashcode, handles.clone());
+                        self.identity_reused_texture_count += 1;
+                        continue;
+                    }
+                }
+
                 let frames: Vec<egui::TextureHandle> = t
                     .frames
                     .iter()
                     .map(|f| {
                         ctx.load_texture(
-                            format!("{:08x}", it.hashcode),
+                            format_typed_hashcode_in_edb(
+                                &self.hashcodes,
+                                self.file,
+                                "Texture",
+                                it.hashcode,
+                            ),
                             egui::ColorImage::from_rgba_unmultiplied(
                                 [t.width as usize, t.height as usize],
                                 f,
@@ -78,9 +113,13 @@ impl TextureList {
                     })
                     .collect();
 
+                if let Some(identity) = texture_identity {
+                    exact_group_handles.insert(identity.exact_group, frames.clone());
+                }
                 self.egui_textures.insert(it.hashcode, frames);
             }
         }
+        self.identity_group_count = exact_group_handles.len();
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
@@ -92,6 +131,19 @@ impl TextureList {
 
             egui::Checkbox::new(&mut self.filter_animated, "Animated only").ui(ui);
         });
+        if let Some(path) = eurochef_edb::robots_texture_identity::active_catalog_path() {
+            ui.small(format!(
+                "Texture identity: {} · exact groups in this EDB: {} · GPU uploads reused: {}",
+                path.display(),
+                self.identity_group_count,
+                self.identity_reused_texture_count
+            ));
+        } else {
+            ui.colored_label(
+                Color32::YELLOW,
+                "Texture identity catalog: not loaded; owner-local IDs remain ungrouped",
+            );
+        }
 
         ui.separator();
 
@@ -102,7 +154,18 @@ impl TextureList {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = [4. * self.zoom; 2].into();
                     for (i, it) in self.textures.iter().enumerate() {
-                        let resource_label = format_hashcode_with_id(&self.hashcodes, it.hashcode);
+                        let resource_label =
+                            format_typed_hashcode_with_id_in_edb(
+                                &self.hashcodes,
+                                self.file,
+                                "Texture",
+                                it.hashcode,
+                            );
+                        let texture_identity =
+                            eurochef_edb::robots_texture_identity::active_record(
+                                self.file,
+                                it.hashcode,
+                            );
 
                         // Skip null texture
                         if it.hashcode == 0x06000000 {
@@ -144,6 +207,32 @@ impl TextureList {
                                             "{resource_label}\nHashcode: 0x{:08X}\nFormat (internal): 0x{:x}\nDimensions: {}x{}{}\nScroll: {} {}\nFlags: 0x{:x}\nGameflags: 0x{:x}\nIndex: {i}\n",
                                             it.hashcode, t.format_internal, t.width, t.height, if t.depth <= 1 { String::new() } else { format!("x{}", t.depth) }, t.scroll[0], t.scroll[1], t.flags, t.game_flags
                                         ));
+
+                                        if let Some(identity) = &texture_identity {
+                                            ui.separator();
+                                            ui.strong(format!(
+                                                "Exact identity: {}",
+                                                identity.exact_group
+                                            ));
+                                            ui.label(format!(
+                                                "Exact group size: {}\nAlias status: {}\nOwner EDB: {} [0x{:08X}]",
+                                                identity.exact_group_size,
+                                                identity.alias_status,
+                                                identity.owner_edb_label,
+                                                identity.owner_edb_uid
+                                            ));
+                                            if let Some(global_uid) = identity.recovered_global_uid {
+                                                ui.label(format!(
+                                                    "Recovered global Texture: {} [0x{global_uid:08X}]",
+                                                    identity
+                                                        .recovered_global_label
+                                                        .as_deref()
+                                                        .unwrap_or("HT_Texture_Unknown")
+                                                ));
+                                            } else {
+                                                ui.label("Recovered global Texture: none (not guessed)");
+                                            }
+                                        }
 
                                         if frames.len() > 1 {
                                             ui.label(format!(
@@ -190,6 +279,11 @@ impl TextureList {
                                 if self.filter_animated {
                                     continue;
                                 }
+                                let external_identity =
+                                    eurochef_edb::robots_texture_identity::active_record(
+                                        ext_file,
+                                        ext_texture,
+                                    );
 
                                 ui.vertical(|ui| {
                                     ui.set_max_width(128.0 * self.zoom);
@@ -216,13 +310,24 @@ impl TextureList {
                                             Color32::LIGHT_RED,
                                             format!(
                                                 "{resource_label} is a reference to {} in {}",
-                                                format_hashcode_with_id(
+                                                format_typed_hashcode_with_id_in_edb(
                                                     &self.hashcodes,
-                                                    ext_texture
+                                                    ext_file,
+                                                    "Texture",
+                                                    ext_texture,
                                                 ),
                                                 format_hashcode_with_id(&self.hashcodes, ext_file)
                                             ),
                                         );
+                                        if let Some(identity) = &external_identity {
+                                            ui.separator();
+                                            ui.label(format!(
+                                                "Exact identity: {}\nExact group size: {}\nAlias status: {}",
+                                                identity.exact_group,
+                                                identity.exact_group_size,
+                                                identity.alias_status
+                                            ));
+                                        }
                                     });
                                     ui.add(
                                         egui::Label::new(RichText::new(&resource_label).strong())
@@ -283,7 +388,14 @@ impl TextureList {
         if let Some(enlarged_texture) = self.enlarged_texture {
             let (i, _hashcode) = enlarged_texture;
             let it = &self.textures[i];
-            let resource_label = format_hashcode_with_id(&self.hashcodes, it.hashcode);
+            let resource_label = format_typed_hashcode_with_id_in_edb(
+                &self.hashcodes,
+                self.file,
+                "Texture",
+                it.hashcode,
+            );
+            let texture_identity =
+                eurochef_edb::robots_texture_identity::active_record(self.file, it.hashcode);
 
             if let Ok(t) = &it.data {
                 // TODO(cohae): Fix resizing window
@@ -293,6 +405,23 @@ impl TextureList {
                     .default_height(ctx.content_rect().height() * 0.70_f32)
                     .show(ctx, |ui| {
                         ui.strong(&resource_label);
+                        if let Some(identity) = &texture_identity {
+                            ui.label(format!(
+                                "Exact identity: {} · copies: {} · status: {}",
+                                identity.exact_group,
+                                identity.exact_group_size,
+                                identity.alias_status
+                            ));
+                            if let Some(global_uid) = identity.recovered_global_uid {
+                                ui.label(format!(
+                                    "Recovered global: {} [0x{global_uid:08X}]",
+                                    identity
+                                        .recovered_global_label
+                                        .as_deref()
+                                        .unwrap_or("HT_Texture_Unknown")
+                                ));
+                            }
+                        }
                         let time = self.start_time.elapsed().as_secs_f32();
                         let frametime_scale = t.frame_count as f32 / t.frames.len() as f32;
                         let frame_time = (1. / t.framerate as f32) * frametime_scale;

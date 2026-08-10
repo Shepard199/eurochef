@@ -19,10 +19,13 @@ use eurochef_edb::{
 use eurochef_shared::{
     entities::{read_entity, TriStrip, UXVertex},
     script::{UXGeoScript, UXGeoScriptCommandData},
+    textures::UXGeoTexture,
 };
 use serde_json::json;
 
 use crate::PlatformArg;
+
+use super::{resource_file_stem, resource_file_stem_in_edb, resource_label, resource_name};
 
 const IR_MAGIC: &[u8; 8] = b"ECFBX002";
 const IR_VERSION: u32 = 2;
@@ -53,6 +56,7 @@ struct InfluenceIr {
 struct MaterialIr {
     hashcode: u32,
     name: String,
+    texture_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +244,7 @@ pub fn execute_command(
 
     let scripts =
         UXGeoScript::read_all(&mut edb).context("failed to read AnimScripts for FBX timing")?;
+    let texture_paths = export_character_textures(&mut edb, &output_folder)?;
     let mut usage_catalog = collect_animation_usages(&header, &scripts);
     let corpus_catalog = if let Some(manifest_path) = script_manifest.as_deref() {
         let catalog = collect_corpus_animation_bindings(Path::new(manifest_path), &header)?;
@@ -275,11 +280,12 @@ pub fn execute_command(
             &usage_catalog,
             &corpus_catalog.explicit_skin_bindings,
             unreferenced_animation_fps,
+            &texture_paths,
         )
         .with_context(|| format!("failed to build AnimSkin index {skin_index}"))?;
         validate_character_ir(&ir)?;
 
-        let character_base = format!("{}_[0x{:08X}]", sanitize_name(&ir.name), ir.animskin_uid);
+        let character_base = ir.name.clone();
         let model_stem = format!("{character_base}_SK");
         let ir_path = ir_folder.join(format!("{model_stem}.ecfbx"));
         let manifest_path = ir_folder.join(format!("{model_stem}.fbxscene.json"));
@@ -288,15 +294,8 @@ pub fn execute_command(
         let animation_outputs = ir
             .clips
             .iter()
-            .enumerate()
-            .map(|(clip_index, clip)| {
-                let stem = animation_output_stem(
-                    &character_base,
-                    ir.source_edb_uid,
-                    clip,
-                    clip_index,
-                    &ir.clips,
-                );
+            .map(|clip| {
+                let stem = format!("{character_base}__{}", clip.name);
                 (
                     output_folder.join(format!("{stem}.fbx")),
                     output_folder.join(format!("{stem}.fbx.report.json")),
@@ -440,6 +439,37 @@ fn invoke_helper(
     Ok(())
 }
 
+fn export_character_textures(
+    edb: &mut EdbFile,
+    output_folder: &Path,
+) -> anyhow::Result<HashMap<u32, String>> {
+    let texture_folder = output_folder.join("textures");
+    let owner_edb_uid = edb.header.hashcode;
+    fs::create_dir_all(&texture_folder)
+        .with_context(|| format!("failed to create {}", texture_folder.display()))?;
+    let mut paths = HashMap::new();
+    for (_, item) in UXGeoTexture::read_all(edb) {
+        let texture = match item.data {
+            Ok(texture) if texture.depth <= 1 => texture,
+            _ => continue,
+        };
+        let Some(frame) = texture.frames.into_iter().next() else {
+            continue;
+        };
+        let path = texture_folder.join(format!(
+            "{}.png",
+            resource_file_stem_in_edb("Texture", owner_edb_uid, item.hashcode)
+        ));
+        let image = image::RgbaImage::from_vec(texture.width as u32, texture.height as u32, frame)
+            .context("invalid texture RGBA buffer")?;
+        image
+            .save(&path)
+            .with_context(|| format!("failed to save {}", path.display()))?;
+        paths.insert(item.hashcode, path.to_string_lossy().replace('\\', "/"));
+    }
+    Ok(paths)
+}
+
 fn resolve_exporter(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(path) = explicit.filter(|value| !value.trim().is_empty()) {
@@ -495,6 +525,14 @@ fn read_corpus_manifest(path: &Path) -> anyhow::Result<Vec<PathBuf>> {
         } else {
             base.join(source_path)
         });
+    }
+    if entries.is_empty() {
+        entries = super::resource_atlas::discover_edb_paths_near_manifest(path)?;
+        info!(
+            manifest = %path.display(),
+            files = entries.len(),
+            "Script manifest contains no direct EDB paths; discovered corpus from game root"
+        );
     }
     ensure!(
         !entries.is_empty(),
@@ -837,6 +875,7 @@ fn build_character_ir(
     usage_catalog: &AnimationUsageCatalog,
     corpus_bindings: &[ScriptAnimationBinding],
     unreferenced_animation_fps: Option<f32>,
+    texture_paths: &HashMap<u32, String>,
 ) -> anyhow::Result<CharacterIr> {
     let header = edb.header.clone();
     let bone_count = skin.bone_count as usize;
@@ -887,7 +926,7 @@ fn build_character_ir(
         });
     }
 
-    let name = eurochef_edb::robots_hashdb::format_or_invalid(animskin_uid);
+    let name = resource_file_stem("AnimSkin", animskin_uid);
     let mut meshes = Vec::new();
     for (group_name, components) in [
         ("primary", skin.entities.data().as_slice()),
@@ -901,6 +940,7 @@ fn build_character_ir(
                 group_name,
                 component_index,
                 source_bone_offset,
+                texture_paths,
             )?);
         }
     }
@@ -1034,7 +1074,7 @@ fn build_animation_clips(
             }
         }
 
-        let decoded_name = eurochef_edb::robots_hashdb::format_or_invalid(animation_uid);
+        let canonical_name = resource_file_stem("Animation", animation_uid);
         for (variant_index, timing) in variants.iter().enumerate() {
             let mut poses = add_synthetic_root_poses(
                 &cache.poses,
@@ -1048,9 +1088,9 @@ fn build_animation_clips(
                 source_bone_count + source_bone_offset,
             );
             let name = if variants.len() == 1 {
-                decoded_name.clone()
+                canonical_name.clone()
             } else {
-                format!("{decoded_name}_Timing{variant_index:02}")
+                format!("{canonical_name}_Timing{variant_index:02}")
             };
             clips.push(AnimationClipIr {
                 name,
@@ -1188,7 +1228,7 @@ fn build_animation_clips(
             })
             .collect::<Vec<_>>();
         let variants = timing_variants(cache.frame_count, &usages);
-        let decoded_name = eurochef_edb::robots_hashdb::format_or_invalid(animation_uid);
+        let canonical_name = resource_file_stem("Animation", animation_uid);
         for (variant_index, timing) in variants.iter().enumerate() {
             let mut poses = add_synthetic_root_poses(
                 &cache.poses,
@@ -1201,18 +1241,13 @@ fn build_animation_clips(
                 cache.frame_count,
                 source_bone_count + source_bone_offset,
             );
-            let source_suffix = if animation_source_edb_uid == header.hashcode {
-                String::new()
+            let name = if variants.len() == 1 {
+                canonical_name.clone()
             } else {
-                format!("_SourceEDB_{animation_source_edb_uid:08X}")
-            };
-            let timing_suffix = if variants.len() == 1 {
-                String::new()
-            } else {
-                format!("_Timing{variant_index:02}")
+                format!("{canonical_name}_Timing{variant_index:02}")
             };
             clips.push(AnimationClipIr {
-                name: format!("{decoded_name}{source_suffix}{timing_suffix}"),
+                name,
                 animation_uid,
                 animation_source_edb_uid,
                 animation_source_path: source_path.clone(),
@@ -1233,7 +1268,39 @@ fn build_animation_clips(
         }
     }
 
+    disambiguate_animation_clip_names(&mut clips);
     Ok((clips, skipped))
+}
+
+fn disambiguate_animation_clip_names(clips: &mut [AnimationClipIr]) {
+    let mut name_counts = HashMap::<String, usize>::new();
+    for clip in clips.iter() {
+        *name_counts.entry(clip.name.clone()).or_default() += 1;
+    }
+    for clip in clips.iter_mut() {
+        if name_counts.get(&clip.name).copied().unwrap_or_default() > 1 {
+            clip.name = format!(
+                "{}_Owner_{}",
+                clip.name,
+                resource_file_stem("File", clip.animation_source_edb_uid)
+            );
+        }
+    }
+
+    let mut owner_name_counts = HashMap::<String, usize>::new();
+    for clip in clips.iter() {
+        *owner_name_counts.entry(clip.name.clone()).or_default() += 1;
+    }
+    for (clip_index, clip) in clips.iter_mut().enumerate() {
+        if owner_name_counts
+            .get(&clip.name)
+            .copied()
+            .unwrap_or_default()
+            > 1
+        {
+            clip.name.push_str(&format!("_Clip{clip_index:03}"));
+        }
+    }
 }
 
 fn timing_variants(_frame_count: usize, usages: &[AnimationUsageTiming]) -> Vec<TimingVariant> {
@@ -1551,6 +1618,7 @@ fn build_component_mesh(
     group_name: &str,
     component_index: usize,
     source_bone_offset: usize,
+    texture_paths: &HashMap<u32, String>,
 ) -> anyhow::Result<MeshIr> {
     let header = edb.header.clone();
     let entity_index = (component.entity_index & 0x00ff_ffff) as usize;
@@ -1650,11 +1718,12 @@ fn build_component_mesh(
                 name: if material_hash == u32::MAX {
                     "HT_Texture_None_[0xFFFFFFFF]".to_string()
                 } else {
-                    format!(
-                        "{}_[0x{material_hash:08X}]",
-                        eurochef_edb::robots_hashdb::format_or_invalid(material_hash)
-                    )
+                    resource_file_stem_in_edb("Texture", header.hashcode, material_hash)
                 },
+                texture_path: texture_paths
+                    .get(&material_hash)
+                    .cloned()
+                    .unwrap_or_default(),
             });
             slot
         });
@@ -1684,11 +1753,8 @@ fn build_component_mesh(
 
     Ok(MeshIr {
         name: format!(
-            "{}_[0x{:08X}]_{group_name}_{component_index:03}",
-            sanitize_name(&eurochef_edb::robots_hashdb::format_or_invalid(
-                entity_header.common.hashcode
-            )),
-            entity_header.common.hashcode
+            "{}_{group_name}_{component_index:03}",
+            resource_file_stem("Entity", entity_header.common.hashcode)
         ),
         vertices,
         influences,
@@ -1914,6 +1980,7 @@ fn write_ir(path: &Path, ir: &CharacterIr) -> anyhow::Result<()> {
         for material in &mesh.materials {
             write_u32(&mut out, material.hashcode)?;
             write_string(&mut out, &material.name)?;
+            write_string(&mut out, &material.texture_path)?;
         }
     }
     write_u32(
@@ -1972,12 +2039,14 @@ fn write_ir_manifest(
         .map(|(clip, (fbx_path, report_path))| {
             json!({
                 "animation_uid": format!("0x{:08X}", clip.animation_uid),
-                "decoded_name": clip.name,
+                "decoded_name": resource_name("Animation", clip.animation_uid),
+                "canonical_label": resource_label("Animation", clip.animation_uid),
                 "animation_source_edb_uid": format!("0x{:08X}", clip.animation_source_edb_uid),
                 "animation_source_file": clip.animation_source_path,
                 "source_animation_index": clip.source_animation_index,
                 "source_script_edb_uid": format!("0x{:08X}", clip.source_script_edb_uid),
                 "source_script_uid": format!("0x{:08X}", clip.source_script_uid),
+                "source_script_label": resource_label("Script", clip.source_script_uid),
                 "source_script_command": clip.source_script_command,
                 "usage_count": clip.usage_count,
                 "source_script_fps": clip.source_script_fps,
@@ -2005,12 +2074,25 @@ fn write_ir_manifest(
             })
         })
         .collect::<Vec<_>>();
+    let bones = ir
+        .bones
+        .iter()
+        .enumerate()
+        .map(|(index, bone)| {
+            json!({
+                "index": index,
+                "name": bone.name,
+                "parent": bone.parent,
+            })
+        })
+        .collect::<Vec<_>>();
     let manifest = json!({
         "schema": "eurochef-fbx-character-ir-v2",
         "source_file": source_path,
         "source_edb_uid": format!("0x{:08X}", ir.source_edb_uid),
         "animskin_uid": format!("0x{:08X}", ir.animskin_uid),
-        "decoded_name": ir.name,
+        "decoded_name": resource_name("AnimSkin", ir.animskin_uid),
+        "canonical_label": resource_label("AnimSkin", ir.animskin_uid),
         "ir_file": ir_path,
         "model_output_file": model_fbx_path,
         "source_units": "EuroChef world units (meters in existing glTF path)",
@@ -2018,6 +2100,7 @@ fn write_ir_manifest(
         "target_axis_system": "MayaZUp (+Z up, -Y front, right-handed)",
         "coordinate_transform": "(-x, -z, y) * 100",
         "bone_count": ir.bones.len(),
+        "bones": bones,
         "mesh_count": ir.meshes.len(),
         "vertex_count": vertex_count,
         "triangle_count": triangle_count,
@@ -2032,56 +2115,8 @@ fn write_ir_manifest(
     Ok(())
 }
 
-fn animation_output_stem(
-    character_base: &str,
-    target_edb_uid: u32,
-    clip: &AnimationClipIr,
-    clip_index: usize,
-    all_clips: &[AnimationClipIr],
-) -> String {
-    let same_uid_count = all_clips
-        .iter()
-        .filter(|candidate| {
-            candidate.animation_source_edb_uid == clip.animation_source_edb_uid
-                && candidate.animation_uid == clip.animation_uid
-        })
-        .count();
-    let source_suffix = if clip.animation_source_edb_uid == target_edb_uid {
-        String::new()
-    } else {
-        format!("_SRC_{:08X}", clip.animation_source_edb_uid)
-    };
-    let timing_suffix = if same_uid_count > 1 {
-        format!("_T{clip_index:03}")
-    } else {
-        String::new()
-    };
-    format!(
-        "{character_base}__{}_[0x{:08X}]{source_suffix}{timing_suffix}",
-        sanitize_name(&clip.name),
-        clip.animation_uid
-    )
-}
-
 fn vector3(value: &[f32; 4]) -> [f32; 3] {
     [value[0], value[1], value[2]]
-}
-
-fn sanitize_name(value: &str) -> String {
-    let mut output = value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    while output.contains("__") {
-        output = output.replace("__", "_");
-    }
-    output.trim_matches('_').to_string()
 }
 
 fn checked_u32(value: usize, field: &str) -> anyhow::Result<u32> {
@@ -2117,14 +2152,6 @@ fn write_string(out: &mut impl Write, value: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn filename_sanitizer_is_deterministic() {
-        assert_eq!(
-            sanitize_name("HT_AnimSkin Foo [0x0D000001]"),
-            "HT_AnimSkin_Foo_0x0D000001"
-        );
-    }
 
     #[test]
     fn character_validator_rejects_non_preceding_parent() {

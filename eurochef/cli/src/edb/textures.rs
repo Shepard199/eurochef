@@ -9,7 +9,10 @@ use eurochef_edb::{edb::EdbFile, versions::Platform};
 use eurochef_shared::textures::UXGeoTexture;
 use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
 
-use crate::{edb::TICK_STRINGS, PlatformArg};
+use crate::{
+    edb::{resource_file_stem_in_edb, TICK_STRINGS},
+    PlatformArg,
+};
 
 pub fn execute_command(
     filename: String,
@@ -61,8 +64,11 @@ pub fn execute_command(
                 }
 
                 if file_format == "png" && !no_apngs {
-                    let filename =
-                        output_folder.join(format!("{:08x}.{}", it.hashcode, file_format));
+                    let filename = output_folder.join(format!(
+                        "{}.{}",
+                        resource_file_stem_in_edb("Texture", header.hashcode, it.hashcode),
+                        file_format
+                    ));
                     if t.frames.len() > 1 {
                         let png_frames: Vec<apng::PNGImage> = t
                             .frames
@@ -100,8 +106,12 @@ pub fn execute_command(
                     }
                 } else {
                     for (i, f) in t.frames.into_iter().enumerate() {
-                        let filename = output_folder
-                            .join(format!("{:08x}_frame{}.{}", it.hashcode, i, file_format));
+                        let filename = output_folder.join(format!(
+                            "{}_frame{}.{}",
+                            resource_file_stem_in_edb("Texture", header.hashcode, it.hashcode),
+                            i,
+                            file_format
+                        ));
                         match file_format.as_str() {
                             "qoi" => {
                                 let filedata =
