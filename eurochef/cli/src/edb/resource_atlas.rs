@@ -104,7 +104,7 @@ pub fn execute_command(manifest_path: String, output_folder: Option<String>) -> 
     let mut manifest_entries = read_manifest(&manifest_path)?;
     let declared_manifest_entries = manifest_entries.len();
     let fallback_root = if manifest_entries.is_empty() {
-        let root = discover_game_root(&manifest_path).with_context(|| {
+        let root = discover_preferred_edb_root(&manifest_path).with_context(|| {
             format!(
                 "manifest {} contains no EDB rows and no game root could be inferred",
                 manifest_path.display()
@@ -248,7 +248,7 @@ fn add_resource(
         uid,
         local_owner_edb: uid.is_local().then_some(edb_uid),
     };
-    let canonical_name = canonical_resource_name(kind, uid);
+    let canonical_name = canonical_resource_name_in_edb(kind, edb_uid, uid);
     atlas
         .entry(key)
         .or_insert_with(|| AtlasEntry {
@@ -263,21 +263,20 @@ fn add_resource(
         });
 }
 
+#[cfg(test)]
 fn canonical_resource_name(kind: ResourceKind, uid: Hashcode) -> String {
-    if uid == Hashcode::MAX {
-        return "HT_None".to_string();
-    }
-    if uid == 0 {
-        return "HT_Zero".to_string();
-    }
-    if uid.is_local() {
-        return format!("HT_Local_{}_{uid:08X}", kind.singular());
-    }
-    robots_hashdb::resolve(uid)
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("HT_Invalid_{uid:08X}"))
+    super::resource_name(kind.singular(), uid)
 }
 
+fn canonical_resource_name_in_edb(
+    kind: ResourceKind,
+    owner_edb_uid: Hashcode,
+    uid: Hashcode,
+) -> String {
+    super::resource_name_in_edb(kind.singular(), owner_edb_uid, uid)
+}
+
+#[cfg(test)]
 fn canonical_resource_label(kind: ResourceKind, uid: Hashcode) -> String {
     format!("{} [0x{uid:08X}]", canonical_resource_name(kind, uid))
 }
@@ -452,11 +451,7 @@ fn write_table<'a>(
     output.push_str("| Canonical resource | Scope | Occurrences | EDB locations |\n");
     output.push_str("|---|---:|---:|---|\n");
     for (key, entry) in entries {
-        let label = canonical_resource_label(key.kind, key.uid);
-        debug_assert_eq!(
-            label,
-            format!("{} [0x{:08X}]", entry.canonical_name, key.uid)
-        );
+        let label = format!("{} [0x{:08X}]", entry.canonical_name, key.uid);
         let scope = key
             .local_owner_edb
             .map(|owner| format!("local to {}", canonical_edb_label(owner)))
@@ -502,7 +497,7 @@ fn distinct_edb_count(entry: &AtlasEntry) -> usize {
         .len()
 }
 
-fn discover_game_root(manifest_path: &Path) -> Option<PathBuf> {
+fn discover_eurotools_root(manifest_path: &Path) -> Option<PathBuf> {
     manifest_path
         .ancestors()
         .find(|ancestor| {
@@ -511,8 +506,29 @@ fn discover_game_root(manifest_path: &Path) -> Option<PathBuf> {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.eq_ignore_ascii_case("_eurotools_out"))
         })
-        .and_then(Path::parent)
         .map(Path::to_path_buf)
+}
+
+fn discover_preferred_edb_root(manifest_path: &Path) -> Option<PathBuf> {
+    let eurotools_root = discover_eurotools_root(manifest_path)?;
+    let extracted_pc = eurotools_root.join("extracted_main/robots/binary/_bin_pc");
+    if extracted_pc.is_dir() {
+        return Some(extracted_pc);
+    }
+    eurotools_root.parent().map(Path::to_path_buf)
+}
+
+pub(crate) fn discover_edb_paths_near_manifest(manifest_path: &Path) -> Result<Vec<PathBuf>> {
+    let root = discover_preferred_edb_root(manifest_path).with_context(|| {
+        format!(
+            "manifest {} contains no EDB paths and no canonical extracted corpus could be inferred",
+            manifest_path.display()
+        )
+    })?;
+    Ok(discover_edb_files(&root)?
+        .into_iter()
+        .map(|entry| entry.source_path)
+        .collect())
 }
 
 fn discover_edb_files(root: &Path) -> Result<Vec<ManifestEntry>> {
@@ -619,6 +635,25 @@ mod tests {
         assert_eq!(
             canonical_resource_label(ResourceKind::Entity, 0x0200_01B4),
             "HT_Entity_Vehicle_Taxi_Collision [0x020001B4]"
+        );
+    }
+
+    #[test]
+    fn proven_local_texture_alias_keeps_owner_scoped_identity() {
+        let mut atlas = BTreeMap::new();
+        add_resource(
+            &mut atlas,
+            ResourceKind::Texture,
+            0x8600_00D7,
+            0x0100_0071,
+            "m03_hub1.edb",
+            215,
+        );
+        let entry = atlas.values().next().unwrap();
+        assert_eq!(entry.canonical_name, "HT_Texture_BlankWhite");
+        assert_eq!(
+            atlas.keys().next().unwrap().local_owner_edb,
+            Some(0x0100_0071)
         );
     }
 

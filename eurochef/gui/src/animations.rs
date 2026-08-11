@@ -37,6 +37,7 @@ use crate::{
     render::{
         camera::ArcBallCamera,
         entity::EntityRenderer,
+        script::resolve_animation_skin_target,
         viewer::{BaseViewer, RenderContext},
         RenderStore,
     },
@@ -45,8 +46,9 @@ use crate::{
 mod skinning;
 
 use skinning::{
-    bind_pose_skin_matrices, build_skin_matrices, matrix_max_abs_difference, skin_vertices,
-    skin_vertices_with_morph, AnimationBonePose,
+    bind_pose_global_bone_matrices, bind_pose_skin_matrices, build_global_bone_matrices,
+    build_native_bone_remap, build_skin_matrices, matrix_max_abs_difference, skin_vertices,
+    skin_vertices_with_morph, transform_vertices_rigid, AnimationBonePose, NativeBoneRemap,
 };
 
 const MAX_CAPTURED_MOTION_BYTES: usize = 16 * 1024 * 1024;
@@ -202,11 +204,24 @@ pub struct AnimationComponent {
 }
 
 #[derive(Debug, Clone)]
+pub struct AnimationBoneAttachmentRecord {
+    pub attachment_index: usize,
+    pub bone_selector: usize,
+    pub bone_hashcode: Option<Hashcode>,
+    pub raw_entity_index: u32,
+    pub entity_index: usize,
+    pub entity_hashcode: Option<Hashcode>,
+}
+
+#[derive(Debug, Clone)]
 pub struct AnimationSkinRecord {
     pub index: usize,
     pub hashcode: Hashcode,
     pub base_skin_num: u32,
     pub mip_ref: u32,
+    /// Sparse Robots v248 serialized bone slot -> exact HT_AnimBone hash mapping.
+    pub bone_hashcodes: Vec<Option<Hashcode>>,
+    pub bone_attachments: Vec<AnimationBoneAttachmentRecord>,
     pub parsed: Option<EXGeoBaseAnimSkin>,
     pub parse_error: Option<String>,
     pub components: Vec<AnimationComponent>,
@@ -467,28 +482,38 @@ fn load_pose_cache(
     animskin_hashcode: Hashcode,
     motion_checksum: u64,
 ) -> (Option<AnimationPoseCache>, Option<String>) {
-    let relative =
-        PathBuf::from(format!("{edb_uid:08X}")).join(format!("{animation_index:04}.rapc"));
+    let folder = PathBuf::from(format!("{edb_uid:08X}"));
+    let relative_candidates = [
+        folder.join(format!(
+            "{animation_index:04}_[0x{animskin_hashcode:08X}].rapc"
+        )),
+        folder.join(format!("{animation_index:04}.rapc")),
+    ];
     let mut errors = Vec::new();
     for root in pose_cache_roots() {
-        let path = root.join(&relative);
-        if !path.is_file() {
-            continue;
-        }
-        match fs::read(&path) {
-            Ok(bytes) => match parse_pose_cache(
-                &path,
-                &bytes,
-                edb_uid,
-                animation_index,
-                animation_hashcode,
-                animskin_hashcode,
-                motion_checksum,
-            ) {
-                Ok(cache) => return (Some(cache), None),
-                Err(error) => errors.push(format!("{}: {error}", path.display())),
-            },
-            Err(error) => errors.push(format!("could not read {}: {error}", path.display())),
+        for relative in &relative_candidates {
+            let path = root.join(relative);
+            if !path.is_file() {
+                continue;
+            }
+            match fs::read(&path) {
+                Ok(bytes) => match parse_pose_cache(
+                    &path,
+                    &bytes,
+                    edb_uid,
+                    animation_index,
+                    animation_hashcode,
+                    animskin_hashcode,
+                    motion_checksum,
+                ) {
+                    Ok(cache) => return (Some(cache), None),
+                    Err(error) => {
+                        errors.push(format!("{}: {error}", path.display()));
+                        continue;
+                    }
+                },
+                Err(error) => errors.push(format!("could not read {}: {error}", path.display())),
+            }
         }
     }
     if errors.is_empty() {
@@ -512,6 +537,47 @@ pub fn read_from_file(edb: &mut EdbFile) -> anyhow::Result<AnimationCatalog> {
             Err(error) => (None, Some(error.to_string())),
         };
 
+        let bone_hashcodes = if let Some(skin) = parsed.as_ref() {
+            if header.version == 248 && edb.platform == Platform::Pc {
+                let endian = edb.endian;
+                skin.read_robots_v248_bone_hashcodes(edb, endian)
+                    .context("read Robots v248 AnimBone selector table")?
+            } else {
+                vec![None; skin.bone_count as usize]
+            }
+        } else {
+            Vec::new()
+        };
+
+        let bone_attachments = parsed
+            .as_ref()
+            .and_then(|skin| skin.bone_attachments.as_ref())
+            .map(|attachments| {
+                attachments
+                    .iter()
+                    .enumerate()
+                    .map(|(attachment_index, attachment)| {
+                        let bone_selector = attachment.bone_selector as usize;
+                        let entity_index = attachment.entity_list_index();
+                        AnimationBoneAttachmentRecord {
+                            attachment_index,
+                            bone_selector,
+                            bone_hashcode: bone_hashcodes
+                                .get(bone_selector)
+                                .and_then(|hashcode| *hashcode),
+                            raw_entity_index: attachment.entity_index,
+                            entity_index,
+                            entity_hashcode: header
+                                .entity_list
+                                .data()
+                                .get(entity_index)
+                                .map(|entity| entity.common.hashcode),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let components = if let Some(skin) = parsed.as_ref() {
             collect_components(edb, &header, skin, &mut entity_mesh_parts)?
         } else {
@@ -532,6 +598,8 @@ pub fn read_from_file(edb: &mut EdbFile) -> anyhow::Result<AnimationCatalog> {
             hashcode: skin_header.common.hashcode,
             base_skin_num: skin_header.base_skin_num,
             mip_ref: skin_header.mip_ref,
+            bone_hashcodes,
+            bone_attachments,
             parsed,
             parse_error,
             components,
@@ -864,6 +932,27 @@ fn attach_mesh_bounds(
             maximum = maximum.max(bounds.1);
             found = true;
         }
+        if let Some(attachments) = skin
+            .parsed
+            .as_ref()
+            .and_then(|parsed| parsed.bone_attachments.as_ref())
+        {
+            for attachment in attachments.iter() {
+                let Some((_, entity)) = entities
+                    .iter()
+                    .find(|(entity_index, _)| *entity_index == attachment.entity_list_index())
+                else {
+                    continue;
+                };
+                let Ok((_, mesh)) = &entity.data else {
+                    continue;
+                };
+                let bounds = mesh.bounding_box();
+                minimum = minimum.min(bounds.0);
+                maximum = maximum.max(bounds.1);
+                found = true;
+            }
+        }
 
         if found {
             skin.center = (minimum + maximum) * 0.5;
@@ -918,13 +1007,22 @@ fn resolve_clip_index(clips: &[AnimationClipRecord], hashcode: Hashcode) -> Opti
     }
 }
 
+enum AnimationEntityBinding {
+    Skinned {
+        part_vertex_ranges: Vec<std::ops::Range<usize>>,
+        part_skins: Vec<AnimationPartSkin>,
+        morph_scalar_base: Option<usize>,
+    },
+    RigidBone {
+        bone_selector: usize,
+    },
+}
+
 struct AnimationSkinnedEntity {
     renderer: EntityRenderer,
     original_vertices: Vec<UXVertex>,
     skinned_vertices: Vec<UXVertex>,
-    part_vertex_ranges: Vec<std::ops::Range<usize>>,
-    part_skins: Vec<AnimationPartSkin>,
-    morph_scalar_base: Option<usize>,
+    binding: AnimationEntityBinding,
 }
 
 fn build_skin_renderers(
@@ -941,7 +1039,8 @@ fn build_skin_renderers(
         .skins
         .iter()
         .map(|skin| {
-            skin.components
+            let mut renderers = skin
+                .components
                 .iter()
                 .filter_map(|component| {
                     let (_, entity) = entities
@@ -966,12 +1065,53 @@ fn build_skin_renderers(
                         renderer,
                         original_vertices: mesh.vertex_data.clone(),
                         skinned_vertices: mesh.vertex_data.clone(),
-                        part_vertex_ranges: mesh.part_vertex_ranges.clone(),
-                        part_skins: component.part_skins.clone(),
-                        morph_scalar_base: component.morph_scalar_base,
+                        binding: AnimationEntityBinding::Skinned {
+                            part_vertex_ranges: mesh.part_vertex_ranges.clone(),
+                            part_skins: component.part_skins.clone(),
+                            morph_scalar_base: component.morph_scalar_base,
+                        },
                     })
                 })
-                .collect()
+                .collect::<Vec<_>>();
+
+            if let Some(attachments) = skin
+                .parsed
+                .as_ref()
+                .and_then(|parsed| parsed.bone_attachments.as_ref())
+            {
+                for attachment in attachments.iter() {
+                    let bone_selector = attachment.bone_selector as usize;
+                    if bone_selector >= skin.bone_hashcodes.len() {
+                        warn!(
+                            "Animation rigid attachment references bone {} outside {} slots",
+                            bone_selector,
+                            skin.bone_hashcodes.len()
+                        );
+                        continue;
+                    }
+                    let entity_index = attachment.entity_list_index();
+                    let Some((_, entity)) = entities
+                        .iter()
+                        .find(|(candidate, _)| *candidate == entity_index)
+                    else {
+                        continue;
+                    };
+                    let Ok((_, mesh)) = entity.data.as_ref() else {
+                        continue;
+                    };
+                    let mut renderer = EntityRenderer::new(file, platform);
+                    unsafe {
+                        renderer.load_mesh(gl, mesh);
+                    }
+                    renderers.push(AnimationSkinnedEntity {
+                        renderer,
+                        original_vertices: mesh.vertex_data.clone(),
+                        skinned_vertices: mesh.vertex_data.clone(),
+                        binding: AnimationEntityBinding::RigidBone { bone_selector },
+                    });
+                }
+            }
+            renderers
         })
         .collect()
 }
@@ -981,6 +1121,9 @@ pub enum AnimationRuntimeStatus {
     Rendered,
     MissingAnimation,
     MissingSkin,
+    /// Source Animation and requested visual AnimSkin differ, but the native
+    /// FUN_004FCE8C selector remap can reconcile their serialized AnimBone maps.
+    SkinMismatchRemappable,
     SkinMismatch,
     MissingPoseCache,
     InvalidPose,
@@ -988,7 +1131,9 @@ pub enum AnimationRuntimeStatus {
 }
 
 pub struct AnimationRuntime {
+    file: Hashcode,
     catalog: AnimationCatalog,
+    pair_pose_caches: RwLock<HashMap<(usize, Hashcode), Option<AnimationPoseCache>>>,
     skin_renderers: Arc<RwLock<Vec<Vec<AnimationSkinnedEntity>>>>,
 }
 
@@ -1004,9 +1149,11 @@ impl AnimationRuntime {
         )],
     ) -> Self {
         Self {
+            file,
             skin_renderers: Arc::new(RwLock::new(build_skin_renderers(
                 file, gl, platform, &catalog, entities,
             ))),
+            pair_pose_caches: RwLock::new(HashMap::new()),
             catalog,
         }
     }
@@ -1027,6 +1174,28 @@ impl AnimationRuntime {
         }
     }
 
+    /// Robots opcode-2 target-skin resource semantics from FUN_004F9E70 ->
+    /// FUN_004F26AA: the serialized target may name an AnimSkin directly or
+    /// another resource (shipped corpus: Animation) that resolves to its bound
+    /// AnimSkin. Return the canonical target AnimSkin identity.
+    pub(crate) fn resolve_animskin_reference(
+        &self,
+        hashcode: Hashcode,
+    ) -> Option<(usize, Hashcode)> {
+        if hashcode & 0x7f00_0000 == 0x0300_0000 {
+            let bound_skin = self.bound_skin_hashcode(hashcode)?;
+            let index = self.resolve_skin_index(bound_skin)?;
+            let canonical = self.catalog.skins.get(index)?.hashcode;
+            return Some((index, canonical));
+        }
+        let index = self.resolve_skin_index(hashcode)?;
+        self.catalog
+            .skins
+            .get(index)
+            .map(|skin| (index, skin.hashcode))
+    }
+
+    #[cfg(test)]
     fn resolve_clip_skin_index(
         &self,
         clip: &AnimationClipRecord,
@@ -1042,8 +1211,99 @@ impl AnimationRuntime {
         }
     }
 
+    fn pose_cache_for_skin(
+        &self,
+        clip_index: usize,
+        animskin_hashcode: Hashcode,
+    ) -> Option<AnimationPoseCache> {
+        let key = (clip_index, animskin_hashcode);
+        if let Some(cached) = self.pair_pose_caches.read().get(&key).cloned() {
+            return cached;
+        }
+        let clip = self.catalog.clips.get(clip_index)?;
+        let default_skin_hashcode = clip
+            .skin_index
+            .and_then(|skin_index| self.catalog.skins.get(skin_index))
+            .map(|skin| skin.hashcode);
+        let loaded = if default_skin_hashcode == Some(animskin_hashcode) {
+            clip.pose_cache.clone().or_else(|| {
+                load_pose_cache(
+                    self.file,
+                    clip.index,
+                    clip.hashcode,
+                    animskin_hashcode,
+                    clip.motion.checksum,
+                )
+                .0
+            })
+        } else {
+            load_pose_cache(
+                self.file,
+                clip.index,
+                clip.hashcode,
+                animskin_hashcode,
+                clip.motion.checksum,
+            )
+            .0
+        };
+        self.pair_pose_caches.write().insert(key, loaded.clone());
+        loaded
+    }
+
+    fn resolve_target_skin(
+        &self,
+        render_store: &RenderStore,
+        clip: &AnimationClipRecord,
+        requested_skin_file: Hashcode,
+        requested_skin_hashcode: Hashcode,
+    ) -> Option<(Arc<AnimationRuntime>, usize, Hashcode)> {
+        if requested_skin_hashcode == u32::MAX {
+            let skin_index = clip.skin_index?;
+            let skin_hashcode = self.catalog.skins.get(skin_index)?.hashcode;
+            let runtime = render_store.get_animation_runtime(self.file)?;
+            return Some((runtime, skin_index, skin_hashcode));
+        }
+
+        let runtime = render_store.get_animation_runtime(requested_skin_file)?;
+        let (skin_index, skin_hashcode) =
+            runtime.resolve_animskin_reference(requested_skin_hashcode)?;
+        Some((runtime, skin_index, skin_hashcode))
+    }
+
+    fn native_bone_remap_to(
+        &self,
+        visual_runtime: &AnimationRuntime,
+        visual_skin_index: usize,
+        animation_skin_index: usize,
+    ) -> Option<NativeBoneRemap> {
+        let visual_skin = visual_runtime.catalog.skins.get(visual_skin_index)?;
+        let animation_skin = self.catalog.skins.get(animation_skin_index)?;
+        let visual_parents = visual_skin
+            .parsed
+            .as_ref()?
+            .hier_data
+            .iter()
+            .map(|hierarchy| hierarchy.link_index)
+            .collect::<Vec<_>>();
+        let animation_parents = animation_skin
+            .parsed
+            .as_ref()?
+            .hier_data
+            .iter()
+            .map(|hierarchy| hierarchy.link_index)
+            .collect::<Vec<_>>();
+        build_native_bone_remap(
+            &visual_skin.bone_hashcodes,
+            &visual_parents,
+            &animation_skin.bone_hashcodes,
+            &animation_parents,
+        )
+    }
+
     pub fn status(
         &self,
+        render_store: &RenderStore,
+        skin_file: Hashcode,
         animation_hashcode: Hashcode,
         skin_hashcode: Hashcode,
     ) -> AnimationRuntimeStatus {
@@ -1051,24 +1311,47 @@ impl AnimationRuntime {
             return AnimationRuntimeStatus::MissingAnimation;
         };
         let clip = &self.catalog.clips[clip_index];
-        let Some(skin_index) = self.resolve_clip_skin_index(clip, skin_hashcode) else {
+        let Some((target_runtime, target_skin_index, target_skin_hashcode)) =
+            self.resolve_target_skin(render_store, clip, skin_file, skin_hashcode)
+        else {
             return AnimationRuntimeStatus::MissingSkin;
         };
-        if clip.skin_index != Some(skin_index) {
-            return AnimationRuntimeStatus::SkinMismatch;
+        let target_skin = target_runtime.catalog.skins.get(target_skin_index);
+        let target_bone_count = target_skin
+            .and_then(|skin| skin.parsed.as_ref())
+            .map(|skin| skin.bone_count as usize);
+
+        if let Some(cache) = self.pose_cache_for_skin(clip_index, target_skin_hashcode) {
+            if target_bone_count != Some(cache.bone_count) {
+                return AnimationRuntimeStatus::InvalidPose;
+            }
+            if target_runtime
+                .skin_renderers
+                .read()
+                .get(target_skin_index)
+                .is_none_or(Vec::is_empty)
+            {
+                return AnimationRuntimeStatus::MissingGeometry;
+            }
+            return AnimationRuntimeStatus::Rendered;
         }
-        if clip.pose_cache.is_none() {
+
+        let target_is_bound_source_skin =
+            target_runtime.file == self.file && clip.skin_index == Some(target_skin_index);
+        if target_is_bound_source_skin || clip.skin_index.is_none() {
             return AnimationRuntimeStatus::MissingPoseCache;
         }
-        if self
-            .skin_renderers
-            .read()
-            .get(skin_index)
-            .is_none_or(Vec::is_empty)
-        {
-            return AnimationRuntimeStatus::MissingGeometry;
-        }
-        AnimationRuntimeStatus::Rendered
+        clip.skin_index
+            .and_then(|animation_skin_index| {
+                self.native_bone_remap_to(
+                    target_runtime.as_ref(),
+                    target_skin_index,
+                    animation_skin_index,
+                )
+            })
+            .filter(|remap| remap.selectors.iter().all(|selector| *selector != u8::MAX))
+            .map(|_| AnimationRuntimeStatus::SkinMismatchRemappable)
+            .unwrap_or(AnimationRuntimeStatus::SkinMismatch)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1078,6 +1361,7 @@ impl AnimationRuntime {
         render_context: &RenderContext<'_>,
         render_store: &RenderStore,
         animation_hashcode: Hashcode,
+        skin_file: Hashcode,
         skin_hashcode: Hashcode,
         phase: f32,
         position: Vec3,
@@ -1089,14 +1373,29 @@ impl AnimationRuntime {
             return AnimationRuntimeStatus::MissingAnimation;
         };
         let clip = &self.catalog.clips[clip_index];
-        let Some(skin_index) = self.resolve_clip_skin_index(clip, skin_hashcode) else {
+        let Some((target_runtime, target_skin_index, target_skin_hashcode)) =
+            self.resolve_target_skin(render_store, clip, skin_file, skin_hashcode)
+        else {
             return AnimationRuntimeStatus::MissingSkin;
         };
-        if clip.skin_index != Some(skin_index) {
-            return AnimationRuntimeStatus::SkinMismatch;
-        }
-        let Some(cache) = clip.pose_cache.as_ref() else {
-            return AnimationRuntimeStatus::MissingPoseCache;
+        let Some(cache) = self.pose_cache_for_skin(clip_index, target_skin_hashcode) else {
+            let target_is_bound_source_skin =
+                target_runtime.file == self.file && clip.skin_index == Some(target_skin_index);
+            if target_is_bound_source_skin || clip.skin_index.is_none() {
+                return AnimationRuntimeStatus::MissingPoseCache;
+            }
+            return clip
+                .skin_index
+                .and_then(|animation_skin_index| {
+                    self.native_bone_remap_to(
+                        target_runtime.as_ref(),
+                        target_skin_index,
+                        animation_skin_index,
+                    )
+                })
+                .filter(|remap| remap.selectors.iter().all(|selector| *selector != u8::MAX))
+                .map(|_| AnimationRuntimeStatus::SkinMismatchRemappable)
+                .unwrap_or(AnimationRuntimeStatus::SkinMismatch);
         };
         let Some(poses) = cache.sample_phase(phase) else {
             return AnimationRuntimeStatus::InvalidPose;
@@ -1104,19 +1403,25 @@ impl AnimationRuntime {
         let Some(morph_scalars) = cache.sample_scalar_phase(phase) else {
             return AnimationRuntimeStatus::InvalidPose;
         };
-        let Some(skin) = self
+        let Some(skin) = target_runtime
             .catalog
             .skins
-            .get(skin_index)
+            .get(target_skin_index)
             .and_then(|skin| skin.parsed.as_ref())
         else {
             return AnimationRuntimeStatus::MissingSkin;
         };
+        if cache.bone_count != skin.bone_count as usize {
+            return AnimationRuntimeStatus::InvalidPose;
+        }
+        let Some(global_bone_matrices) = build_global_bone_matrices(skin, &poses) else {
+            return AnimationRuntimeStatus::InvalidPose;
+        };
         let Some(skin_matrices) = build_skin_matrices(skin, &poses) else {
             return AnimationRuntimeStatus::InvalidPose;
         };
-        let mut all_skin_renderers = self.skin_renderers.write();
-        let Some(entities) = all_skin_renderers.get_mut(skin_index) else {
+        let mut all_skin_renderers = target_runtime.skin_renderers.write();
+        let Some(entities) = all_skin_renderers.get_mut(target_skin_index) else {
             return AnimationRuntimeStatus::MissingGeometry;
         };
         if entities.is_empty() {
@@ -1124,17 +1429,31 @@ impl AnimationRuntime {
         }
 
         for entity in entities.iter_mut() {
-            if skin_vertices_with_morph(
-                &entity.original_vertices,
-                &mut entity.skinned_vertices,
-                &entity.part_vertex_ranges,
-                &entity.part_skins,
-                &skin_matrices,
-                &morph_scalars,
-                entity.morph_scalar_base,
-            )
-            .is_some()
-            {
+            let updated = match &entity.binding {
+                AnimationEntityBinding::Skinned {
+                    part_vertex_ranges,
+                    part_skins,
+                    morph_scalar_base,
+                } => skin_vertices_with_morph(
+                    &entity.original_vertices,
+                    &mut entity.skinned_vertices,
+                    part_vertex_ranges,
+                    part_skins,
+                    &skin_matrices,
+                    &morph_scalars,
+                    *morph_scalar_base,
+                ),
+                AnimationEntityBinding::RigidBone { bone_selector } => global_bone_matrices
+                    .get(*bone_selector)
+                    .and_then(|bone_global| {
+                        transform_vertices_rigid(
+                            &entity.original_vertices,
+                            &mut entity.skinned_vertices,
+                            *bone_global,
+                        )
+                    }),
+            };
+            if updated.is_some() {
                 entity
                     .renderer
                     .update_vertices(gl, &entity.skinned_vertices);
@@ -1213,6 +1532,7 @@ fn semantic_animation_label(
 }
 
 pub struct AnimationListPanel {
+    file: Hashcode,
     catalog: AnimationCatalog,
     selected_clip: usize,
     filter: String,
@@ -1274,6 +1594,7 @@ impl AnimationListPanel {
         }
 
         Self {
+            file,
             catalog,
             selected_clip,
             filter: String::new(),
@@ -1494,6 +1815,16 @@ impl AnimationListPanel {
                     .or_else(|| bind_pose_skin_matrices(skin))
             })
             .unwrap_or_default();
+        let global_bone_matrices = self
+            .selected_skin()
+            .and_then(|skin| skin.parsed.as_ref())
+            .and_then(|skin| {
+                sampled_poses
+                    .as_deref()
+                    .and_then(|poses| build_global_bone_matrices(skin, poses))
+                    .or_else(|| bind_pose_global_bone_matrices(skin))
+            })
+            .unwrap_or_default();
         let has_components = selected_skin_index
             .and_then(|skin_index| {
                 self.skin_renderers
@@ -1525,15 +1856,29 @@ impl AnimationListPanel {
             let position = -center;
 
             for entity in entities.iter_mut() {
-                if skin_vertices(
-                    &entity.original_vertices,
-                    &mut entity.skinned_vertices,
-                    &entity.part_vertex_ranges,
-                    &entity.part_skins,
-                    &skin_matrices,
-                )
-                .is_some()
-                {
+                let updated = match &entity.binding {
+                    AnimationEntityBinding::Skinned {
+                        part_vertex_ranges,
+                        part_skins,
+                        ..
+                    } => skin_vertices(
+                        &entity.original_vertices,
+                        &mut entity.skinned_vertices,
+                        part_vertex_ranges,
+                        part_skins,
+                        &skin_matrices,
+                    ),
+                    AnimationEntityBinding::RigidBone { bone_selector } => global_bone_matrices
+                        .get(*bone_selector)
+                        .and_then(|bone_global| {
+                            transform_vertices_rigid(
+                                &entity.original_vertices,
+                                &mut entity.skinned_vertices,
+                                *bone_global,
+                            )
+                        }),
+                };
+                if updated.is_some() {
                     entity
                         .renderer
                         .update_vertices(painter.gl(), &entity.skinned_vertices);
@@ -1794,6 +2139,7 @@ impl AnimationListPanel {
                                     .striped(true)
                                     .show(ui, |ui| {
                                         ui.strong("Bone");
+                                        ui.strong("Name");
                                         ui.strong("Link");
                                         ui.strong("Max");
                                         ui.strong("Flags");
@@ -1804,6 +2150,19 @@ impl AnimationListPanel {
                                             parsed.hier_data.iter().enumerate()
                                         {
                                             ui.monospace(bone_index.to_string());
+                                            ui.monospace(
+                                                skin.bone_hashcodes
+                                                    .get(bone_index)
+                                                    .and_then(|hashcode| *hashcode)
+                                                    .map(|hashcode| {
+                                                        format_typed_hashcode_with_id(
+                                                            &self.hashcodes,
+                                                            "AnimBone",
+                                                            hashcode,
+                                                        )
+                                                    })
+                                                    .unwrap_or_else(|| format!("bone_{bone_index:03}")),
+                                            );
                                             ui.monospace(hierarchy.link_index.to_string());
                                             ui.monospace(hierarchy.max_index.to_string());
                                             ui.monospace(format!("0x{:04X}", hierarchy.flags));
@@ -1874,6 +2233,199 @@ impl AnimationListPanel {
                                 });
                         });
                 });
+
+            if !skin.bone_attachments.is_empty() {
+                egui::CollapsingHeader::new(format!(
+                    "Rigid bone attachments ({})",
+                    skin.bone_attachments.len()
+                ))
+                .default_open(false)
+                .show(ui, |ui| {
+                    egui::Grid::new("animation_bone_attachment_grid")
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.strong("#");
+                            ui.strong("Bone");
+                            ui.strong("Entity");
+                            ui.end_row();
+                            for attachment in &skin.bone_attachments {
+                                ui.monospace(attachment.attachment_index.to_string());
+                                ui.monospace(
+                                    attachment
+                                        .bone_hashcode
+                                        .map(|hashcode| {
+                                            format_typed_hashcode_with_id(
+                                                &self.hashcodes,
+                                                "AnimBone",
+                                                hashcode,
+                                            )
+                                        })
+                                        .unwrap_or_else(|| {
+                                            format!("bone_{:03}", attachment.bone_selector)
+                                        }),
+                                );
+                                ui.monospace(
+                                    attachment
+                                        .entity_hashcode
+                                        .map(|hashcode| {
+                                            format_typed_hashcode_with_id(
+                                                &self.hashcodes,
+                                                "Entity",
+                                                hashcode,
+                                            )
+                                        })
+                                        .unwrap_or_else(|| {
+                                            format!(
+                                                "entity_index={} raw=0x{:08X}",
+                                                attachment.entity_index,
+                                                attachment.raw_entity_index
+                                            )
+                                        }),
+                                );
+                                ui.end_row();
+                            }
+                        });
+                });
+            }
+
+            if let Some(post_pair) = skin
+                .parsed
+                .as_ref()
+                .and_then(|parsed| parsed.robots_post_pair_block.as_ref())
+            {
+                let block = post_pair.data_ref();
+                egui::CollapsingHeader::new(format!(
+                    "Post-pair bone metadata ({} records, {} sparse pairs)",
+                    block.bone_records.len(),
+                    block.sparse_pairs.len()
+                ))
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.colored_label(
+                        egui::Color32::GRAY,
+                        "Robots v248 +0x5C structure is proven; sparse-pair and eight-float record semantics remain intentionally unnamed.",
+                    );
+                    ui.monospace(format!(
+                        "Address 0x{:08X}, parsed size {} bytes",
+                        post_pair.offset_absolute(),
+                        block.serialized_size()
+                    ));
+                    if !block.sparse_pairs.is_empty() {
+                        egui::Grid::new("animation_post_pair_sparse_grid")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.strong("#");
+                                ui.strong("Left");
+                                ui.strong("Right");
+                                ui.end_row();
+                                for (pair_index, [left, right]) in
+                                    block.sparse_pairs.iter().copied().enumerate()
+                                {
+                                    ui.monospace(pair_index.to_string());
+                                    ui.monospace(format!("{} [0x{:04X}]", left, left));
+                                    ui.monospace(format!("{} [0x{:04X}]", right, right));
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                });
+            }
+
+            if let Some(auxiliary) = skin
+                .parsed
+                .as_ref()
+                .and_then(|parsed| parsed.robots_auxiliary_section.as_ref())
+                .filter(|auxiliary| auxiliary.serialized_len() != 0)
+            {
+                egui::CollapsingHeader::new(format!(
+                    "AnimBone auxiliary descriptors ({})",
+                    auxiliary.serialized_len()
+                ))
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.colored_label(
+                        egui::Color32::GRAY,
+                        "Descriptor identity/layout and payload pointers are corpus-proven; payload contents remain semantically unnamed.",
+                    );
+                    if let Some(header) = auxiliary.header.as_ref() {
+                        ui.monospace(format!(
+                            "First detailed payload: 0x{:08X}",
+                            header.first_payload_offset_absolute()
+                        ));
+                    }
+                    egui::Grid::new("animation_animbone_auxiliary_grid")
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.strong("#");
+                            ui.strong("AnimBone");
+                            ui.strong("Flags");
+                            ui.strong("Variant");
+                            ui.strong("Payload +04");
+                            ui.strong("Payload +06");
+                            ui.strong("Hierarchy");
+                            ui.strong("Payload");
+                            ui.end_row();
+                            for (entry_index, entry) in auxiliary.entries.iter().enumerate() {
+                                let payload = entry.payload();
+                                let payload_header = &payload.header;
+                                let hierarchy_chain = payload
+                                    .hierarchy_chain
+                                    .iter()
+                                    .map(|selector| selector.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join("→");
+                                let hierarchy_leaf = skin
+                                    .bone_hashcodes
+                                    .get(payload.hierarchy_leaf_selector as usize)
+                                    .and_then(|hashcode| *hashcode)
+                                    .map(|hashcode| {
+                                        format_typed_hashcode_with_id(
+                                            &self.hashcodes,
+                                            "AnimBone",
+                                            hashcode,
+                                        )
+                                    })
+                                    .unwrap_or_else(|| {
+                                        format!("bone_{:03}", payload.hierarchy_leaf_selector)
+                                    });
+                                ui.monospace(entry_index.to_string());
+                                ui.monospace(
+                                    entry
+                                        .animbone_hashcode()
+                                        .map(|hashcode| {
+                                            format_typed_hashcode_with_id(
+                                                &self.hashcodes,
+                                                "AnimBone",
+                                                hashcode,
+                                            )
+                                        })
+                                        .unwrap_or_else(|| "sentinel [0xFFFF]".to_string()),
+                                );
+                                ui.monospace(format!("0x{:04X}", entry.raw_flags));
+                                ui.monospace(entry.raw_variant.to_string());
+                                ui.monospace(format!("0x{:04X}", payload_header.raw_04));
+                                ui.monospace(payload_header.raw_06.to_string());
+                                ui.monospace(format!("{} [{}]", hierarchy_leaf, hierarchy_chain));
+                                ui.monospace(format!("0x{:08X}", entry.payload_offset_absolute()))
+                                    .on_hover_text(format!(
+                                        "raw_vector_a = [{:.6}, {:.6}, {:.6}]\nraw_vector_b = [{:.6}, {:.6}, {:.6}]\nunit_quaternion = [{:.6}, {:.6}, {:.6}, {:.6}]\nserialized_size = {} bytes",
+                                        payload.raw_vector_a[0],
+                                        payload.raw_vector_a[1],
+                                        payload.raw_vector_a[2],
+                                        payload.raw_vector_b[0],
+                                        payload.raw_vector_b[1],
+                                        payload.raw_vector_b[2],
+                                        payload.unit_quaternion[0],
+                                        payload.unit_quaternion[1],
+                                        payload.unit_quaternion[2],
+                                        payload.unit_quaternion[3],
+                                        payload.serialized_size(),
+                                    ));
+                                ui.end_row();
+                            }
+                        });
+                });
+            }
         } else if clip.skin_num == u32::MAX {
             ui.colored_label(
                 egui::Color32::GRAY,
@@ -1893,6 +2445,67 @@ impl AnimationListPanel {
                     ui.label("No command in this EDB references this animation.");
                 }
                 for usage in &clip.usages {
+                    let resolved_target = {
+                        let render_store = self.render_store.read();
+                        resolve_animation_skin_target(
+                            self.file,
+                            usage.skin_file,
+                            usage.skin_hashcode,
+                            self.file,
+                            clip.hashcode,
+                            &render_store,
+                        )
+                    };
+                    let skin_label = if usage.skin_hashcode == u32::MAX {
+                        resolved_target
+                            .map(|(file, skin)| {
+                                format!(
+                                    "implicit -> {} @ {}",
+                                    format_typed_hashcode_with_id(
+                                        &self.hashcodes,
+                                        "AnimSkin",
+                                        skin,
+                                    ),
+                                    format_hashcode_with_id(&self.hashcodes, file)
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                "implicit Animation binding [0xFFFFFFFF]".to_string()
+                            })
+                    } else if usage.skin_hashcode & 0x7f00_0000 == 0x0300_0000 {
+                        let indirect = format_typed_hashcode_with_id(
+                            &self.hashcodes,
+                            "Animation",
+                            usage.skin_hashcode,
+                        );
+                        resolved_target
+                            .map(|(file, skin)| {
+                                format!(
+                                    "indirect via {indirect} -> {} @ {}",
+                                    format_typed_hashcode_with_id(
+                                        &self.hashcodes,
+                                        "AnimSkin",
+                                        skin,
+                                    ),
+                                    format_hashcode_with_id(&self.hashcodes, file)
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                format!("indirect via {indirect} -> unresolved AnimSkin")
+                            })
+                    } else if let Some((file, skin)) = resolved_target {
+                        format!(
+                            "{} @ {}",
+                            format_typed_hashcode_with_id(&self.hashcodes, "AnimSkin", skin),
+                            format_hashcode_with_id(&self.hashcodes, file)
+                        )
+                    } else {
+                        format_typed_hashcode_with_id(
+                            &self.hashcodes,
+                            "AnimSkin target",
+                            usage.skin_hashcode,
+                        )
+                    };
                     ui.monospace(format!(
                         "script {}, command {}, start {}, length {}, {:.3} fps, skin {}",
                         semantic_script_reference(&self.hashcodes, usage.script_hashcode),
@@ -1900,25 +2513,7 @@ impl AnimationListPanel {
                         usage.start_frame,
                         usage.length_frames,
                         usage.script_fps,
-                        if usage.skin_hashcode == u32::MAX {
-                            "implicit Animation binding [0xFFFFFFFF]".to_string()
-                        } else if usage.skin_hashcode.is_local() {
-                            format_typed_hashcode_with_id(
-                                &self.hashcodes,
-                                "AnimSkin",
-                                usage.skin_hashcode,
-                            )
-                        } else {
-                            format!(
-                                "{} @ {}",
-                                format_typed_hashcode_with_id(
-                                    &self.hashcodes,
-                                    "AnimSkin",
-                                    usage.skin_hashcode,
-                                ),
-                                format_hashcode_with_id(&self.hashcodes, usage.skin_file)
-                            )
-                        }
+                        skin_label,
                     ));
                 }
             });
@@ -1969,6 +2564,7 @@ mod tests {
         let mut bound_clip = clip(0, 0x0300_0010);
         bound_clip.skin_index = Some(0);
         let runtime = AnimationRuntime {
+            file: 0x0100_0001,
             catalog: AnimationCatalog {
                 clips: vec![bound_clip],
                 skins: vec![AnimationSkinRecord {
@@ -1976,6 +2572,8 @@ mod tests {
                     hashcode: 0x0D00_0001,
                     base_skin_num: 0,
                     mip_ref: 0,
+                    bone_hashcodes: Vec::new(),
+                    bone_attachments: Vec::new(),
                     parsed: None,
                     parse_error: None,
                     components: Vec::new(),
@@ -1984,11 +2582,103 @@ mod tests {
                     bind_pose_identity_error: None,
                 }],
             },
+            pair_pose_caches: RwLock::new(HashMap::new()),
             skin_renderers: Arc::new(RwLock::new(vec![Vec::new()])),
         };
         let clip = &runtime.catalog.clips[0];
         assert_eq!(runtime.resolve_clip_skin_index(clip, u32::MAX), Some(0));
         assert_eq!(runtime.resolve_clip_skin_index(clip, 0x8D00_0000), Some(0));
+    }
+
+    #[test]
+    fn local_animation_reference_in_skin_slot_beats_same_index_animskin() {
+        let mut indirect_clip = clip(1, 0x0300_0020);
+        indirect_clip.skin_index = Some(0);
+        let make_skin = |index, hashcode| AnimationSkinRecord {
+            index,
+            hashcode,
+            base_skin_num: index as u32,
+            mip_ref: 0,
+            bone_hashcodes: Vec::new(),
+            bone_attachments: Vec::new(),
+            parsed: None,
+            parse_error: None,
+            components: Vec::new(),
+            center: Vec3::ZERO,
+            maximum_extent: 0.0,
+            bind_pose_identity_error: None,
+        };
+        let runtime = AnimationRuntime {
+            file: 0x0100_0001,
+            catalog: AnimationCatalog {
+                clips: vec![clip(0, 0x0300_0010), indirect_clip],
+                skins: vec![make_skin(0, 0x0D00_0010), make_skin(1, 0x0D00_0020)],
+            },
+            pair_pose_caches: RwLock::new(HashMap::new()),
+            skin_renderers: Arc::new(RwLock::new(vec![Vec::new(), Vec::new()])),
+        };
+
+        assert_eq!(
+            runtime.resolve_animskin_reference(0x8300_0001),
+            Some((0, 0x0D00_0010))
+        );
+        assert_eq!(
+            runtime.resolve_animskin_reference(0x8D00_0001),
+            Some((1, 0x0D00_0020))
+        );
+    }
+
+    #[test]
+    fn generic_animation_resolves_explicit_cross_file_skin_before_pose_cache() {
+        let source_file = 0x0100_00A0;
+        let target_file = 0x0100_00A1;
+        let animation_hashcode = 0x0300_00A0;
+        let target_skin_hashcode = 0x0D00_00A1;
+
+        let source_runtime = Arc::new(AnimationRuntime {
+            file: source_file,
+            catalog: AnimationCatalog {
+                clips: vec![clip(0, animation_hashcode)],
+                skins: Vec::new(),
+            },
+            pair_pose_caches: RwLock::new(HashMap::new()),
+            skin_renderers: Arc::new(RwLock::new(Vec::new())),
+        });
+        let target_runtime = Arc::new(AnimationRuntime {
+            file: target_file,
+            catalog: AnimationCatalog {
+                clips: Vec::new(),
+                skins: vec![AnimationSkinRecord {
+                    index: 0,
+                    hashcode: target_skin_hashcode,
+                    base_skin_num: 0x8D00_00A1,
+                    mip_ref: 0,
+                    bone_hashcodes: Vec::new(),
+                    bone_attachments: Vec::new(),
+                    parsed: None,
+                    parse_error: None,
+                    components: Vec::new(),
+                    center: Vec3::ZERO,
+                    maximum_extent: 0.0,
+                    bind_pose_identity_error: None,
+                }],
+            },
+            pair_pose_caches: RwLock::new(HashMap::new()),
+            skin_renderers: Arc::new(RwLock::new(vec![Vec::new()])),
+        });
+        let mut store = RenderStore::new();
+        store.insert_animation_runtime(source_file, source_runtime.clone());
+        store.insert_animation_runtime(target_file, target_runtime);
+
+        assert_eq!(
+            source_runtime.status(
+                &store,
+                target_file,
+                animation_hashcode,
+                target_skin_hashcode,
+            ),
+            AnimationRuntimeStatus::MissingPoseCache
+        );
     }
 
     #[test]
@@ -2151,9 +2841,25 @@ mod tests {
         edb_paths.sort();
         edb_paths.dedup();
 
+        let mut corpus_headers = std::collections::BTreeMap::new();
+        for path in &edb_paths {
+            let platform = eurochef_edb::versions::Platform::from_path(path)
+                .expect("manifest EDB platform should be detectable");
+            let file = std::fs::File::open(path).expect("open manifest EDB for header catalog");
+            let reader = std::io::BufReader::new(file);
+            let edb = EdbFile::new(Box::new(reader), platform)
+                .expect("parse manifest EDB for header catalog");
+            corpus_headers.insert(edb.header.hashcode, (path.clone(), edb.header.clone()));
+        }
+
         let mut files = 0usize;
         let mut clips = 0usize;
         let mut skins = 0usize;
+        let mut rigid_bone_attachments = 0usize;
+        let mut animbone_auxiliary_descriptors = 0usize;
+        let mut native_bound_clips = 0usize;
+        let mut native_pose_caches_loaded = 0usize;
+        let mut native_pose_cache_errors = Vec::new();
         let mut motion_failures = Vec::new();
         let mut skin_failures = Vec::new();
         let mut bind_pose_failures = Vec::new();
@@ -2168,6 +2874,35 @@ mod tests {
             files += 1;
             clips += catalog.clips.len();
             skins += catalog.skins.len();
+            rigid_bone_attachments += catalog
+                .skins
+                .iter()
+                .map(|skin| skin.bone_attachments.len())
+                .sum::<usize>();
+            animbone_auxiliary_descriptors += catalog
+                .skins
+                .iter()
+                .filter_map(|skin| skin.parsed.as_ref())
+                .filter_map(|skin| skin.robots_auxiliary_section.as_ref())
+                .map(|auxiliary| auxiliary.entries.len())
+                .sum::<usize>();
+            for clip in &catalog.clips {
+                if clip.skin_index.is_some() {
+                    native_bound_clips += 1;
+                    if clip.pose_cache.is_some() {
+                        native_pose_caches_loaded += 1;
+                    } else if let Some(error) = clip.pose_cache_error.as_deref() {
+                        if native_pose_cache_errors.len() < 16 {
+                            native_pose_cache_errors.push(format!(
+                                "{} animation={} 0x{:08X}: {error}",
+                                path.display(),
+                                clip.index,
+                                clip.hashcode
+                            ));
+                        }
+                    }
+                }
+            }
 
             for clip in catalog.clips {
                 if let Some(error) = clip.motion.read_error {
@@ -2213,9 +2948,276 @@ mod tests {
             }
         }
 
+        let resolve_corpus_object = |current_file: Hashcode,
+                                     file_ref: Hashcode,
+                                     object_ref: Hashcode,
+                                     is_skin: bool|
+         -> Option<(Hashcode, usize, Hashcode)> {
+            let resolved_file = if file_ref == u32::MAX || object_ref.is_local() {
+                current_file
+            } else {
+                file_ref
+            };
+            let (_, header) = corpus_headers.get(&resolved_file)?;
+            if is_skin {
+                if object_ref & 0x7f00_0000 == 0x0300_0000 {
+                    let animation = if object_ref.is_local() {
+                        header.anim_list.data().get(object_ref.index() as usize)
+                    } else {
+                        header
+                            .anim_list
+                            .iter()
+                            .find(|entry| entry.common.hashcode == object_ref)
+                    }?;
+                    header
+                        .animskin_list
+                        .iter()
+                        .enumerate()
+                        .find(|(_, entry)| entry.base_skin_num == animation.skin_num)
+                        .map(|(index, entry)| (resolved_file, index, entry.common.hashcode))
+                } else if object_ref.is_local() {
+                    let index = object_ref.index() as usize;
+                    header
+                        .animskin_list
+                        .data()
+                        .get(index)
+                        .map(|entry| (resolved_file, index, entry.common.hashcode))
+                } else {
+                    header
+                        .animskin_list
+                        .iter()
+                        .enumerate()
+                        .find(|(_, entry)| entry.common.hashcode == object_ref)
+                        .map(|(index, entry)| (resolved_file, index, entry.common.hashcode))
+                }
+            } else if object_ref.is_local() {
+                let index = object_ref.index() as usize;
+                header
+                    .anim_list
+                    .data()
+                    .get(index)
+                    .map(|entry| (resolved_file, index, entry.common.hashcode))
+            } else {
+                header
+                    .anim_list
+                    .iter()
+                    .enumerate()
+                    .find(|(_, entry)| entry.common.hashcode == object_ref)
+                    .map(|(index, entry)| (resolved_file, index, entry.common.hashcode))
+            }
+        };
+        let mut exact_script_pose_pairs = std::collections::BTreeSet::new();
+        let mut pose_key_target_files = std::collections::BTreeMap::<
+            (Hashcode, usize, Hashcode),
+            std::collections::BTreeSet<Hashcode>,
+        >::new();
+        let mut corpus_animation_commands = 0usize;
+        let mut corpus_explicit_skin_commands = 0usize;
+        let mut corpus_unresolved_animation_commands = 0usize;
+        let mut corpus_unresolved_skin_commands = 0usize;
+        for (script_file_uid, (path, _)) in &corpus_headers {
+            let platform = eurochef_edb::versions::Platform::from_path(path)
+                .expect("script EDB platform should be detectable");
+            let file = std::fs::File::open(path).expect("open EDB for script binding census");
+            let mut edb = EdbFile::new(Box::new(std::io::BufReader::new(file)), platform)
+                .expect("parse EDB for script binding census");
+            let scripts = UXGeoScript::read_all(&mut edb).expect("read scripts for binding census");
+            for script in scripts {
+                for command in script.commands {
+                    let UXGeoScriptCommandData::Animation {
+                        skin_file,
+                        skin_hashcode,
+                        anim_file,
+                        anim_hashcode,
+                    } = command.data
+                    else {
+                        continue;
+                    };
+                    corpus_animation_commands += 1;
+                    let Some((animation_file_uid, animation_index, animation_uid)) =
+                        resolve_corpus_object(*script_file_uid, anim_file, anim_hashcode, false)
+                    else {
+                        corpus_unresolved_animation_commands += 1;
+                        continue;
+                    };
+                    if matches!(skin_hashcode, 0 | u32::MAX) {
+                        continue;
+                    }
+                    corpus_explicit_skin_commands += 1;
+                    let Some((skin_source_file_uid, _, skin_uid)) =
+                        resolve_corpus_object(*script_file_uid, skin_file, skin_hashcode, true)
+                    else {
+                        corpus_unresolved_skin_commands += 1;
+                        continue;
+                    };
+                    exact_script_pose_pairs.insert((
+                        animation_file_uid,
+                        animation_index,
+                        animation_uid,
+                        skin_source_file_uid,
+                        skin_uid,
+                    ));
+                    pose_key_target_files
+                        .entry((animation_file_uid, animation_index, skin_uid))
+                        .or_default()
+                        .insert(skin_source_file_uid);
+                }
+            }
+        }
+        let pose_key_cross_file_collisions = pose_key_target_files
+            .iter()
+            .filter(|(_, target_files)| target_files.len() > 1)
+            .map(|(key, target_files)| (*key, target_files.clone()))
+            .collect::<Vec<_>>();
+        eprintln!(
+            "Robots exact Script pose-pair corpus: animation_commands={corpus_animation_commands} explicit_skin_commands={corpus_explicit_skin_commands} unresolved_animation={corpus_unresolved_animation_commands} unresolved_skin={corpus_unresolved_skin_commands} exact_pairs={} legacy_pose_keys={} cross_target_file_collisions={} collision_samples={pose_key_cross_file_collisions:#?}",
+            exact_script_pose_pairs.len(),
+            pose_key_target_files.len(),
+            pose_key_cross_file_collisions.len(),
+        );
+        assert_eq!(corpus_animation_commands, 1573);
+        assert_eq!(corpus_explicit_skin_commands, 411);
+        assert_eq!(corpus_unresolved_animation_commands, 0);
+        assert_eq!(corpus_unresolved_skin_commands, 0);
+        assert_eq!(exact_script_pose_pairs.len(), 365);
+        assert_eq!(pose_key_target_files.len(), 365);
+        assert!(pose_key_cross_file_collisions.is_empty());
+
+        if std::env::var_os("ROBOTS_ANIMATION_POSE_CACHE").is_some() {
+            let mut cache_pairs_checked = 0usize;
+            let mut cache_native_pairs = 0usize;
+            let mut cache_variant_pairs = 0usize;
+            let mut cache_failures = Vec::new();
+            for (animation_file_uid, animation_index, animation_uid, skin_file_uid, skin_uid) in
+                &exact_script_pose_pairs
+            {
+                let Some((animation_path, animation_header)) =
+                    corpus_headers.get(animation_file_uid)
+                else {
+                    cache_failures
+                        .push(format!("missing Animation EDB 0x{animation_file_uid:08X}"));
+                    continue;
+                };
+                let Some(animation) = animation_header.anim_list.data().get(*animation_index)
+                else {
+                    cache_failures.push(format!(
+                        "Animation 0x{animation_uid:08X} index {animation_index} missing in 0x{animation_file_uid:08X}"
+                    ));
+                    continue;
+                };
+                if animation.common.hashcode != *animation_uid {
+                    cache_failures.push(format!(
+                        "Animation index/hash mismatch in 0x{animation_file_uid:08X}:{animation_index}"
+                    ));
+                    continue;
+                }
+                let platform = eurochef_edb::versions::Platform::from_path(animation_path)
+                    .expect("Animation cache EDB platform should be detectable");
+                let file = std::fs::File::open(animation_path)
+                    .expect("open Animation EDB for cache validation");
+                let mut animation_edb =
+                    EdbFile::new(Box::new(std::io::BufReader::new(file)), platform)
+                        .expect("parse Animation EDB for cache validation");
+                let motion = read_motion_data(
+                    &mut animation_edb,
+                    animation_header,
+                    animation.motiondata_info_addr,
+                    animation.datasize,
+                );
+
+                let Some((skin_path, skin_header)) = corpus_headers.get(skin_file_uid) else {
+                    cache_failures.push(format!("missing AnimSkin EDB 0x{skin_file_uid:08X}"));
+                    continue;
+                };
+                let Some(serialized_skin) = skin_header
+                    .animskin_list
+                    .iter()
+                    .find(|entry| entry.common.hashcode == *skin_uid)
+                else {
+                    cache_failures.push(format!(
+                        "AnimSkin 0x{skin_uid:08X} missing in 0x{skin_file_uid:08X}"
+                    ));
+                    continue;
+                };
+                let platform = eurochef_edb::versions::Platform::from_path(skin_path)
+                    .expect("AnimSkin cache EDB platform should be detectable");
+                let file =
+                    std::fs::File::open(skin_path).expect("open AnimSkin EDB for cache validation");
+                let mut skin_edb = EdbFile::new(Box::new(std::io::BufReader::new(file)), platform)
+                    .expect("parse AnimSkin EDB for cache validation");
+                skin_edb
+                    .seek(SeekFrom::Start(serialized_skin.common.address as u64))
+                    .expect("seek AnimSkin for cache validation");
+                let parsed_skin = skin_edb
+                    .read_type_args::<EXGeoBaseAnimSkin>(skin_edb.endian, (skin_header.version,))
+                    .expect("parse AnimSkin for cache validation");
+
+                let native_skin = animation_header
+                    .animskin_list
+                    .iter()
+                    .find(|entry| entry.base_skin_num == animation.skin_num);
+                let native_pair = *animation_file_uid == *skin_file_uid
+                    && native_skin
+                        .map(|entry| entry.common.hashcode == *skin_uid)
+                        .unwrap_or(false);
+                if native_pair {
+                    cache_native_pairs += 1;
+                } else {
+                    cache_variant_pairs += 1;
+                }
+
+                match load_pose_cache(
+                    *animation_file_uid,
+                    *animation_index,
+                    *animation_uid,
+                    *skin_uid,
+                    motion.checksum,
+                ) {
+                    (Some(cache), None) => {
+                        cache_pairs_checked += 1;
+                        if cache.bone_count != parsed_skin.bone_count as usize {
+                            cache_failures.push(format!(
+                                "cache bone count mismatch {} != {} for 0x{animation_file_uid:08X}:{animation_index} -> 0x{skin_file_uid:08X}/0x{skin_uid:08X}",
+                                cache.bone_count,
+                                parsed_skin.bone_count
+                            ));
+                        }
+                    }
+                    (cache, error) => cache_failures.push(format!(
+                        "cache missing/rejected for 0x{animation_file_uid:08X}:{animation_index} -> 0x{skin_file_uid:08X}/0x{skin_uid:08X}: cache={} error={:?}",
+                        cache.is_some(),
+                        error
+                    )),
+                }
+            }
+            eprintln!(
+                "Robots Script RAPCV003 coverage: checked={cache_pairs_checked} native_pairs={cache_native_pairs} variant_pairs={cache_variant_pairs} failures={} roots={:?} failure_samples={:#?}",
+                cache_failures.len(),
+                pose_cache_roots(),
+                cache_failures.iter().take(8).collect::<Vec<_>>()
+            );
+            assert_eq!(cache_native_pairs, 11);
+            assert_eq!(cache_variant_pairs, 354);
+            assert!(cache_failures.is_empty(), "{cache_failures:#?}");
+            assert_eq!(cache_pairs_checked, exact_script_pose_pairs.len());
+        }
+
         assert_eq!(files, 179);
         assert_eq!(clips, 1744);
         assert_eq!(skins, 234);
+        assert_eq!(rigid_bone_attachments, 41);
+        assert_eq!(animbone_auxiliary_descriptors, 669);
+        assert_eq!(native_bound_clips, 1390);
+        if std::env::var_os("ROBOTS_ANIMATION_POSE_CACHE").is_some() {
+            eprintln!(
+                "Robots native RAPCV003 coverage: loaded={native_pose_caches_loaded}/{native_bound_clips} error_samples={native_pose_cache_errors:#?}"
+            );
+            assert_eq!(native_pose_caches_loaded, native_bound_clips);
+            assert!(
+                native_pose_cache_errors.is_empty(),
+                "{native_pose_cache_errors:#?}"
+            );
+        }
         assert!(motion_failures.is_empty(), "{motion_failures:#?}");
         assert!(skin_failures.is_empty(), "{skin_failures:#?}");
         assert!(bind_pose_failures.is_empty(), "{bind_pose_failures:#?}");

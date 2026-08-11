@@ -291,7 +291,11 @@ def load_script_bound_requests(
                 continue
             if skin_resolution.get("resolved_hash") is None:
                 continue
-            if skin_resolution.get("status") not in {"resolved_local", "resolved_global"}:
+            if skin_resolution.get("status") not in {
+                "resolved_local",
+                "resolved_global",
+                "resolved_via_animation_binding",
+            }:
                 continue
 
             animation_source_uid = int(animation_resolution["source_file"])

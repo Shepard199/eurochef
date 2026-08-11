@@ -6,7 +6,7 @@ use egui::{
 };
 use eurochef_edb::{Hashcode, HashcodeUtils};
 use eurochef_shared::{
-    maps::{format_hashcode, format_hashcode_with_id},
+    maps::{format_hashcode_with_id, format_typed_hashcode, format_typed_hashcode_with_id},
     script::{
         robots_script_command_role, robots_script_payload_diagnostic, UXGeoScript,
         UXGeoScriptCommandData,
@@ -26,6 +26,7 @@ use crate::{
         script::{
             collect_script_animations, collect_script_particles, first_resolved_visual_time,
             render_script_without_static_animations, render_static_script_without_animations,
+            resolve_animation_skin_target,
         },
         viewer::BaseViewer,
         RenderStore,
@@ -42,6 +43,7 @@ use fan::{advance_native_fan_angle, apply_native_fan_rotation, script_contains_n
 // failed global HashDB lookups, so do not display them as HT_Local_Invalid_*.
 fn format_script_object_reference(
     hashcodes: &IntMap<Hashcode, String>,
+    kind: &str,
     hashcode: Hashcode,
     resolved_hashcode: Option<Hashcode>,
 ) -> String {
@@ -49,14 +51,18 @@ fn format_script_object_reference(
         if let Some(resolved) = resolved_hashcode {
             format!(
                 "{} [local#{} 0x{hashcode:08X} -> 0x{resolved:08X}]",
-                format_hashcode(hashcodes, resolved),
+                format_typed_hashcode(hashcodes, kind, resolved),
                 hashcode.index(),
             )
         } else {
-            format!("local#{} [0x{hashcode:08X}, unresolved]", hashcode.index())
+            format!(
+                "{} [local#{}, unresolved]",
+                format_typed_hashcode_with_id(hashcodes, kind, hashcode),
+                hashcode.index()
+            )
         }
     } else {
-        format_hashcode_with_id(hashcodes, hashcode)
+        format_typed_hashcode_with_id(hashcodes, kind, hashcode)
     }
 }
 
@@ -76,11 +82,23 @@ fn semantic_object_reference(
     if hashcode == u32::MAX {
         return format!("implicit {kind} binding [0x{hashcode:08X}]");
     }
-    if hashcode.is_local() {
-        format!("{kind} #{} [0x{hashcode:08X}]", hashcode.index())
-    } else {
-        format_hashcode_with_id(hashcodes, hashcode)
+    format_typed_hashcode_with_id(hashcodes, kind, hashcode)
+}
+
+fn semantic_animation_skin_target_reference(
+    hashcodes: &IntMap<Hashcode, String>,
+    hashcode: Hashcode,
+) -> String {
+    if hashcode == u32::MAX {
+        return "implicit Animation binding".to_string();
     }
+    if hashcode & 0x7f00_0000 == 0x0300_0000 {
+        return format!(
+            "indirect via {}",
+            semantic_object_reference(hashcodes, "Animation", hashcode)
+        );
+    }
+    semantic_object_reference(hashcodes, "AnimSkin", hashcode)
 }
 
 fn semantic_script_label(
@@ -88,14 +106,7 @@ fn semantic_script_label(
     index: usize,
     script: &UXGeoScript,
 ) -> String {
-    if !script.hashcode.is_local() {
-        let name = format_hashcode(hashcodes, script.hashcode);
-        if !name.contains("_Unknown_") && !name.contains("HT_Invalid") {
-            return name;
-        }
-    }
-
-    let prefix = format!("Script #{index}");
+    let canonical = format_typed_hashcode_with_id(hashcodes, "Script", script.hashcode);
     if let [command] = script.commands.as_slice() {
         let role = match &command.data {
             UXGeoScriptCommandData::Animation {
@@ -105,7 +116,7 @@ fn semantic_script_label(
             } => format!(
                 "single {} with {}",
                 semantic_object_reference(hashcodes, "Animation", *anim_hashcode),
-                semantic_object_reference(hashcodes, "AnimSkin", *skin_hashcode)
+                semantic_animation_skin_target_reference(hashcodes, *skin_hashcode)
             ),
             UXGeoScriptCommandData::Entity { hashcode, .. } => format!(
                 "single {}",
@@ -113,7 +124,7 @@ fn semantic_script_label(
             ),
             UXGeoScriptCommandData::SubScript { hashcode, .. } => format!(
                 "single {}",
-                semantic_object_reference(hashcodes, "SubScript", *hashcode)
+                semantic_object_reference(hashcodes, "Script", *hashcode)
             ),
             UXGeoScriptCommandData::Particle { hashcode, .. } => format!(
                 "single {}",
@@ -131,12 +142,15 @@ fn semantic_script_label(
                 format!("single native opcode 0x{cmd:02X}")
             }
         };
-        return format!("{prefix} · {role} · {} frames", command.length);
+        return format!(
+            "{canonical} · index {index} · {role} · {} frames",
+            command.length
+        );
     }
 
     let counts = script.command_type_counts();
     format!(
-        "{prefix} · Entity {} · Animation {} · SubScript {} · Particle {} · Sound {} · Event {} · Unknown {}",
+        "{canonical} · index {index} · Entity {} · Animation {} · SubScript {} · Particle {} · Sound {} · Event {} · Unknown {}",
         counts.entities,
         counts.animations,
         counts.subscripts,
@@ -154,6 +168,7 @@ struct AnimationRuntimeSummary {
     missing_runtime: usize,
     missing_animation: usize,
     missing_skin: usize,
+    skin_mismatch_remappable: usize,
     skin_mismatch: usize,
     missing_pose_cache: usize,
     invalid_pose: usize,
@@ -167,8 +182,12 @@ impl AnimationRuntimeSummary {
             (self.missing_runtime, "runtime not loaded"),
             (self.missing_animation, "animation unresolved"),
             (self.missing_skin, "AnimSkin unresolved"),
+            (
+                self.skin_mismatch_remappable,
+                "Animation/AnimSkin mismatch (native remap available)",
+            ),
             (self.skin_mismatch, "Animation/AnimSkin mismatch"),
-            (self.missing_pose_cache, "RAPCV002 cache missing"),
+            (self.missing_pose_cache, "RAPCV003 cache missing"),
             (self.invalid_pose, "native pose invalid"),
             (self.missing_geometry, "component geometry missing"),
         ] {
@@ -306,10 +325,18 @@ impl ScriptListPanel {
                 summary.missing_runtime += 1;
                 continue;
             };
-            match runtime.status(animation.animation.1, animation.skin.1) {
+            match runtime.status(
+                &store,
+                animation.skin.0,
+                animation.animation.1,
+                animation.skin.1,
+            ) {
                 AnimationRuntimeStatus::Rendered => summary.rendered += 1,
                 AnimationRuntimeStatus::MissingAnimation => summary.missing_animation += 1,
                 AnimationRuntimeStatus::MissingSkin => summary.missing_skin += 1,
+                AnimationRuntimeStatus::SkinMismatchRemappable => {
+                    summary.skin_mismatch_remappable += 1
+                }
                 AnimationRuntimeStatus::SkinMismatch => summary.skin_mismatch += 1,
                 AnimationRuntimeStatus::MissingPoseCache => summary.missing_pose_cache += 1,
                 AnimationRuntimeStatus::InvalidPose => summary.invalid_pose += 1,
@@ -350,14 +377,7 @@ impl ScriptListPanel {
                             if let Some((hc, (_, script))) =
                                 self.scripts.iter().find(|(_, (idx, _))| *idx == i)
                             {
-                                let semantic = semantic_script_label(&self.hashcodes, i, script);
-                                let decoded = format_hashcode(&self.hashcodes, *hc);
-                                let canonical = format_hashcode_with_id(&self.hashcodes, *hc);
-                                let label = if semantic == decoded {
-                                    canonical
-                                } else {
-                                    format!("{canonical} · {semantic}")
-                                };
+                                let label = semantic_script_label(&self.hashcodes, i, script);
                                 if ui
                                     .selectable_value(
                                         &mut self.selected_script,
@@ -631,6 +651,7 @@ impl ScriptListPanel {
                             &render_context,
                             &store,
                             animation.animation.1,
+                            animation.skin.0,
                             animation.skin.1,
                             animation.phase,
                             animation.position,
@@ -785,6 +806,7 @@ impl ScriptListPanel {
                         "Entity {}",
                         format_script_object_reference(
                             &self.hashcodes,
+                            "Entity",
                             *hashcode,
                             render_store.resolve_entity_hashcode(self.file, *hashcode),
                         )
@@ -796,37 +818,71 @@ impl ScriptListPanel {
                     skin_hashcode,
                     anim_file,
                     anim_hashcode,
-                } => (
-                    Self::COMMAND_COLOR_ANIMATION,
-                    format!(
-                        "{} (skin {}{})",
-                        semantic_object_reference(&self.hashcodes, "Animation", *anim_hashcode),
-                        if *skin_hashcode == u32::MAX {
-                            "implicit Animation binding".to_string()
-                        } else {
-                            format_script_object_reference(
-                                &self.hashcodes,
-                                *skin_hashcode,
-                                render_store.resolve_animskin_hashcode(self.file, *skin_hashcode),
-                            )
-                        },
-                        if *skin_hashcode == u32::MAX
-                            || skin_hashcode.is_local()
-                            || *skin_file == u32::MAX
-                        {
-                            String::new()
-                        } else {
-                            format!(" {}", format_hashcode_with_id(&self.hashcodes, *skin_file))
-                        }
-                    ),
-                    script_object_file_for_display(*anim_hashcode, *anim_file),
-                ),
+                } => {
+                    let resolved_target = resolve_animation_skin_target(
+                        self.file,
+                        *skin_file,
+                        *skin_hashcode,
+                        *anim_file,
+                        *anim_hashcode,
+                        &render_store,
+                    );
+                    let target_label = if *skin_hashcode == u32::MAX {
+                        resolved_target
+                            .map(|(_, skin)| {
+                                format!(
+                                    "implicit -> {}",
+                                    format_typed_hashcode_with_id(
+                                        &self.hashcodes,
+                                        "AnimSkin",
+                                        skin
+                                    )
+                                )
+                            })
+                            .unwrap_or_else(|| "implicit Animation binding".to_string())
+                    } else if *skin_hashcode & 0x7f00_0000 == 0x0300_0000 {
+                        let indirect =
+                            semantic_object_reference(&self.hashcodes, "Animation", *skin_hashcode);
+                        resolved_target
+                            .map(|(file, skin)| {
+                                format!(
+                                    "indirect via {indirect} -> {} @ {}",
+                                    format_typed_hashcode_with_id(
+                                        &self.hashcodes,
+                                        "AnimSkin",
+                                        skin
+                                    ),
+                                    format_hashcode_with_id(&self.hashcodes, file)
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                format!("indirect via {indirect} -> unresolved AnimSkin")
+                            })
+                    } else {
+                        let resolved = resolved_target.map(|(_, skin)| skin);
+                        format_script_object_reference(
+                            &self.hashcodes,
+                            "AnimSkin",
+                            *skin_hashcode,
+                            resolved,
+                        )
+                    };
+                    (
+                        Self::COMMAND_COLOR_ANIMATION,
+                        format!(
+                            "{} (skin {target_label})",
+                            semantic_object_reference(&self.hashcodes, "Animation", *anim_hashcode),
+                        ),
+                        script_object_file_for_display(*anim_hashcode, *anim_file),
+                    )
+                }
                 UXGeoScriptCommandData::SubScript { hashcode, file } => (
                     Self::COMMAND_COLOR_SUBSCRIPT,
                     format!(
                         "Sub-Script {}",
                         format_script_object_reference(
                             &self.hashcodes,
+                            "Script",
                             *hashcode,
                             render_store.resolve_script_hashcode(self.file, *hashcode),
                         )
@@ -837,7 +893,7 @@ impl ScriptListPanel {
                     Self::COMMAND_COLOR_SOUND,
                     format!(
                         "Sound {}",
-                        format_script_object_reference(&self.hashcodes, *hashcode, None)
+                        format_script_object_reference(&self.hashcodes, "Sound", *hashcode, None)
                     ),
                     u32::MAX,
                 ),
@@ -847,6 +903,7 @@ impl ScriptListPanel {
                         "Particle {}",
                         format_script_object_reference(
                             &self.hashcodes,
+                            "Particle",
                             *hashcode,
                             render_store.resolve_particle_hashcode(self.file, *hashcode),
                         )

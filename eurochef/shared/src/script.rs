@@ -19,6 +19,9 @@ pub enum UXGeoScriptCommandData {
         file: Hashcode,
     },
     Animation {
+        /// Native opcode-2 target-skin resource pair. Usually an AnimSkin, but
+        /// Robots also serializes Animation references here; FUN_004F26AA
+        /// resolves those through the Animation's bound AnimSkin.
         skin_file: Hashcode,
         skin_hashcode: Hashcode,
         anim_file: Hashcode,

@@ -91,7 +91,8 @@ impl EntityListPanel {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = [16., 16.].into();
             for (ii, (i, err)) in ids.iter().enumerate() {
-                let resource_label = format_hashcode_with_id(&self.hashcodes, *i);
+                let kind = if ty == 2 { "AnimSkin" } else { "Entity" };
+                let resource_label = format_typed_hashcode_with_id(&self.hashcodes, kind, *i);
                 ui.allocate_ui(egui::Vec2::new(256., 256. + 48.), |ui| {
                     ui.spacing_mut().item_spacing = [4., 4.].into();
                     ui.vertical(|ui| {

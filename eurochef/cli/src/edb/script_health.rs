@@ -13,6 +13,8 @@ use eurochef_shared::script::{
 };
 use serde::Serialize;
 
+use super::resource_atlas::discover_edb_paths_near_manifest;
+
 #[derive(Debug, Clone)]
 struct ManifestEntry {
     declared_uid: Option<u32>,
@@ -24,6 +26,7 @@ struct FileCatalogEntry {
     entities: Vec<u32>,
     scripts: Vec<u32>,
     animations: Vec<u32>,
+    animation_bound_skins: Vec<Option<u32>>,
     skins: Vec<u32>,
     particles: Vec<u32>,
 }
@@ -464,11 +467,10 @@ fn analyze_command(
             anim_file,
             anim_hashcode,
         } => {
-            resolutions.push(resolve_resource(
+            resolutions.push(resolve_animation_skin_resource(
                 current_file,
                 *skin_file,
                 *skin_hashcode,
-                "skin",
                 catalog,
             ));
             resolutions.push(resolve_resource(
@@ -602,6 +604,70 @@ fn resolve_resource(
             status: "resource_missing".to_string(),
         }
     }
+}
+
+fn resolve_animation_skin_resource(
+    current_file: u32,
+    serialized_file: u32,
+    serialized_hash: u32,
+    catalog: &HashMap<u32, FileCatalogEntry>,
+) -> ResourceResolution {
+    if matches!(serialized_hash, 0 | u32::MAX) {
+        return resolve_resource(
+            current_file,
+            serialized_file,
+            serialized_hash,
+            "skin",
+            catalog,
+        );
+    }
+
+    // Native opcode-2 path FUN_004F9E70 -> FUN_004F26AA accepts a direct
+    // AnimSkin target or resolves a non-AnimSkin resource. The shipped Robots
+    // corpus has one indirect case and it is an Animation reference.
+    if serialized_hash & 0x7f00_0000 == 0x0300_0000 {
+        let animation = resolve_resource(
+            current_file,
+            serialized_file,
+            serialized_hash,
+            "animation",
+            catalog,
+        );
+        if let Some(animation_hash) = animation.resolved_hash {
+            if let Some(source) = catalog.get(&animation.source_file) {
+                let animation_index = if serialized_hash.is_local() {
+                    serialized_hash.index() as usize
+                } else {
+                    source
+                        .animations
+                        .iter()
+                        .position(|hashcode| *hashcode == animation_hash)
+                        .unwrap_or(usize::MAX)
+                };
+                if let Some(Some(animskin_hash)) =
+                    source.animation_bound_skins.get(animation_index).copied()
+                {
+                    return ResourceResolution {
+                        kind: "skin".to_string(),
+                        serialized_file,
+                        serialized_hash,
+                        source_file: animation.source_file,
+                        available_count: Some(source.skins.len()),
+                        resolved_hash: Some(animskin_hash),
+                        status: "resolved_via_animation_binding".to_string(),
+                    };
+                }
+            }
+        }
+    }
+
+    resolve_resource(
+        current_file,
+        serialized_file,
+        serialized_hash,
+        "skin",
+        catalog,
+    )
 }
 
 fn resource_list<'a>(source: &'a FileCatalogEntry, kind: &str) -> &'a [u32] {
@@ -816,6 +882,17 @@ fn build_file_catalog(
                         .iter()
                         .map(|value| value.common.hashcode)
                         .collect(),
+                    animation_bound_skins: header
+                        .anim_list
+                        .iter()
+                        .map(|animation| {
+                            header
+                                .animskin_list
+                                .iter()
+                                .find(|skin| skin.base_skin_num == animation.skin_num)
+                                .map(|skin| skin.common.hashcode)
+                        })
+                        .collect(),
                     skins: header
                         .animskin_list
                         .iter()
@@ -848,27 +925,81 @@ fn read_manifest(path: &Path) -> Result<Vec<ManifestEntry>> {
     let manifest = std::fs::read_to_string(path)
         .with_context(|| format!("read manifest {}", path.display()))?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut path_column = None::<usize>;
+    let mut uid_column = None::<usize>;
     let mut entries = Vec::new();
-    for (line_index, line) in manifest.lines().enumerate() {
-        if line_index == 0 {
-            continue;
-        }
+
+    for line in manifest.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((uid_text, source_text)) = line.split_once('\t') else {
+        let columns = line.split('\t').map(str::trim).collect::<Vec<_>>();
+        if columns.len() < 2 {
+            continue;
+        }
+
+        if path_column.is_none() {
+            let normalized = columns
+                .iter()
+                .map(|value| value.to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            path_column = normalized.iter().position(|value| {
+                matches!(value.as_str(), "source_path" | "edb_path" | "path")
+                    || (value.contains("source") && value.contains("path"))
+            });
+            uid_column = normalized.iter().position(|value| {
+                matches!(
+                    value.as_str(),
+                    "edb_uid" | "uid" | "hashcode" | "edb_hashcode"
+                ) || (value.contains("edb") && value.contains("uid"))
+            });
+            if path_column.is_some() {
+                continue;
+            }
+        }
+
+        let source_index = path_column.or_else(|| {
+            columns
+                .iter()
+                .position(|value| value.to_ascii_lowercase().ends_with(".edb"))
+        });
+        let Some(source_index) = source_index else {
             continue;
         };
-        let source_path = PathBuf::from(source_text.trim());
+        let source_text = columns[source_index];
+        if source_text.is_empty() {
+            continue;
+        }
+        let source_path = PathBuf::from(source_text);
+        let declared_uid = uid_column
+            .and_then(|index| columns.get(index))
+            .and_then(|value| parse_u32(value))
+            .or_else(|| columns.first().and_then(|value| parse_u32(value)));
         entries.push(ManifestEntry {
-            declared_uid: parse_u32(uid_text.trim()),
+            declared_uid,
             source_path: if source_path.is_absolute() {
                 source_path
             } else {
                 base.join(source_path)
             },
         });
+    }
+
+    if entries.is_empty() {
+        entries = discover_edb_paths_near_manifest(path)?
+            .into_iter()
+            .map(|source_path| ManifestEntry {
+                declared_uid: None,
+                source_path,
+            })
+            .collect();
+    }
+    if entries.is_empty() {
+        anyhow::bail!(
+            "manifest {} contains no discoverable EDB source rows",
+            path.display()
+        );
     }
     Ok(entries)
 }
@@ -1047,7 +1178,10 @@ fn escape_tsv(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_family, classify_status, parse_u32, resolve_resource};
+    use super::{
+        classify_family, classify_status, parse_u32, resolve_animation_skin_resource,
+        resolve_resource, FileCatalogEntry,
+    };
     use eurochef_shared::script::ScriptCommandTypeCounts;
     use std::collections::HashMap;
 
@@ -1083,6 +1217,28 @@ mod tests {
             classify_status(1, 0, 0, 0, 0, 1, 0, 0).0,
             "partial_animation_binding"
         );
+    }
+
+    #[test]
+    fn animation_reference_in_skin_slot_resolves_to_bound_animskin() {
+        let file_uid = 0x0100_0020;
+        let animation_uid = 0x0300_000A;
+        let animskin_uid = 0x0D00_0001;
+        let catalog = HashMap::from([(
+            file_uid,
+            FileCatalogEntry {
+                entities: Vec::new(),
+                scripts: Vec::new(),
+                animations: vec![animation_uid],
+                animation_bound_skins: vec![Some(animskin_uid)],
+                skins: vec![animskin_uid],
+                particles: Vec::new(),
+            },
+        )]);
+        let resolution = resolve_animation_skin_resource(file_uid, u32::MAX, 0x8300_0000, &catalog);
+        assert_eq!(resolution.source_file, file_uid);
+        assert_eq!(resolution.resolved_hash, Some(animskin_uid));
+        assert_eq!(resolution.status, "resolved_via_animation_binding");
     }
 
     #[test]

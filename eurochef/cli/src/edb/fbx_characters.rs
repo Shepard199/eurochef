@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{bail, ensure, Context};
 use eurochef_edb::{
-    anim::{EXGeoAnimSkinEntity, EXGeoBaseAnimSkin},
+    anim::{EXGeoAnimSkinBoneAttachment, EXGeoAnimSkinEntity, EXGeoBaseAnimSkin},
     binrw::BinReaderExt,
     edb::EdbFile,
     entity::{read_robots_v248_morph_shape_deltas, EXGeoEntity},
@@ -155,6 +155,7 @@ struct CorpusFileCatalog {
     uid: u32,
     source_path: PathBuf,
     animations: Vec<u32>,
+    animation_bound_skins: Vec<Option<u32>>,
     skins: Vec<u32>,
 }
 
@@ -582,6 +583,80 @@ fn resolve_corpus_resource(
     Some((source.uid, source.source_path.clone(), index, resolved_uid))
 }
 
+fn resolve_corpus_skin_target(
+    files: &HashMap<u32, CorpusFileCatalog>,
+    current_file: u32,
+    serialized_file: u32,
+    serialized_hash: u32,
+) -> Option<(u32, PathBuf, usize, u32)> {
+    let source_file = if serialized_hash.is_local() || serialized_file == u32::MAX {
+        current_file
+    } else {
+        serialized_file
+    };
+    let source = files.get(&source_file)?;
+
+    if serialized_hash & 0x7f00_0000 == 0x0300_0000 {
+        let animation_index = if serialized_hash.is_local() {
+            serialized_hash.index() as usize
+        } else {
+            source
+                .animations
+                .iter()
+                .position(|hashcode| *hashcode == serialized_hash)?
+        };
+        let skin_uid = source
+            .animation_bound_skins
+            .get(animation_index)
+            .copied()??;
+        let skin_index = source
+            .skins
+            .iter()
+            .position(|hashcode| *hashcode == skin_uid)?;
+        return Some((source.uid, source.source_path.clone(), skin_index, skin_uid));
+    }
+
+    resolve_corpus_resource(files, current_file, serialized_file, serialized_hash, true)
+}
+
+fn resolve_header_skin_target(
+    header: &eurochef_edb::header::EXGeoHeader,
+    skin_file: u32,
+    skin_hashcode: u32,
+) -> Option<u32> {
+    if skin_file != u32::MAX && skin_file != header.hashcode && !skin_hashcode.is_local() {
+        return None;
+    }
+    if skin_hashcode & 0x7f00_0000 == 0x0300_0000 {
+        let animation = if skin_hashcode.is_local() {
+            header.anim_list.data().get(skin_hashcode.index() as usize)
+        } else {
+            header
+                .anim_list
+                .iter()
+                .find(|animation| animation.common.hashcode == skin_hashcode)
+        }?;
+        return header
+            .animskin_list
+            .iter()
+            .find(|skin| skin.base_skin_num == animation.skin_num)
+            .map(|skin| skin.common.hashcode);
+    }
+    if skin_hashcode.is_local() {
+        header
+            .animskin_list
+            .data()
+            .get(skin_hashcode.index() as usize)
+            .map(|skin| skin.common.hashcode)
+    } else {
+        header
+            .animskin_list
+            .iter()
+            .find(|skin| skin.common.hashcode == skin_hashcode)
+            .map(|skin| skin.common.hashcode)
+    }
+}
+
 fn push_usage(
     catalog: &mut AnimationUsageCatalog,
     animation_index: usize,
@@ -639,6 +714,17 @@ fn collect_corpus_animation_bindings(
                 .anim_list
                 .iter()
                 .map(|animation| animation.common.hashcode)
+                .collect(),
+            animation_bound_skins: header
+                .anim_list
+                .iter()
+                .map(|animation| {
+                    header
+                        .animskin_list
+                        .iter()
+                        .find(|skin| skin.base_skin_num == animation.skin_num)
+                        .map(|skin| skin.common.hashcode)
+                })
                 .collect(),
             skins: header
                 .animskin_list
@@ -713,7 +799,7 @@ fn collect_corpus_animation_bindings(
                 let explicit_skin = if matches!(*skin_hashcode, 0 | u32::MAX) {
                     None
                 } else {
-                    resolve_corpus_resource(&files, source.uid, *skin_file, *skin_hashcode, true)
+                    resolve_corpus_skin_target(&files, source.uid, *skin_file, *skin_hashcode)
                 };
 
                 if animation_source_edb_uid == target_header.hashcode {
@@ -786,27 +872,8 @@ fn collect_animation_usages(
                 continue;
             };
             if !matches!(*skin_hashcode, 0 | u32::MAX) {
-                let skin_source_file = if skin_hashcode.is_local() || *skin_file == u32::MAX {
-                    header.hashcode
-                } else {
-                    *skin_file
-                };
-                if skin_source_file != header.hashcode {
-                    continue;
-                }
-                let resolved_skin_uid = if skin_hashcode.is_local() {
-                    header
-                        .animskin_list
-                        .data()
-                        .get(skin_hashcode.index() as usize)
-                        .map(|skin| skin.common.hashcode)
-                } else {
-                    header
-                        .animskin_list
-                        .iter()
-                        .find(|skin| skin.common.hashcode == *skin_hashcode)
-                        .map(|skin| skin.common.hashcode)
-                };
+                let resolved_skin_uid =
+                    resolve_header_skin_target(header, *skin_file, *skin_hashcode);
                 let native_skin_uid = header
                     .anim_list
                     .data()
@@ -899,6 +966,14 @@ fn build_character_ir(
         "AnimSkin bone arrays do not match bone_count={bone_count}"
     );
 
+    let bone_hashcodes = if header.version == 248 && edb.platform == Platform::Pc {
+        let endian = edb.endian;
+        skin.read_robots_v248_bone_hashcodes(edb, endian)
+            .context("read Robots v248 AnimBone selector table")?
+    } else {
+        vec![None; bone_count]
+    };
+
     let source_root_count = skin
         .hier_data
         .iter()
@@ -931,7 +1006,7 @@ fn build_character_ir(
             i32::from(hierarchy.link_index) + source_bone_offset as i32
         };
         bones.push(BoneIr {
-            name: format!("bone_{index:03}"),
+            name: robots_bone_name(index, bone_hashcodes[index]),
             parent,
             local_position: vector3(&skin.relative_bind_positions[index]),
             global_position: vector3(&skin.absolute_bind_positions[index]),
@@ -951,6 +1026,18 @@ fn build_character_ir(
                 component,
                 group_name,
                 component_index,
+                source_bone_offset,
+                texture_paths,
+            )?);
+        }
+    }
+    if let Some(attachments) = skin.bone_attachments.as_ref() {
+        for (attachment_index, attachment) in attachments.iter().enumerate() {
+            meshes.push(build_bone_attachment_mesh(
+                edb,
+                skin,
+                attachment,
+                attachment_index,
                 source_bone_offset,
                 texture_paths,
             )?);
@@ -1882,6 +1969,142 @@ fn build_component_mesh(
     })
 }
 
+fn build_bone_attachment_mesh(
+    edb: &mut EdbFile,
+    skin: &EXGeoBaseAnimSkin,
+    attachment: &EXGeoAnimSkinBoneAttachment,
+    attachment_index: usize,
+    source_bone_offset: usize,
+    texture_paths: &HashMap<u32, String>,
+) -> anyhow::Result<MeshIr> {
+    ensure!(
+        attachment.skin_data_ptr.offset_relative() == 0
+            && attachment.parts_count == 0
+            && attachment.morph_index == -1,
+        "AnimSkin rigid attachment {attachment_index} does not match the shipped Robots v248 storage contract"
+    );
+    let bone_selector = attachment.bone_selector as usize;
+    ensure!(
+        bone_selector < skin.bone_count as usize,
+        "AnimSkin rigid attachment {attachment_index} references bone {bone_selector} outside bone_count {}",
+        skin.bone_count
+    );
+
+    let header = edb.header.clone();
+    let entity_index = attachment.entity_list_index();
+    let entity_header = header
+        .entity_list
+        .data()
+        .get(entity_index)
+        .with_context(|| {
+            format!("rigid attachment Entity index {entity_index} is outside Entity list")
+        })?;
+    edb.seek(SeekFrom::Start(entity_header.common.address as u64))?;
+    let entity: EXGeoEntity = edb.read_type_args(edb.endian, (header.version, edb.platform))?;
+
+    let mut vertices = Vec::new();
+    let mut source_indices = Vec::new();
+    let mut strips = Vec::new();
+    read_entity(
+        &entity,
+        &mut vertices,
+        &mut source_indices,
+        &mut strips,
+        edb,
+        MAX_ENTITY_DEPTH,
+        false,
+        true,
+    )?;
+    ensure!(
+        !vertices.is_empty(),
+        "rigid attachment Entity has no render vertices"
+    );
+
+    // Native +0x78 attachments are authored in bone-local space and rendered
+    // with the current global bone matrix. FBX skin clusters apply
+    // current_global * inverse_bind, so pre-position the attachment geometry by
+    // the selected bone's bind translation. The cluster then reduces to the
+    // same native current_global * local_vertex transform at runtime.
+    let bind_position = skin.absolute_bind_positions[bone_selector];
+    for vertex in &mut vertices {
+        vertex.pos[0] += bind_position[0];
+        vertex.pos[1] += bind_position[1];
+        vertex.pos[2] += bind_position[2];
+    }
+    let exported_bone = u16::try_from(bone_selector + source_bone_offset)
+        .context("rigid attachment exported bone index exceeds u16")?;
+    let influences = vec![
+        InfluenceIr {
+            bone_indices: [exported_bone, 0, 0, 0],
+            weights: [1.0, 0.0, 0.0, 0.0],
+        };
+        vertices.len()
+    ];
+
+    let mut materials = Vec::<MaterialIr>::new();
+    let mut material_slots = HashMap::<u32, u32>::new();
+    let mut indices = Vec::new();
+    let mut triangle_materials = Vec::new();
+    for strip in &strips {
+        let material_hash = texture_hash(&header, strip);
+        let material_slot = *material_slots.entry(material_hash).or_insert_with(|| {
+            let slot = materials.len() as u32;
+            materials.push(MaterialIr {
+                hashcode: material_hash,
+                name: if material_hash == u32::MAX {
+                    "HT_Texture_None_[0xFFFFFFFF]".to_string()
+                } else {
+                    resource_file_stem_in_edb("Texture", header.hashcode, material_hash)
+                },
+                texture_path: texture_paths
+                    .get(&material_hash)
+                    .cloned()
+                    .unwrap_or_default(),
+            });
+            slot
+        });
+        let start = strip.start_index as usize;
+        let end = start
+            .checked_add(strip.index_count as usize)
+            .context("rigid attachment strip index range overflow")?;
+        let strip_indices = source_indices
+            .get(start..end)
+            .context("rigid attachment strip index range is outside Entity index buffer")?;
+        ensure!(
+            strip_indices.len() % 3 == 0,
+            "rigid attachment triangulated strip index count is not divisible by 3"
+        );
+        for triangle in strip_indices.chunks_exact(3) {
+            ensure!(
+                triangle
+                    .iter()
+                    .all(|index| (*index as usize) < vertices.len()),
+                "rigid attachment triangle references vertex outside mesh"
+            );
+            indices.extend_from_slice(triangle);
+            triangle_materials.push(material_slot);
+        }
+    }
+    ensure!(
+        !indices.is_empty(),
+        "rigid attachment Entity has no triangles"
+    );
+
+    Ok(MeshIr {
+        name: format!(
+            "{}_attachment_{attachment_index:03}_bone_{bone_selector:03}",
+            resource_file_stem("Entity", entity_header.common.hashcode)
+        ),
+        vertices,
+        influences,
+        indices,
+        triangle_materials,
+        materials,
+        morph_scalar_base: None,
+        morph_shapes: Vec::new(),
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct MeshPartInfo {
     object_address: u64,
@@ -2294,6 +2517,16 @@ fn write_ir_manifest(
     Ok(())
 }
 
+fn robots_bone_name(index: usize, hashcode: Option<u32>) -> String {
+    match hashcode {
+        Some(hashcode) => match eurochef_edb::robots_hashdb::resolve(hashcode) {
+            Some(name) => format!("{name}_[0x{hashcode:08X}]"),
+            None => format!("bone_{index:03}_[0x{hashcode:08X}]"),
+        },
+        None => format!("bone_{index:03}"),
+    }
+}
+
 fn vector3(value: &[f32; 4]) -> [f32; 3] {
     [value[0], value[1], value[2]]
 }
@@ -2331,6 +2564,45 @@ fn write_string(out: &mut impl Write, value: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn robots_bone_names_keep_proven_animbone_ids_without_guessing_unknowns() {
+        assert_eq!(
+            robots_bone_name(32, Some(0x0E00_0015)),
+            "HT_AnimBone_R_Hand_[0x0E000015]"
+        );
+        assert_eq!(
+            robots_bone_name(7, Some(0x0E00_001F)),
+            "bone_007_[0x0E00001F]"
+        );
+        assert_eq!(robots_bone_name(7, None), "bone_007");
+    }
+
+    #[test]
+    fn corpus_skin_target_resolves_animation_reference_before_local_skin_index() {
+        let file_uid = 0x0100_0020;
+        let files = HashMap::from([(
+            file_uid,
+            CorpusFileCatalog {
+                uid: file_uid,
+                source_path: PathBuf::from("eb02_she.edb"),
+                animations: vec![0x0300_0010, 0x0300_0020],
+                animation_bound_skins: vec![Some(0x0D00_0010), Some(0x0D00_0010)],
+                skins: vec![0x0D00_0010, 0x0D00_0020],
+            },
+        )]);
+
+        assert_eq!(
+            resolve_corpus_skin_target(&files, file_uid, u32::MAX, 0x8300_0001)
+                .map(|(_, _, index, uid)| (index, uid)),
+            Some((0, 0x0D00_0010))
+        );
+        assert_eq!(
+            resolve_corpus_skin_target(&files, file_uid, u32::MAX, 0x8D00_0001)
+                .map(|(_, _, index, uid)| (index, uid)),
+            Some((1, 0x0D00_0020))
+        );
+    }
 
     #[test]
     fn character_validator_rejects_non_preceding_parent() {

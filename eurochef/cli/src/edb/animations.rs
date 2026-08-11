@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{BufReader, Cursor, Seek},
+    io::{BufReader, Cursor, Read, Seek, SeekFrom},
     path::Path,
 };
 
@@ -14,20 +14,57 @@ use eurochef_edb::{
 use eurochef_shared::{entities::read_entity, textures::UXGeoTexture};
 use image::ImageFormat;
 use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
+use serde::Serialize;
 
 use crate::PlatformArg;
 
-use super::{entities::Transparency, gltf_export, TICK_STRINGS};
+use super::{
+    entities::Transparency, gltf_export, resource_file_stem, resource_label, TICK_STRINGS,
+};
+
+#[derive(Debug, Serialize)]
+struct AnimationExportEntry {
+    index: usize,
+    uid: String,
+    label: String,
+    metadata_file: String,
+    motion_file: Option<String>,
+    file_offset: String,
+    motiondata_info_addr: String,
+    data_size: u32,
+    skin_num: String,
+    animskin_label: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnimationExportIndex {
+    source_file: String,
+    source_edb_uid: String,
+    animations: Vec<AnimationExportEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnimationMetadata<'a> {
+    index: usize,
+    uid: String,
+    label: String,
+    source_file: &'a str,
+    source_edb_uid: String,
+    file_offset: String,
+    motiondata_info_addr: String,
+    data_size: u32,
+    skin_num: String,
+    animskin_label: Option<String>,
+    motion_file: Option<String>,
+}
 
 pub fn execute_command(
     filename: String,
     platform: Option<PlatformArg>,
     output_folder: Option<String>,
 ) -> anyhow::Result<()> {
-    warn!("THIS COMMAND IS A WORK IN PROGRESS");
-
     let output_folder = output_folder.unwrap_or(format!(
-        "./entities/{}/",
+        "./animations/{}/",
         Path::new(&filename).file_name().unwrap().to_string_lossy()
     ));
     let output_folder = Path::new(&output_folder);
@@ -47,11 +84,99 @@ pub fn execute_command(
     let header = edb.header.clone();
 
     if header.animskin_list.len() == 0 {
-        warn!("File does not contain any animation skins!");
-        return Ok(());
+        warn!(
+            "File does not contain any animation skins; Animation metadata can still be exported."
+        );
     }
 
     std::fs::create_dir_all(output_folder)?;
+
+    let mut animation_entries = Vec::with_capacity(header.anim_list.len());
+    for (index, animation) in header.anim_list.iter().enumerate() {
+        let stem = resource_file_stem("Animation", animation.common.hashcode);
+        let metadata_name = format!("{stem}.animation.json");
+        let motion_name = format!("{stem}.motion.bin");
+        let animskin_label = header
+            .animskin_list
+            .iter()
+            .find(|skin| skin.base_skin_num == animation.skin_num)
+            .map(|skin| resource_label("AnimSkin", skin.common.hashcode));
+
+        let motion_file = if animation.datasize == 0 {
+            let motion_path = output_folder.join(&motion_name);
+            std::fs::write(&motion_path, [])?;
+            Some(motion_name.clone())
+        } else {
+            let start = u64::from(animation.motiondata_info_addr);
+            let end = start.saturating_add(u64::from(animation.datasize));
+            if end > u64::from(header.file_size) {
+                warn!(
+                    animation = %resource_label("Animation", animation.common.hashcode),
+                    start = format_args!("0x{:08X}", animation.motiondata_info_addr),
+                    size = animation.datasize,
+                    file_size = header.file_size,
+                    "Animation motion payload exceeds EDB bounds; metadata is exported without raw payload"
+                );
+                None
+            } else {
+                let mut bytes = vec![0u8; animation.datasize as usize];
+                edb.seek(SeekFrom::Start(start))?;
+                match edb.read_exact(&mut bytes) {
+                    Ok(()) => {
+                        let motion_path = output_folder.join(&motion_name);
+                        std::fs::write(&motion_path, bytes)?;
+                        Some(motion_name.clone())
+                    }
+                    Err(error) => {
+                        warn!(
+                            animation = %resource_label("Animation", animation.common.hashcode),
+                            %error,
+                            "Animation motion payload could not be read; metadata is exported without raw payload"
+                        );
+                        None
+                    }
+                }
+            }
+        };
+
+        let metadata = AnimationMetadata {
+            index,
+            uid: format!("0x{:08X}", animation.common.hashcode),
+            label: resource_label("Animation", animation.common.hashcode),
+            source_file: &filename,
+            source_edb_uid: format!("0x{:08X}", header.hashcode),
+            file_offset: format!("0x{:08X}", animation.common.address),
+            motiondata_info_addr: format!("0x{:08X}", animation.motiondata_info_addr),
+            data_size: animation.datasize,
+            skin_num: format!("0x{:08X}", animation.skin_num),
+            animskin_label: animskin_label.clone(),
+            motion_file: motion_file.clone(),
+        };
+        let metadata_path = output_folder.join(&metadata_name);
+        std::fs::write(&metadata_path, serde_json::to_vec_pretty(&metadata)?)?;
+
+        animation_entries.push(AnimationExportEntry {
+            index,
+            uid: metadata.uid,
+            label: metadata.label,
+            metadata_file: metadata_name,
+            motion_file,
+            file_offset: metadata.file_offset,
+            motiondata_info_addr: metadata.motiondata_info_addr,
+            data_size: metadata.data_size,
+            skin_num: metadata.skin_num,
+            animskin_label,
+        });
+    }
+    let animation_index = AnimationExportIndex {
+        source_file: filename.clone(),
+        source_edb_uid: format!("0x{:08X}", header.hashcode),
+        animations: animation_entries,
+    };
+    std::fs::write(
+        output_folder.join("ANIMATIONS_INDEX.json"),
+        serde_json::to_vec_pretty(&animation_index)?,
+    )?;
 
     let mut texture_uri_map: HashMap<u32, (String, Transparency)> = HashMap::new();
     let pb = ProgressBar::new(header.texture_list.len() as u64)
@@ -119,7 +244,7 @@ pub fn execute_command(
     pb.set_message("Extracting animskins");
 
     for a in header.animskin_list.iter().progress_with(pb) {
-        let skin_id = format!("{:x}", a.common.hashcode);
+        let skin_id = resource_file_stem("AnimSkin", a.common.hashcode);
         let _span = error_span!("animskin", id = %skin_id);
         let _span_enter = _span.enter();
         edb.seek(std::io::SeekFrom::Start(a.common.address as u64))?;
@@ -139,7 +264,7 @@ pub fn execute_command(
 
         for entity_index in entity_indices {
             let e = &header.entity_list[entity_index as usize];
-            let ent_id = format!("{:x}", e.common.hashcode);
+            let ent_id = resource_file_stem("Entity", e.common.hashcode);
             let _espan = error_span!("entity", id = %ent_id);
             let _espan_enter = _espan.enter();
 

@@ -8,6 +8,46 @@ use super::RenderStore;
 
 const MAX_SCRIPT_RECURSION_DEPTH: usize = 64;
 
+fn resolve_resource_file(
+    current_file: Hashcode,
+    serialized_file: Hashcode,
+    serialized_hashcode: Hashcode,
+) -> Hashcode {
+    if serialized_file == u32::MAX || serialized_hashcode.is_local() {
+        current_file
+    } else {
+        serialized_file
+    }
+}
+
+/// Robots opcode-2 target-skin semantics proven at FUN_004F9E70 -> FUN_004F26AA.
+/// The serialized target resource may be a direct AnimSkin or an Animation-like
+/// resource that resolves to its bound AnimSkin.
+pub(crate) fn resolve_animation_skin_target(
+    current_file: Hashcode,
+    skin_file: Hashcode,
+    skin_hashcode: Hashcode,
+    anim_file: Hashcode,
+    anim_hashcode: Hashcode,
+    render_store: &RenderStore,
+) -> Option<(Hashcode, Hashcode)> {
+    let resolved_animation_file = resolve_resource_file(current_file, anim_file, anim_hashcode);
+    if skin_hashcode == u32::MAX {
+        let skin = render_store
+            .get_animation_runtime(resolved_animation_file)?
+            .bound_skin_hashcode(anim_hashcode)?;
+        return Some((resolved_animation_file, skin));
+    }
+    if skin_hashcode == 0 {
+        return None;
+    }
+
+    let resolved_skin_file = resolve_resource_file(current_file, skin_file, skin_hashcode);
+    let runtime = render_store.get_animation_runtime(resolved_skin_file)?;
+    let (_, canonical_skin) = runtime.resolve_animskin_reference(skin_hashcode)?;
+    Some((resolved_skin_file, canonical_skin))
+}
+
 pub fn first_resolved_visual_time(
     current_file: Hashcode,
     script_hashcode: Hashcode,
@@ -47,35 +87,20 @@ pub fn first_resolved_visual_time(
                     skin_hashcode,
                     anim_file,
                     anim_hashcode,
-                } => {
-                    let animation_file = if anim_file == u32::MAX || anim_hashcode.is_local() {
-                        current_file
-                    } else {
-                        anim_file
-                    };
-                    let explicit_skin_file = if skin_file == u32::MAX || skin_hashcode.is_local() {
-                        current_file
-                    } else {
-                        skin_file
-                    };
-                    let (resolved_skin_file, resolved_skin) = if skin_hashcode == u32::MAX {
-                        (
-                            animation_file,
-                            render_store
-                                .get_animation_runtime(animation_file)
-                                .and_then(|runtime| runtime.bound_skin_hashcode(anim_hashcode)),
-                        )
-                    } else {
-                        (explicit_skin_file, Some(skin_hashcode))
-                    };
-                    resolved_skin
-                        .filter(|skin| {
-                            render_store
-                                .get_animskin_entities(resolved_skin_file, *skin)
-                                .is_some_and(|entities| !entities.is_empty())
-                        })
-                        .map(|_| command_start)
-                }
+                } => resolve_animation_skin_target(
+                    current_file,
+                    skin_file,
+                    skin_hashcode,
+                    anim_file,
+                    anim_hashcode,
+                    render_store,
+                )
+                .filter(|(resolved_skin_file, skin)| {
+                    render_store
+                        .get_animskin_entities(*resolved_skin_file, *skin)
+                        .is_some_and(|entities| !entities.is_empty())
+                })
+                .map(|_| command_start),
                 UXGeoScriptCommandData::Particle { hashcode, file } => {
                     let file = if file == u32::MAX || hashcode.is_local() {
                         current_file
@@ -430,27 +455,16 @@ fn render_script_with_mode<F>(
                 anim_hashcode,
             } => {
                 if include_animation_geometry {
-                    let resolved_anim_file = if anim_file == u32::MAX || anim_hashcode.is_local() {
-                        current_file
-                    } else {
-                        anim_file
-                    };
-                    let (resolved_skin_file, resolved_skin_hashcode) = if skin_hashcode == u32::MAX
+                    if let Some((resolved_skin_file, resolved_skin_hashcode)) =
+                        resolve_animation_skin_target(
+                            current_file,
+                            skin_file,
+                            skin_hashcode,
+                            anim_file,
+                            anim_hashcode,
+                            render_store,
+                        )
                     {
-                        let bound_skin = render_store
-                            .get_animation_runtime(resolved_anim_file)
-                            .and_then(|runtime| runtime.bound_skin_hashcode(anim_hashcode));
-                        (resolved_anim_file, bound_skin)
-                    } else {
-                        let file = if skin_file == u32::MAX || skin_hashcode.is_local() {
-                            current_file
-                        } else {
-                            skin_file
-                        };
-                        (file, Some(skin_hashcode))
-                    };
-
-                    if let Some(resolved_skin_hashcode) = resolved_skin_hashcode {
                         if let Some(entity_hashcodes) = render_store
                             .get_animskin_entities(resolved_skin_file, resolved_skin_hashcode)
                         {
@@ -556,16 +570,19 @@ pub fn collect_script_animations(
                 anim_file,
                 anim_hashcode,
             } => {
-                let resolved_animation_file = if anim_file == u32::MAX || anim_hashcode.is_local() {
-                    current_file
-                } else {
-                    anim_file
-                };
-                let resolved_skin_file = if skin_file == u32::MAX || skin_hashcode.is_local() {
-                    current_file
-                } else {
-                    skin_file
-                };
+                let resolved_animation_file =
+                    resolve_resource_file(current_file, anim_file, anim_hashcode);
+                let fallback_skin_file =
+                    resolve_resource_file(current_file, skin_file, skin_hashcode);
+                let (resolved_skin_file, resolved_skin_hashcode) = resolve_animation_skin_target(
+                    current_file,
+                    skin_file,
+                    skin_hashcode,
+                    anim_file,
+                    anim_hashcode,
+                    render_store,
+                )
+                .unwrap_or((fallback_skin_file, skin_hashcode));
                 let fps = script.timeline_framerate().max(f32::EPSILON);
                 let duration = f32::from(command.length.max(1)) / fps;
                 let start_time = script.time_at_frame(command.start as f32);
@@ -573,7 +590,7 @@ pub fn collect_script_animations(
                 let phase = (local_time / duration).clamp(0.0, 1.0);
                 queue.push(QueuedAnimationRender {
                     animation: (resolved_animation_file, anim_hashcode),
-                    skin: (resolved_skin_file, skin_hashcode),
+                    skin: (resolved_skin_file, resolved_skin_hashcode),
                     position: position + rotation.mul_vec3(scale * transform.0),
                     rotation: rotation * transform.1,
                     scale: scale * transform.2,

@@ -170,7 +170,7 @@ impl EurochefApp {
             }
         }
         let (entities, skins, _) = entities::read_from_file(edb, Some(&internal_refs))?;
-        if !animation_catalog.clips.is_empty() {
+        if !animation_catalog.clips.is_empty() || !animation_catalog.skins.is_empty() {
             rs_lock.insert_animation_runtime(
                 header.hashcode,
                 Arc::new(animations::AnimationRuntime::new(
@@ -203,7 +203,7 @@ impl EurochefApp {
 
                 let mut entity_hashcodes: Vec<Hashcode> = vec![];
                 for entry in skin.entities.iter().chain(skin.more_entities.iter()) {
-                    let entity_index = (entry.entity_index & 0x00ff_ffff) as usize;
+                    let entity_index = entry.entity_list_index();
                     if let Some(entity_header) = header.entity_list.data().get(entity_index) {
                         let hashcode = entity_header.common.hashcode;
                         if !entity_hashcodes.contains(&hashcode) {
@@ -326,6 +326,7 @@ impl EurochefApp {
             let scripts = UXGeoScript::read_all(&mut edb)?;
             preload_script_sounds(&sound_preview, &scripts);
             let has_animations = !animation_catalog.clips.is_empty();
+            let has_animation_runtime = has_animations || !animation_catalog.skins.is_empty();
             {
                 let mut rs_lock = self.render_store.write();
                 for s in &scripts {
@@ -335,7 +336,7 @@ impl EurochefApp {
                     rs_lock.insert_particle(header.hashcode, particle);
                 }
 
-                if has_animations {
+                if has_animation_runtime {
                     rs_lock.insert_animation_runtime(
                         header.hashcode,
                         Arc::new(animations::AnimationRuntime::new(
@@ -371,7 +372,7 @@ impl EurochefApp {
 
                     let mut entity_hashcodes: Vec<Hashcode> = vec![];
                     for entry in skin.entities.iter().chain(skin.more_entities.iter()) {
-                        let entity_index = (entry.entity_index & 0x00ff_ffff) as usize;
+                        let entity_index = entry.entity_list_index();
                         if let Some(entity_header) = header.entity_list.data().get(entity_index) {
                             let hashcode = entity_header.common.hashcode;
                             if !entity_hashcodes.contains(&hashcode) {

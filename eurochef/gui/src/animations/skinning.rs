@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use eurochef_edb::anim::EXGeoBaseAnimSkin;
+use eurochef_edb::{anim::EXGeoBaseAnimSkin, Hashcode};
 use eurochef_shared::entities::UXVertex;
 use glam::{Mat4, Quat, Vec3};
 
@@ -12,16 +12,128 @@ pub(crate) struct AnimationBonePose {
     pub rotation: Quat,
 }
 
-pub(crate) fn bind_pose_skin_matrices(skin: &EXGeoBaseAnimSkin) -> Option<Vec<Mat4>> {
-    let poses = skin
-        .relative_bind_positions
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeBoneRemap {
+    /// Source bone selector -> target bone selector. `0xFF` is the native
+    /// unresolved sentinel and is preserved if parent fallback cannot resolve.
+    pub selectors: Vec<u8>,
+    /// Native 128-bit target-bone ancestor mask built from directly matched
+    /// target selectors and their parent chains.
+    pub target_ancestor_mask: [u32; 4],
+}
+
+/// Reproduces Robots.exe `FUN_004FCE8C` skin-to-skin selector remapping.
+///
+/// Direct mappings are established only by equal serialized `HT_AnimBone`
+/// identities. Unnamed/unmatched source bones then inherit their source
+/// parent's already-resolved selector; an unmatched source root maps to target
+/// selector zero. Directly matched target selectors and all of their target
+/// ancestors are recorded in the same four-DWORD mask used by the game.
+pub(crate) fn build_native_bone_remap(
+    source_names: &[Option<Hashcode>],
+    source_parents: &[u16],
+    target_names: &[Option<Hashcode>],
+    target_parents: &[u16],
+) -> Option<NativeBoneRemap> {
+    if source_names.len() != source_parents.len()
+        || target_names.len() != target_parents.len()
+        || source_names.len() > u8::MAX as usize
+        || target_names.len() > 128
+    {
+        return None;
+    }
+
+    let mut target_by_name = std::collections::HashMap::new();
+    for (target_selector, name) in target_names.iter().copied().enumerate() {
+        let Some(name) = name else {
+            continue;
+        };
+        if target_by_name.insert(name, target_selector as u8).is_some() {
+            return None;
+        }
+    }
+
+    let mut selectors = vec![u8::MAX; source_names.len()];
+    let mut target_ancestor_mask = [0u32; 4];
+
+    for (source_selector, name) in source_names.iter().copied().enumerate() {
+        let Some(name) = name else {
+            continue;
+        };
+        let Some(&target_selector) = target_by_name.get(&name) else {
+            continue;
+        };
+        selectors[source_selector] = target_selector;
+
+        let mut target_chain_selector = target_selector as usize;
+        let mut visited = [false; 128];
+        loop {
+            if target_chain_selector >= target_parents.len() || visited[target_chain_selector] {
+                return None;
+            }
+            visited[target_chain_selector] = true;
+            target_ancestor_mask[target_chain_selector / 32] |=
+                1u32 << (target_chain_selector & 31);
+            let parent = target_parents[target_chain_selector];
+            if parent == u16::MAX {
+                break;
+            }
+            target_chain_selector = parent as usize;
+        }
+    }
+
+    for source_selector in 0..selectors.len() {
+        if selectors[source_selector] != u8::MAX {
+            continue;
+        }
+        let parent = source_parents[source_selector];
+        selectors[source_selector] = if parent == u16::MAX {
+            0
+        } else {
+            let parent = parent as usize;
+            if parent >= source_selector || parent >= selectors.len() {
+                return None;
+            }
+            selectors[parent]
+        };
+    }
+
+    Some(NativeBoneRemap {
+        selectors,
+        target_ancestor_mask,
+    })
+}
+
+fn bind_pose_bone_poses(skin: &EXGeoBaseAnimSkin) -> Vec<AnimationBonePose> {
+    skin.relative_bind_positions
         .iter()
         .map(|position| AnimationBonePose {
             position: Vec3::new(position[0], position[1], position[2]),
             rotation: Quat::IDENTITY,
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+pub(crate) fn bind_pose_global_bone_matrices(skin: &EXGeoBaseAnimSkin) -> Option<Vec<Mat4>> {
+    let poses = bind_pose_bone_poses(skin);
+    build_global_bone_matrices(skin, &poses)
+}
+
+pub(crate) fn bind_pose_skin_matrices(skin: &EXGeoBaseAnimSkin) -> Option<Vec<Mat4>> {
+    let poses = bind_pose_bone_poses(skin);
     build_skin_matrices(skin, &poses)
+}
+
+pub(crate) fn build_global_bone_matrices(
+    skin: &EXGeoBaseAnimSkin,
+    poses: &[AnimationBonePose],
+) -> Option<Vec<Mat4>> {
+    let parents = skin
+        .hier_data
+        .iter()
+        .map(|hierarchy| hierarchy.link_index)
+        .collect::<Vec<_>>();
+    build_global_bone_matrices_from_data(&parents, poses)
 }
 
 pub(crate) fn build_skin_matrices(
@@ -33,30 +145,29 @@ pub(crate) fn build_skin_matrices(
         .iter()
         .map(|position| Vec3::new(position[0], position[1], position[2]))
         .collect::<Vec<_>>();
-    let parents = skin
-        .hier_data
-        .iter()
-        .map(|hierarchy| hierarchy.link_index)
-        .collect::<Vec<_>>();
-    build_skin_matrices_from_data(&absolute_bind_positions, &parents, poses)
+    let globals = build_global_bone_matrices(skin, poses)?;
+    if absolute_bind_positions.len() != globals.len() {
+        return None;
+    }
+    Some(
+        globals
+            .into_iter()
+            .zip(absolute_bind_positions)
+            .map(|(global, absolute_bind)| global * Mat4::from_translation(-absolute_bind))
+            .collect(),
+    )
 }
 
+#[cfg(test)]
 fn build_skin_matrices_from_data(
     absolute_bind_positions: &[Vec3],
     parents: &[u16],
     poses: &[AnimationBonePose],
 ) -> Option<Vec<Mat4>> {
-    let bone_count = poses.len();
-    if absolute_bind_positions.len() != bone_count || parents.len() != bone_count {
+    let globals = build_global_bone_matrices_from_data(parents, poses)?;
+    if absolute_bind_positions.len() != globals.len() {
         return None;
     }
-
-    let mut globals = vec![Mat4::IDENTITY; bone_count];
-    let mut states = vec![0u8; bone_count];
-    for bone_index in 0..bone_count {
-        resolve_global_bone(bone_index, parents, poses, &mut globals, &mut states)?;
-    }
-
     Some(
         globals
             .into_iter()
@@ -64,6 +175,22 @@ fn build_skin_matrices_from_data(
             .map(|(global, absolute_bind)| global * Mat4::from_translation(-*absolute_bind))
             .collect(),
     )
+}
+
+fn build_global_bone_matrices_from_data(
+    parents: &[u16],
+    poses: &[AnimationBonePose],
+) -> Option<Vec<Mat4>> {
+    let bone_count = poses.len();
+    if parents.len() != bone_count {
+        return None;
+    }
+    let mut globals = vec![Mat4::IDENTITY; bone_count];
+    let mut states = vec![0u8; bone_count];
+    for bone_index in 0..bone_count {
+        resolve_global_bone(bone_index, parents, poses, &mut globals, &mut states)?;
+    }
+    Some(globals)
 }
 
 fn resolve_global_bone(
@@ -183,6 +310,30 @@ pub(crate) fn skin_vertices_with_morph(
     Some(())
 }
 
+/// Applies one current global bone matrix to rigid bone-attached Entity geometry.
+/// Robots.exe 0x00500814 uses the selected bone matrix directly for AnimSkin +0x78
+/// records, without the inverse-bind correction used by skinned component vertices.
+pub(crate) fn transform_vertices_rigid(
+    original: &[UXVertex],
+    output: &mut [UXVertex],
+    bone_global: Mat4,
+) -> Option<()> {
+    if original.len() != output.len() || !bone_global.is_finite() {
+        return None;
+    }
+    output.clone_from_slice(original);
+    for (source, target) in original.iter().zip(output.iter_mut()) {
+        target.pos = bone_global
+            .transform_point3(Vec3::from_array(source.pos))
+            .to_array();
+        target.norm = bone_global
+            .transform_vector3(Vec3::from_array(source.norm))
+            .normalize_or_zero()
+            .to_array();
+    }
+    Some(())
+}
+
 pub(crate) fn matrix_max_abs_difference(left: Mat4, right: Mat4) -> f32 {
     left.to_cols_array()
         .into_iter()
@@ -244,6 +395,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_bone_remap_matches_direct_ids_parent_fallback_and_target_mask() {
+        let source_names = [
+            Some(0x0E00_0001),
+            Some(0x0E00_0002),
+            None,
+            Some(0x0E00_0003),
+        ];
+        let source_parents = [u16::MAX, 0, 1, 1];
+        let target_names = [
+            Some(0x0E00_0001),
+            Some(0x0E00_0002),
+            Some(0x0E00_0003),
+            None,
+        ];
+        let target_parents = [u16::MAX, 0, 1, 2];
+
+        let remap = build_native_bone_remap(
+            &source_names,
+            &source_parents,
+            &target_names,
+            &target_parents,
+        )
+        .expect("valid native remap");
+
+        assert_eq!(remap.selectors, vec![0, 1, 1, 2]);
+        assert_eq!(remap.target_ancestor_mask, [0b111, 0, 0, 0]);
+    }
+
+    #[test]
+    fn native_bone_remap_rejects_duplicate_target_animbone_ids() {
+        let source_names = [Some(0x0E00_0001)];
+        let source_parents = [u16::MAX];
+        let target_names = [Some(0x0E00_0001), Some(0x0E00_0001)];
+        let target_parents = [u16::MAX, 0];
+        assert!(build_native_bone_remap(
+            &source_names,
+            &source_parents,
+            &target_names,
+            &target_parents,
+        )
+        .is_none());
+    }
+
     fn test_vertex() -> UXVertex {
         UXVertex {
             pos: [0.0, 0.0, 0.0],
@@ -251,6 +446,21 @@ mod tests {
             uv: [0.25, 0.75],
             color: [1.0, 0.5, 0.25, 1.0],
         }
+    }
+
+    #[test]
+    fn rigid_bone_attachment_uses_global_matrix_without_inverse_bind() {
+        let mut vertex = test_vertex();
+        vertex.pos = [1.0, 0.0, 0.0];
+        let original = [vertex];
+        let mut output = [vertex];
+        let global = Mat4::from_translation(Vec3::new(10.0, 2.0, 0.0))
+            * Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        transform_vertices_rigid(&original, &mut output, global).expect("valid rigid transform");
+        assert!(Vec3::from_array(output[0].pos).distance(Vec3::new(10.0, 3.0, 0.0)) <= 1.0e-6);
+        assert!(Vec3::from_array(output[0].norm).distance(Vec3::new(0.0, 0.0, 1.0)) <= 1.0e-6);
+        assert_eq!(output[0].uv, original[0].uv);
+        assert_eq!(output[0].color, original[0].color);
     }
 
     #[test]
