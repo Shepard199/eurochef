@@ -13,12 +13,18 @@ members = [
 edition = "2021"
 rust-version = "1.97"
 
+# Keep build artifacts bounded. Incremental caches are disabled for every profile.
+[profile.dev]
+incremental = false
+
 [profile.dev.package.image]
 opt-level = 3
 
 [profile.dev.package."*"]
 opt-level = 2
 
+# Release incremental generations were the main source of unbounded target growth.
 [profile.release]
+incremental = false
 opt-level = 2 # fast and small wasm
 lto = true

@@ -123,7 +123,7 @@ impl MapFrame {
                                 ))
                                 .on_hover_ui(|ui| {
                                     ui.label("Spatial world-light triangles are reconstructed from MapZone geometry and vertex colours.");
-                                    ui.label("Serialized EXGeoIdentifier.ambience values are retained per exact zone but are not applied until an arithmetic consumer is proven.");
+                                    ui.label("EXGeoIdentifier.ambience is retained as serialized provenance. All 351 shipped Robots MapZones store the exact identity value 1.0; no native rendering consumer of identifier +0x14 was recovered, so it is intentionally not part of lighting uniforms.");
                                     for (index, zone) in current_map.zones.iter().enumerate().take(16) {
                                         ui.monospace(format!(
                                             "zone {} ambience={:.6} lights={} sounds={}",
@@ -237,15 +237,19 @@ impl MapFrame {
                                 }
                                 if let Some(runtime) = self.native_camera_runtime.as_ref() {
                                     ui.monospace(format!(
-                                        "viewport pose: pos={:?} target={:?} VFOV={:.3} rate={:.3}",
+                                        "viewport pose: pos={:?} target={:?} VFOV={:.3} roll={:.3} rate={:.3}",
                                         runtime.current.position,
                                         runtime.current.target,
                                         runtime.current.vertical_fov_degrees,
+                                        runtime.current.roll_degrees,
                                         runtime.interpolation_rate,
                                     ));
                                     ui.monospace(format!(
-                                        "player anchor={:?} interpolation={}",
-                                        runtime.player_anchor, runtime.interpolating,
+                                        "player anchor={:?} interpolation={} mode4 parameter={:?} F0={:?}",
+                                        runtime.player_anchor,
+                                        runtime.interpolating,
+                                        runtime.mode4_parameter(),
+                                        runtime.mode4_direction_scalar(),
                                     ));
                                     if let Some(boundary) = runtime.boundary {
                                         ui.colored_label(
@@ -255,7 +259,7 @@ impl MapFrame {
                                     }
                                 }
                                 ui.small(
-                                    "Mode 0/3 viewport pose, player target offset, SetVFOV and interpolation are native. Mode 4 stays diagnostic until path traversal is instruction-proven.",
+                                    "Mode 0/3 and shipped mode-4 XPath_Spline viewport pose, SetVFOV, dynamic path follow and interpolation are native. Mode 1/2 gameplay controller state remains unresolved; editor player anchor is still the static map player marker.",
                                 );
                             } else {
                                 ui.monospace("Active XTrigger_Camera: stale or invalid controller plan");

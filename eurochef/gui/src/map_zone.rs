@@ -13,8 +13,7 @@ fn robots_map_zone_index_from_bsp(
     let mut node_index = 0usize;
     for _ in 0..=0x1_0000 {
         let (plane, children) = node_at(node_index)?;
-        let distance =
-            point.x * plane[0] + point.y * plane[1] + point.z * plane[2] + plane[3];
+        let distance = point.x * plane[0] + point.y * plane[1] + point.z * plane[2] + plane[3];
         let child = children[usize::from(distance < 0.0)];
         if child > 0 {
             node_index = child as usize;

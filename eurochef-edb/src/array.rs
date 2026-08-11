@@ -217,7 +217,6 @@ impl<T: BinRead> BinWrite for EXRelArray<T> {
     }
 }
 
-// FIXME: into_iter consumes, we dont/shouldnt consume
 impl<'a, T: BinRead> IntoIterator for &'a EXRelArray<T> {
     type Item = &'a T;
     type IntoIter = Iter<'a, T>;

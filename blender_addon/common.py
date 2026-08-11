@@ -2,9 +2,9 @@ import bpy
 
 
 def relink_object(object: bpy.types.Object, new_collection: bpy.types.Collection):
-    # Unlink object from all collections and link it to a new one
-    for c in object.users_collection:
-        c.objects.unlink(object)
+    # Unlink object from all collections and link it to a new one.
+    for collection in list(object.users_collection):
+        collection.objects.unlink(object)
 
     new_collection.objects.link(object)
 
@@ -16,13 +16,25 @@ def create_srgb_node_group():
     group = bpy.data.node_groups.new('srgbApprox', 'ShaderNodeTree')
     group_inputs = group.nodes.new('NodeGroupInput')
     group_inputs.location = (-350, 0)
-    group.inputs.new('NodeSocketColor', 'color_input')
 
     group_outputs = group.nodes.new('NodeGroupOutput')
     group_outputs.location = (350, 0)
-    group.outputs.new('NodeSocketColor', 'color_output')
 
-    split_rgb = group.nodes.new('ShaderNodeSeparateRGB')
+    # Blender 4 moved node-group sockets to NodeTree.interface. Keep the old
+    # path for Blender 2.8-3.x because this addon predates that API change.
+    if hasattr(group, 'interface'):
+        group.interface.new_socket(
+            name='color_input', in_out='INPUT', socket_type='NodeSocketColor')
+        group.interface.new_socket(
+            name='color_output', in_out='OUTPUT', socket_type='NodeSocketColor')
+    else:
+        group.inputs.new('NodeSocketColor', 'color_input')
+        group.outputs.new('NodeSocketColor', 'color_output')
+
+    try:
+        split_rgb = group.nodes.new('ShaderNodeSeparateColor')
+    except RuntimeError:
+        split_rgb = group.nodes.new('ShaderNodeSeparateRGB')
     split_rgb.location = (-200, 0)
 
     power_r = group.nodes.new('ShaderNodeMath')
@@ -40,7 +52,10 @@ def create_srgb_node_group():
     power_b.location = (0, -100)
     power_b.inputs[1].default_value = 2.2
 
-    combine_rgb = group.nodes.new('ShaderNodeCombineRGB')
+    try:
+        combine_rgb = group.nodes.new('ShaderNodeCombineColor')
+    except RuntimeError:
+        combine_rgb = group.nodes.new('ShaderNodeCombineRGB')
     combine_rgb.location = (200, 0)
 
     group.links.new(group_inputs.outputs[0], split_rgb.inputs[0])

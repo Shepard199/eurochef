@@ -3,7 +3,6 @@ protocol = "sparse"
 
 [build]
 target-dir = "target"
-incremental = true
 
 # swy: stop depending on vcruntimeXX.dll, doesn't really add any noticeable weight to the final binaries:
 #      https://docs.rs/static_vcruntime/latest/static_vcruntime/#issues

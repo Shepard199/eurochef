@@ -6,3 +6,5 @@
 - Keep dependency-resolving commands locked. `CARGO.cmd` adds `--locked` to build/check/test/clippy/run/bench automatically.
 - Never run `cargo clean` or delete `target`, `.cargo-local/registry`, or Cargo health/context markers unless the user explicitly requests a clean rebuild.
 - A local source edit may rebuild the affected EuroChef workspace crate. It must not rebuild third-party registry crates because their source path changed.
+- Keep incremental compilation disabled for every profile so `target\debug\incremental` and `target\release\incremental` cannot grow without bound.
+- Never set `CARGO_INCREMENTAL=1`. The workspace profile policy in the root `Cargo.toml` is authoritative.

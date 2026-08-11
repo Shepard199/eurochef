@@ -36,6 +36,7 @@ pub struct NativeViewCamera {
     pub position: Vec3,
     pub target: Vec3,
     pub vertical_fov_degrees: f32,
+    pub roll_degrees: f32,
 }
 
 impl NativeViewCamera {
@@ -44,7 +45,13 @@ impl NativeViewCamera {
             position,
             target,
             vertical_fov_degrees,
+            roll_degrees: 0.0,
         }
+    }
+
+    pub fn with_roll(mut self, roll_degrees: f32) -> Self {
+        self.roll_degrees = roll_degrees;
+        self
     }
 
     fn direction(self) -> Vec3 {
@@ -61,8 +68,13 @@ impl NativeViewCamera {
         } else {
             Vec3::Y
         };
-        let right = requested_up.cross(forward).normalize_or_zero();
-        let up = forward.cross(right).normalize_or_zero();
+        let mut right = requested_up.cross(forward).normalize_or_zero();
+        let mut up = forward.cross(right).normalize_or_zero();
+        if self.roll_degrees != 0.0 {
+            let roll = Quat::from_axis_angle(forward, self.roll_degrees.to_radians());
+            right = roll * right;
+            up = roll * up;
+        }
         (right, up, forward)
     }
 }
@@ -395,6 +407,14 @@ mod tests {
         assert!((camera.vertical_fov_radians().unwrap() - 60.0f32.to_radians()).abs() < 1.0e-6);
         let expected_forward = (target - position).normalize();
         assert!((camera.rotation() * Vec3::Z).distance(expected_forward) < 1.0e-5);
+    }
+
+    #[test]
+    fn native_view_camera_applies_mode_four_bank_as_degrees_about_forward() {
+        let camera = NativeViewCamera::new(Vec3::ZERO, Vec3::Z, 45.0).with_roll(90.0);
+        let rotation = camera.rotation();
+        assert!((rotation * Vec3::Z).distance(Vec3::Z) < 1.0e-6);
+        assert!((rotation * Vec3::Y).distance(-Vec3::X) < 1.0e-5);
     }
 
     #[test]

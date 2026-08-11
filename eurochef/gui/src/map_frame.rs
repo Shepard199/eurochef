@@ -473,48 +473,10 @@ fn map_sky_selection(
     })
 }
 
-// Captured from the City runtime sky root (0x84000019 -> 0x82000030).
-// Ghidra finds no literal 0x3FD851E6 in Robots.exe, and the generic ownerless
-// animator constructor at 0x004ECA89 starts from identity. Keep this as a
-// corpus-specific compatibility factor until its producer transform is proven.
-const ROBOTS_CAPTURED_CITY_SKY_SCALE_FACTOR: f32 = f32::from_bits(0x3FD8_51E6);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MapSkyEntityClass {
-    NativeScaledBaseRoot,
-    Ordinary,
-}
-
-fn map_sky_entity_class(entity_flags: u32, base_sky_root: bool) -> MapSkyEntityClass {
-    if base_sky_root && entity_flags & 0x100 != 0 {
-        MapSkyEntityClass::NativeScaledBaseRoot
-    } else {
-        MapSkyEntityClass::Ordinary
-    }
-}
-
-/// Native Script submit (`0x004FAC68`) composes the Script matrix with the
-/// parent matrix once and passes that same matrix to every child animator.
-/// `EXGeoBaseEntity.flags & 0x10` never changes this transform; its proven
-/// meaning is per-entity fog disable. The only remaining transform special case
-/// is the captured City base-root scale whose producer is still unresolved.
-fn map_sky_entity_transform(
-    _root_translation: Vec3,
-    scripted_position: Vec3,
-    scripted_scale: Vec3,
-    entity_flags: u32,
-    base_sky_root: bool,
-) -> (Vec3, Vec3, MapSkyEntityClass) {
-    let class = map_sky_entity_class(entity_flags, base_sky_root);
-    match class {
-        MapSkyEntityClass::NativeScaledBaseRoot => (
-            scripted_position,
-            scripted_scale * ROBOTS_CAPTURED_CITY_SKY_SCALE_FACTOR,
-            class,
-        ),
-        MapSkyEntityClass::Ordinary => (scripted_position, scripted_scale, class),
-    }
-}
+// Native Script submit (`0x004FAC68`) composes the Script matrix with the parent
+// matrix once and passes that same matrix to every child animator. No serialized
+// Entity flag adds a sky-specific transform. The former 1.68999934 City scale
+// compatibility path was traced to h01_main.edb:0x04000001, not m02_city sky data.
 
 #[cfg(test)]
 fn map_sky_objects(
@@ -953,12 +915,12 @@ impl MapFrame {
 #[cfg(test)]
 mod tests {
     use super::{
-        map_script_time, map_sky_entity_transform, map_sky_objects, pickbuffer_pixel_position,
+        map_script_time, map_sky_objects, map_sky_selection, pickbuffer_pixel_position,
         robots_merge_visual_zone_depth, robots_sky_cache_activate, robots_sky_cache_begin_frame,
         robots_sky_cache_mark_pending, robots_stream_resource_mask,
-        robots_update_zone_runtime_state, robots_zone_resource_ready, MapSkyEntityClass,
-        MapSkySelection, MapSkyZoneState, NativeMapZoneRuntimeState, NativeSkyCacheEntry,
-        QueuedEntityRender, ROBOTS_TRIGGER_INFO, TRIGGER_ICON_DATA,
+        robots_update_zone_runtime_state, robots_zone_resource_ready, MapSkySelection,
+        MapSkyZoneState, NativeMapZoneRuntimeState, NativeSkyCacheEntry, QueuedEntityRender,
+        ROBOTS_TRIGGER_INFO, TRIGGER_ICON_DATA,
     };
     use crate::map_runtime::{
         apply_vehicle_steering_wheel_angle, closest_route_phase, map_trigger_link_index,
@@ -1498,44 +1460,6 @@ mod tests {
     }
 
     #[test]
-    fn map_sky_keeps_native_parent_transform_and_only_scales_the_captured_base_root() {
-        let parent_translation = Vec3::new(100.0, 20.0, -40.0);
-        let command_translation = Vec3::new(-53.0, -5.0, 18.0);
-        let scripted = parent_translation + command_translation;
-        let scripted_scale = Vec3::new(2.0, 3.0, 4.0);
-
-        // Serialized Entity flag 0x10 is NoFog. It must not cancel or invent
-        // any part of the Script parent matrix.
-        let (position, scale, class) =
-            map_sky_entity_transform(parent_translation, scripted, scripted_scale, 0x10, false);
-        assert_eq!(class, MapSkyEntityClass::Ordinary);
-        assert_eq!(position, scripted);
-        assert_eq!(scale, scripted_scale);
-
-        let (position, scale, class) =
-            map_sky_entity_transform(parent_translation, scripted, scripted_scale, 0x300, true);
-        assert_eq!(class, MapSkyEntityClass::NativeScaledBaseRoot);
-        assert_eq!(position, scripted);
-        assert_eq!(
-            scale,
-            scripted_scale * super::ROBOTS_CAPTURED_CITY_SKY_SCALE_FACTOR
-        );
-
-        for flags in [0, 0x10, 0x100, 0x300, 0x4000_0000] {
-            let (position, scale, class) = map_sky_entity_transform(
-                parent_translation,
-                scripted,
-                scripted_scale,
-                flags,
-                false,
-            );
-            assert_eq!(class, MapSkyEntityClass::Ordinary, "flags=0x{flags:08X}");
-            assert_eq!(position, scripted);
-            assert_eq!(scale, scripted_scale);
-        }
-    }
-
-    #[test]
     fn map_sky_uses_the_native_selected_zone_and_preserves_override() {
         let skies = [0x8400_0019, 0x8400_0017, 0x8400_0035, 0x8400_0018];
         let zones = [
@@ -1644,6 +1568,155 @@ mod tests {
         let camera = Vec3::new(12.0, 34.0, -56.0);
         let selection = super::map_sky_selection("", &skies, &zones, &[0], camera).unwrap();
         assert_eq!(selection.root_translation, Vec3::ZERO);
+    }
+
+    #[test]
+    fn real_m04_cour_visual_exclusion_and_resource_sharing_when_requested() {
+        let Ok(path) = std::env::var("EUROCHEF_REAL_M04_COUR_EDB") else {
+            return;
+        };
+        let file = File::open(&path).expect("m04_cour fixture is missing");
+        let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+            .expect("m04_cour fixture is not a valid PC EDB");
+        let maps = read_from_file(&mut edb);
+        let map = maps.first().expect("m04_cour map is missing");
+        assert_eq!(map.skies, [0x8400_001D, 0x8400_001E, 0x8200_003D]);
+
+        let sky_zones = map
+            .zones
+            .iter()
+            .map(|zone| MapSkyZoneState {
+                bounds_min: Vec3::from(zone.bounds_box[0]),
+                bounds_max: Vec3::from(zone.bounds_box[1]),
+                sky_index: zone.identifier.sky_index,
+                identifier_flags: zone.identifier.flags,
+                sky_anchor_y: zone.identifier.sky_anchor_y,
+            })
+            .collect::<Vec<_>>();
+
+        let cases: &[(usize, u32, &[usize], f32, usize, &[usize], &[usize])] = &[
+            (
+                7,
+                0x0000_3800,
+                &[7, 8, 9, 10],
+                90.0,
+                42,
+                &[7, 8, 9, 10],
+                &[7, 8, 9, 10, 11],
+            ),
+            (
+                8,
+                0x0000_3800,
+                &[7, 8, 9, 10, 11],
+                60.0,
+                40,
+                &[8, 7, 9, 10],
+                &[8, 7, 9, 10, 11],
+            ),
+            (
+                9,
+                0x0000_3000,
+                &[7, 8, 9, 10, 11, 12],
+                60.0,
+                37,
+                &[9, 8, 10, 11],
+                &[9, 8, 10, 11, 12],
+            ),
+            (
+                11,
+                0x0000_0080,
+                &[8, 9, 10, 11, 12, 13],
+                90.0,
+                38,
+                &[11, 12, 10, 9, 8],
+                &[11, 12, 10, 9, 8, 7],
+            ),
+            (
+                12,
+                0x0000_0380,
+                &[9, 10, 11, 12, 13],
+                60.0,
+                31,
+                &[12, 13, 11, 10],
+                &[12, 13, 11, 10, 9],
+            ),
+            (
+                13,
+                0x0000_0380,
+                &[10, 11, 12, 13],
+                90.0,
+                29,
+                &[13, 12, 11, 10],
+                &[13, 12, 11, 10, 9],
+            ),
+        ];
+
+        for &(
+            zone_index,
+            exclusion_word,
+            expected_streaming,
+            fov_deg,
+            yaw_step,
+            expected_masked,
+            expected_unmasked,
+        ) in cases
+        {
+            let zone = &map.zones[zone_index];
+            let camera = (Vec3::from(zone.bounds_box[0]) + Vec3::from(zone.bounds_box[1])) * 0.5;
+            assert_eq!(map.native_zone_index(camera), Some(zone_index));
+            assert_eq!(zone.identifier.sky_index, 1);
+            assert_eq!(zone.identifier.flags, 0x0001_0000);
+            assert_eq!(zone.zone_resource_ref, 0x0800_0004);
+            assert_eq!(zone.stream_resource_mask, [0x0000_0010, 0, 0, 0]);
+            assert_eq!(zone.visual_zone_exclusion_mask[0], exclusion_word);
+            assert_eq!(zone.visual_zone_exclusion_mask[1..], [0; 7]);
+
+            let streaming = map.native_streaming_request_zone_indices(camera);
+            assert_eq!(streaming, expected_streaming);
+            let ready = robots_stream_resource_mask(map, &streaming);
+            assert_eq!(ready, [0x0000_0010, 0, 0, 0]);
+            let ready_zones = map
+                .zones
+                .iter()
+                .enumerate()
+                .filter_map(|(index, zone)| {
+                    robots_zone_resource_ready(zone.zone_resource_ref, &ready).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(ready_zones, [7, 8, 9, 10, 11, 12, 13]);
+
+            let yaw = yaw_step as f32 * std::f32::consts::TAU / 72.0;
+            let direction = Vec3::new(yaw.sin(), 0.0, -yaw.cos());
+            let view = glam::camera::rh::view::look_at_mat4(camera, camera + direction, Vec3::Y);
+            let mut projection = glam::camera::rh::proj::directx::perspective(
+                fov_deg.to_radians(),
+                16.0 / 9.0,
+                0.02,
+                2000.0,
+            );
+            projection.x_axis = -projection.x_axis;
+            let view_projection = projection * view;
+
+            let masked = map.native_visual_zone_indices(camera, view_projection);
+            assert_eq!(masked, expected_masked);
+            assert!(masked.iter().all(|target_zone| {
+                zone.visual_zone_exclusion_mask[target_zone / 32] & (1u32 << (target_zone & 31))
+                    == 0
+            }));
+
+            let mut unmasked_map = map.clone();
+            unmasked_map.zones[zone_index].visual_zone_exclusion_mask = [0; 8];
+            let unmasked = unmasked_map.native_visual_zone_indices(camera, view_projection);
+            assert_eq!(unmasked, expected_unmasked);
+            assert_ne!(masked, unmasked);
+
+            let selection = map_sky_selection("", &map.skies, &sky_zones, &masked, camera)
+                .expect("Courtyard masked zone must keep its serialized sky");
+            assert_eq!(selection.zone_index, Some(zone_index));
+            assert_eq!(selection.sky_index, Some(1));
+            assert_eq!(selection.object, 0x8400_001E);
+            assert_eq!(selection.root_translation, Vec3::ZERO);
+        }
     }
 
     #[test]

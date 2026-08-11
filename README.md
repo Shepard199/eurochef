@@ -94,15 +94,27 @@ Serialized EDB decoding itself does not depend on executable addresses.
   `77/77` character triggers resolve to an existing external EDB, Script and
   mesh closure (DogBot, SawBot, JailBot, TurretBot, Spider, Ticket Clerk,
   PiranhaBot, and more).
-* **`EXGeoMap.skies` zone-selected sky assemblies** are rendered natively:
-  the exact per-`MapZone` AABB selector (serialized order, zone-0 fallback,
-  `-1` = no assembly) picks the active sky Script, camera-relative members
-  keep the inherited camera root while map-space facade members keep their
-  serialized transform, and a persistent background-only base sky now fills
-  zones that explicitly opt out of a foreground assembly (e.g. Hub1 zones
-  `29`/`30`). Sky geometry renders in a dedicated early unlit pass (with
-  depth writes preserved for map-space assemblies) so it neither fights
-  ordinary scene lighting nor gets overdrawn by its own children.
+* **`EXGeoMap.skies` runtime sky assemblies** now follow the recovered native
+  lifecycle instead of an editor fallback. `0x004EC2AA` scans the ordered active
+  runtime zones and chooses the first `EXGeoIdentifier.sky_index >= 0`;
+  `0x004EC921` lazily creates/reuses that sky animator from `EXGeoMap.skies[]`,
+  while `0x0053B371` marks a deactivated zone's cached sky for removal and
+  `0x004ECB24` destroys the pending object.
+  Robots v248 also exposes the previously unparsed `EXGeoIdentifier +0x3C` float:
+  when `identifier.flags & 1` is set, the sky root uses the per-frame X/Z inputs
+  with this serialized fixed Y anchor; otherwise its root starts at identity.
+  The old unconditional `skies[0]` background fallback has been removed. The
+  GUI currently feeds the exact BSP-selected zone as its proven active-zone
+  set; full portal/streaming multi-zone activation remains an explicit runtime
+  boundary. Sky geometry still renders in the dedicated early unlit pass, with
+  depth writes preserved for map-space assemblies.
+
+
+
+
+
+
+
 * Triangle-strip flag `0x10` no longer hides geometry by default; visibility
   is controlled explicitly through the **`Geometry with strip flag 0x10`**
   Maps toggle, independent from the unrelated object-level sky flag.
@@ -115,6 +127,11 @@ Serialized EDB decoding itself does not depend on executable addresses.
 * Path-context is recovered (without inventing traversal) for Camera, Camera
   Marker, Watchbot, BossRatchet, Monster Transporter and Monster; a false
   BossSewer path match was instruction-proven and explicitly rejected.
+* Active shipped Camera modes `0/3` now drive the Maps viewport with their
+  exact Marker/Camera eye-target endpoints, preserve-current-Camera axis
+  flags, mode-3 player-anchor `+1.3`, native `45/60` degree vertical FOV and
+  fixed-60-Hz current-to-desired interpolation. The native override leaves
+  Orbit/Fly state untouched and restores it on Camera deactivation.
 * NPC (mission/tutorial/cutscene context) and Monster/Test/Fish
   (proximity/path/flag context) native trigger getters are recovered and
   shown as diagnostics.
@@ -300,9 +317,12 @@ Serialized EDB decoding itself does not depend on executable addresses.
   Player/input, Projectile damage, class-specific boss/interactive state
   machines) remain unresolved beyond structural descriptors, resolved
   runtime models and path/trigger context diagnostics.
-* Native Camera event ownership and controller plans are exposed, but exact
-  player-state interpolation/projection, portal/load transitions and native
-  zone fog/camera/effect composition are not yet simulated.
+* Native Camera ownership, shipped modes `0/3`, pose interpolation and VFOV
+  are implemented. Mode `4` remains diagnostic because its native controller
+  combines quaternion path sampling, live player state and controller offsets;
+  portal/load transitions and native zone fog/camera/effect composition are
+  not yet simulated.
+
 * Audio voice limits, priority replacement, exact PCAUDIO RNG, signed
   millisecond delays, random sample selection, MultiSample/Shuffled and
   Polyphonic scheduling are implemented. Cross-cycle negative-delay overlap,

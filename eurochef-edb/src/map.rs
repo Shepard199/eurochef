@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::{
     array::{EXGeoHashArray, EXRelArray},
-    common::{EXRelPtr, EXVector, EXVector2, EXVector3},
+    common::{EXRelPtr, EXRelPtr16, EXVector, EXVector2, EXVector3},
     edb::DatabaseReader,
     util::BitExtensions,
     Hashcode,
@@ -438,7 +438,7 @@ pub struct EXGeoPathNode {
     pub flags: u32,
     pub distance: f32,
     // #[br(count = num_links)]
-    pub path_links_table: EXRelPtr<(), i16>,
+    pub path_links_table: EXRelPtr16,
     pub num_links: u16,
 }
 

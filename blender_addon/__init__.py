@@ -1,11 +1,11 @@
 from . import ecm
 
 bl_info = {
-    "name": "Eurochef Utility",
+    "name": "EuroChef Utility",
     "author": "cohaereo",
-    "description": "Utility to work with Eurochef files",
+    "description": "Import EuroChef maps, expanded Robots scene data and deduplicated glTF resources",
     "blender": (2, 80, 0),
-    "version": (0, 0, 1),
+    "version": (0, 2, 0),
     "location": "File -> Import",
     "category": "Import-Export"
 }

@@ -290,10 +290,6 @@ impl EntityRenderer {
             .unwrap_or(true)
     }
 
-    pub fn entity_flags(&self) -> u32 {
-        self.flags
-    }
-
     #[cfg(test)]
     pub(crate) fn set_serialized_vertex_count_for_test(&mut self, vertex_count: usize) {
         self.serialized_vertex_count = Some(vertex_count);
@@ -559,9 +555,6 @@ impl EntityRenderer {
                             sample_position,
                         )
                     });
-                let zone_ambience = zone_index
-                    .and_then(|index| context.uniforms.native_light_zones.get(index))
-                    .map(|zone| zone.ambience);
                 let raw_world_sample = robots_world_light_sample(
                     &context.uniforms.native_lighting_triangles,
                     &context.uniforms.native_light_zones,
@@ -571,7 +564,6 @@ impl EntityRenderer {
                 let target_ambient = robots_transform_world_light_sample(
                     raw_world_sample,
                     global.level_coefficients,
-                    zone_ambience,
                 );
 
                 let mut target_slots = [RobotsDirectionalSlot::default(); 3];
@@ -1142,19 +1134,16 @@ mod tests {
                 bounds_min: Vec3::splat(-100.0),
                 bounds_max: Vec3::splat(100.0),
                 light_indices: vec![0, 2],
-                ambience: 0.0,
             },
             NativeLightZone {
                 bounds_min: Vec3::splat(-10.0),
                 bounds_max: Vec3::splat(10.0),
                 light_indices: vec![1],
-                ambience: 0.0,
             },
             NativeLightZone {
                 bounds_min: Vec3::splat(-1.0),
                 bounds_max: Vec3::splat(1.0),
                 light_indices: vec![3],
-                ambience: 0.0,
             },
         ];
         assert_eq!(containing_native_light_zone(&zones, Vec3::ZERO), Some(1));
@@ -1174,7 +1163,6 @@ mod tests {
             bounds_min: Vec3::splat(-10.0),
             bounds_max: Vec3::splat(10.0),
             light_indices: vec![5, 1, 2, 4, 3, 0],
-            ambience: 0.0,
         }];
         let selected = select_native_lights(&lights, &zones, None, Vec3::ZERO);
         assert_eq!(selected.len(), 3);

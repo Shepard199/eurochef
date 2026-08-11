@@ -107,6 +107,7 @@ The model FBX contains:
 - normals, UV0, RGBA vertex colors;
 - AnimSkin hierarchy and bind pose;
 - normalized source skin weights through `FbxSkin` and `FbxCluster`;
+- Robots v248 AnimSkin `+0x78` rigid Entity attachments as 100% single-bone clusters; attachment vertices are pre-positioned by the selected bone bind translation so FBX `current * inverse_bind` reproduces the native direct current-global-bone transform;
 - shipped Robots v248 mode-0 morph targets as `FbxBlendShape` channels, using the native Mesh directory ID 2 additive XYZ deltas;
 - no animation stack, embedded textures, generated tangents, or generated physics assets.
 

@@ -132,19 +132,20 @@ $env:CARGO_TARGET_DIR = $TargetDirectory
 $env:RUSTC = $RustcExe
 $env:RUSTDOC = $RustdocExe
 
-# Release builds deliberately do not use incremental compilation. Cargo never
-# garbage-collects old incremental generations, so keeping it enabled for this
-# large GUI made target\release\incremental grow without a useful bound.
-$LegacyReleaseIncremental = Join-Path $TargetDirectory 'release\incremental'
-if (Test-Path -LiteralPath $LegacyReleaseIncremental -PathType Container) {
+# Incremental compilation is disabled for every profile. Cargo never garbage-
+# collects old generations, so remove only obsolete incremental directories.
+# Dependency artifacts, build scripts and fingerprints remain untouched.
+foreach ($profileName in @('debug', 'release')) {
+    $LegacyIncremental = Join-Path $TargetDirectory "$profileName\incremental"
+    if (-not (Test-Path -LiteralPath $LegacyIncremental -PathType Container)) { continue }
     try {
-        Remove-Item -LiteralPath $LegacyReleaseIncremental -Recurse -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $LegacyIncremental -Recurse -Force -ErrorAction Stop
         if (-not $Quiet) {
-            Write-Host "Removed obsolete release incremental cache: $LegacyReleaseIncremental" -ForegroundColor DarkGray
+            Write-Host "Removed obsolete $profileName incremental cache: $LegacyIncremental" -ForegroundColor DarkGray
         }
     }
     catch {
-        Write-Warning "Could not remove obsolete release incremental cache: $LegacyReleaseIncremental. $($_.Exception.Message)"
+        Write-Warning "Could not remove obsolete $profileName incremental cache: $LegacyIncremental. $($_.Exception.Message)"
     }
 }
 
@@ -205,7 +206,7 @@ $Context = [ordered]@{
     rustfmt = $RustfmtExe
     targetDirectory = $TargetDirectory
     incremental = [ordered]@{
-        dev = $true
+        dev = $false
         release = $false
     }
     lockedDependencies = $true

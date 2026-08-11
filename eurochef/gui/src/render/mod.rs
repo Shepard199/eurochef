@@ -62,7 +62,6 @@ pub struct NativeLightZone {
     pub bounds_min: glam::Vec3,
     pub bounds_max: glam::Vec3,
     pub light_indices: Vec<usize>,
-    pub ambience: f32,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -181,7 +180,6 @@ pub fn robots_world_light_sample(
 pub fn robots_transform_world_light_sample(
     sample: glam::Vec3,
     coefficients: [f32; 6],
-    zone_ambience: Option<f32>,
 ) -> glam::Vec3 {
     let mut transformed = sample * coefficients[4];
     let magnitude = transformed.length();
@@ -191,11 +189,6 @@ pub fn robots_transform_world_light_sample(
     let energy = transformed.length();
     let achromatic = glam::Vec3::splat(energy * 0.577_350_26);
     transformed = transformed * coefficients[5] + achromatic * (1.0 - coefficients[5]);
-
-    // EXGeoIdentifier.ambience is carried with the exact containing MapZone, but no
-    // instruction-proven arithmetic consumer has been recovered yet. Preserve the value
-    // for diagnostics instead of silently inventing a multiplier.
-    let _ = zone_ambience;
     transformed.max(glam::Vec3::splat(coefficients[2]))
 }
 
@@ -446,7 +439,8 @@ impl RenderStore {
         })
     }
 
-    pub fn resolve_animskin_hashcode(
+    #[cfg(test)]
+    fn resolve_animskin_hashcode(
         &self,
         file: Hashcode,
         skin_hashcode: Hashcode,
@@ -728,7 +722,6 @@ mod tests {
             bounds_min: glam::Vec3::splat(-1.0),
             bounds_max: glam::Vec3::splat(2.0),
             light_indices: vec![],
-            ambience: 0.75,
         };
 
         let sample = robots_world_light_sample(
@@ -749,17 +742,11 @@ mod tests {
     }
 
     #[test]
-    fn world_light_transform_uses_proven_coefficients_but_not_unproven_zone_ambience() {
+    fn world_light_transform_uses_only_instruction_proven_level_coefficients() {
         let coefficients = [0.3, 10.0, 0.2, 1.5, 2.0, 1.0];
-        let without_ambience =
-            robots_transform_world_light_sample(glam::Vec3::new(0.1, 0.2, 0.3), coefficients, None);
-        let with_ambience = robots_transform_world_light_sample(
-            glam::Vec3::new(0.1, 0.2, 0.3),
-            coefficients,
-            Some(0.01),
-        );
-        assert!((without_ambience - glam::Vec3::new(0.2, 0.4, 0.6)).length() < 0.000_001);
-        assert_eq!(with_ambience, without_ambience);
+        let transformed =
+            robots_transform_world_light_sample(glam::Vec3::new(0.1, 0.2, 0.3), coefficients);
+        assert!((transformed - glam::Vec3::new(0.2, 0.4, 0.6)).length() < 0.000_001);
     }
 
     #[test]

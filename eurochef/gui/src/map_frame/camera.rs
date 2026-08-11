@@ -29,6 +29,7 @@ impl MapFrame {
 
         let needs_activation = self
             .native_camera_runtime
+            .as_ref()
             .is_none_or(|runtime| runtime.trigger_index != trigger_index);
 
         if needs_activation {
@@ -48,10 +49,15 @@ impl MapFrame {
                     .vertical_fov_radians()
                     .map(f32::to_degrees)
                     .unwrap_or(90.0),
+                roll_degrees: 0.0,
             };
             let player_anchor = Self::native_camera_player_anchor(map).unwrap_or(position);
-            self.native_camera_runtime =
-                Some(robots_camera_viewport_runtime(plan, current, player_anchor));
+            self.native_camera_runtime = Some(robots_camera_viewport_runtime(
+                map,
+                plan,
+                current,
+                player_anchor,
+            ));
             self.native_camera_last_time = Some(time);
         }
 
@@ -66,14 +72,19 @@ impl MapFrame {
             viewer.clear_native_camera();
             return;
         };
+        let player_anchor = Self::native_camera_player_anchor(map).unwrap_or(runtime.player_anchor);
+        runtime.update_dynamic_pose(player_anchor);
         runtime.advance(delta_seconds);
 
         if runtime.boundary.is_none() && runtime.current.is_finite() {
-            viewer.set_native_camera(NativeViewCamera::new(
-                runtime.current.position,
-                runtime.current.target,
-                runtime.current.vertical_fov_degrees,
-            ));
+            viewer.set_native_camera(
+                NativeViewCamera::new(
+                    runtime.current.position,
+                    runtime.current.target,
+                    runtime.current.vertical_fov_degrees,
+                )
+                .with_roll(runtime.current.roll_degrees),
+            );
         } else {
             viewer.clear_native_camera();
         }

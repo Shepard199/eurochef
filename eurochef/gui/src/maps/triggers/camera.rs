@@ -1,6 +1,6 @@
 use glam::Vec3;
 
-use crate::maps::{ProcessedMap, ProcessedTrigger};
+use crate::maps::{ProcessedMap, ProcessedPath, ProcessedTrigger};
 
 pub const TYPE: u32 = 1;
 pub const MARKER_TYPE: u32 = 20;
@@ -8,12 +8,23 @@ pub const MARKER_TYPE: u32 = 20;
 const NATIVE_TESTED_FLAG_MASK: u32 = 0x0000_03F7;
 const MODE4_OPTION_FLAG_MASK: u32 = 0x0000_0057;
 const NATIVE_FIXED_HZ: f32 = 60.0;
+const MODE4_DEFAULT_DISTANCE_SCALE: f32 = 6.4;
+const MODE4_TARGET_Y_OFFSET: f32 = 1.3;
+const MODE4_DISTANCE_MULTIPLIER: f32 = 5.0;
+const MODE4_PARAMETER_STEP: f32 = 0.1;
+const MODE4_DISTANCE_EPSILON: f32 = 0.001;
+const MODE4_BANK_SAMPLE_COUNT: usize = 16;
+const MODE4_BANK_SCALE: f32 = -1200.0;
+const MODE4_SPECIAL_MAP_HASHCODE: u32 = 0x0100_0073;
+const MODE4_SPECIAL_PATH_HASHCODE: u32 = 0x0B00_0001;
+const MODE4_SPECIAL_TARGET_Y_OFFSET: f32 = 0.23;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NativeCameraViewportPose {
     pub position: Vec3,
     pub target: Vec3,
     pub vertical_fov_degrees: f32,
+    pub roll_degrees: f32,
 }
 
 impl NativeCameraViewportPose {
@@ -21,6 +32,7 @@ impl NativeCameraViewportPose {
         self.position.is_finite()
             && self.target.is_finite()
             && self.vertical_fov_degrees.is_finite()
+            && self.roll_degrees.is_finite()
     }
 }
 
@@ -44,14 +56,354 @@ impl NativeCameraViewportBoundary {
                 "mode 2 gameplay controller position/target is unresolved"
             }
             Self::Mode4PathTraversalUnresolved => {
-                "mode 4 path binding is decoded, but native path traversal is unresolved"
+                "mode 4 path is missing or is not the shipped XPath_Spline class"
             }
             Self::UnknownMode(_) => "unknown native Camera mode",
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+struct NativeMode4Spline {
+    points: Vec<Vec3>,
+    second_derivatives: Vec<Vec3>,
+}
+
+impl NativeMode4Spline {
+    fn from_path(path: &ProcessedPath) -> Option<Self> {
+        if path.path_type != 0 || path.flags & 0x2000_0000 == 0 || path.nodes.is_empty() {
+            return None;
+        }
+
+        let points = path
+            .nodes
+            .iter()
+            .map(|node| node.position)
+            .collect::<Vec<_>>();
+        let mut second_derivatives = vec![Vec3::ZERO; points.len()];
+        if points.len() > 2 {
+            let interior = points.len() - 2;
+            let mut c_prime = vec![0.0f32; interior];
+            let mut d_prime = vec![Vec3::ZERO; interior];
+            for interior_index in 0..interior {
+                let i = interior_index + 1;
+                let rhs = (points[i + 1] - points[i] * 2.0 + points[i - 1]) * 6.0;
+                let denom = if interior_index == 0 {
+                    4.0
+                } else {
+                    4.0 - c_prime[interior_index - 1]
+                };
+                c_prime[interior_index] = if interior_index + 1 == interior {
+                    0.0
+                } else {
+                    1.0 / denom
+                };
+                d_prime[interior_index] = if interior_index == 0 {
+                    rhs / denom
+                } else {
+                    (rhs - d_prime[interior_index - 1]) / denom
+                };
+            }
+            for interior_index in (0..interior).rev() {
+                let i = interior_index + 1;
+                second_derivatives[i] = if interior_index + 1 == interior {
+                    d_prime[interior_index]
+                } else {
+                    d_prime[interior_index] - second_derivatives[i + 1] * c_prime[interior_index]
+                };
+            }
+        }
+
+        Some(Self {
+            points,
+            second_derivatives,
+        })
+    }
+
+    fn last_parameter(&self) -> f32 {
+        self.points.len().saturating_sub(1) as f32
+    }
+
+    fn sample(&self, parameter: f32) -> Vec3 {
+        if self.points.len() == 1 {
+            return self.points[0];
+        }
+        let parameter = parameter.max(0.0);
+        let last = self.last_parameter();
+        if parameter >= last {
+            return *self.points.last().unwrap_or(&Vec3::ZERO);
+        }
+        let lower = parameter.floor() as usize;
+        let upper = lower + 1;
+        let b = parameter - lower as f32;
+        let a = 1.0 - b;
+        let cubic_a = a * a * a - a;
+        let cubic_b = b * b * b - b;
+        self.points[lower] * a
+            + self.points[upper] * b
+            + (self.second_derivatives[lower] * cubic_a + self.second_derivatives[upper] * cubic_b)
+                * (1.0 / 6.0)
+    }
+
+    fn finite_difference(&self, parameter: f32, width: f32) -> Vec3 {
+        let half = width * 0.5;
+        self.sample(parameter + half) - self.sample(parameter - half)
+    }
+
+    fn nearest_node_index(&self, point: Vec3) -> usize {
+        self.points
+            .iter()
+            .enumerate()
+            .min_by(|(_, lhs), (_, rhs)| {
+                lhs.distance_squared(point)
+                    .total_cmp(&rhs.distance_squared(point))
+            })
+            .map(|(index, _)| index)
+            .unwrap_or_default()
+    }
+
+    fn advance_parameter_by_distance(&self, parameter: f32, distance: f32) -> f32 {
+        if distance == 0.0 || self.points.len() < 2 {
+            return parameter.clamp(0.0, self.last_parameter());
+        }
+        let direction = distance.signum();
+        let mut remaining = distance.abs();
+        let mut current_parameter = parameter.clamp(0.0, self.last_parameter());
+        let last = self.last_parameter();
+        while remaining > MODE4_DISTANCE_EPSILON {
+            let next_parameter = current_parameter + direction * MODE4_PARAMETER_STEP;
+            if next_parameter <= 0.0 || next_parameter >= last {
+                return next_parameter.clamp(0.0, last);
+            }
+            let current = self.sample(current_parameter);
+            let next = self.sample(next_parameter);
+            let segment_length = current.distance(next);
+            if segment_length <= f32::EPSILON {
+                current_parameter = next_parameter;
+                continue;
+            }
+            if remaining <= segment_length {
+                current_parameter +=
+                    direction * MODE4_PARAMETER_STEP * (remaining / segment_length).clamp(0.0, 1.0);
+                return current_parameter.clamp(0.0, last);
+            }
+            remaining -= segment_length;
+            current_parameter = next_parameter;
+        }
+        current_parameter.clamp(0.0, last)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct NativeMode4Runtime {
+    spline: NativeMode4Spline,
+    map_hashcode: u32,
+    path_hashcode: u32,
+    parameter: f32,
+    cached_point: Vec3,
+    direction_scalar: f32,
+    distance_scale: f32,
+    tangent_target: bool,
+    bank_enabled: bool,
+    fixed_start_tangent: bool,
+    last_target_yaw: f32,
+    bank_samples: [f32; MODE4_BANK_SAMPLE_COUNT],
+    bank_cursor: usize,
+    bank_sum: f32,
+}
+
+impl NativeMode4Runtime {
+    fn activation_direction_scalar(
+        spline: &NativeMode4Spline,
+        player_anchor: Vec3,
+        current: NativeCameraViewportPose,
+    ) -> f32 {
+        let index = spline.nearest_node_index(player_anchor);
+        let (from, to) = if index + 1 < spline.points.len() {
+            (spline.points[index], spline.points[index + 1])
+        } else if index > 0 {
+            (spline.points[index - 1], spline.points[index])
+        } else {
+            return 1.0;
+        };
+        let path_direction = (to - from).normalize_or_zero();
+        let camera_direction = (current.target - current.position).normalize_or_zero();
+        if path_direction.dot(camera_direction) <= 0.0 {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+
+    fn new(
+        map: &ProcessedMap,
+        path: &ProcessedPath,
+        plan: NativeCameraControllerPlan,
+        current: NativeCameraViewportPose,
+        player_anchor: Vec3,
+    ) -> Option<Self> {
+        let spline = NativeMode4Spline::from_path(path)?;
+        let nearest = spline.nearest_node_index(player_anchor);
+        let direction_scalar = if plan.mode4_option_flags & 0x02 != 0 {
+            Self::activation_direction_scalar(&spline, player_anchor, current)
+        } else {
+            -plan
+                .mode4_data7
+                .unwrap_or_default()
+                .round_ties_even()
+                .clamp(i16::MIN as f32, i16::MAX as f32)
+        };
+        let distance_scale = plan
+            .mode4_data6
+            .filter(|value| *value > 0.0)
+            .unwrap_or(MODE4_DEFAULT_DISTANCE_SCALE);
+        let parameter = nearest as f32;
+        let cached_point = spline.sample(parameter);
+        Some(Self {
+            spline,
+            map_hashcode: map.hashcode,
+            path_hashcode: path.hashcode,
+            parameter,
+            cached_point,
+            direction_scalar,
+            distance_scale,
+            tangent_target: plan.mode4_option_flags & 0x10 != 0,
+            bank_enabled: plan.mode4_option_flags & 0x04 != 0,
+            fixed_start_tangent: plan.mode4_option_flags & 0x40 != 0,
+            last_target_yaw: 0.0,
+            bank_samples: [0.0; MODE4_BANK_SAMPLE_COUNT],
+            bank_cursor: 0,
+            bank_sum: 0.0,
+        })
+    }
+
+    fn solve_position(&mut self, player_anchor: Vec3, previous_desired: Vec3) -> Vec3 {
+        if self.direction_scalar == 0.0 {
+            let tangent = self
+                .spline
+                .finite_difference(self.parameter, MODE4_PARAMETER_STEP)
+                * (1.0 / MODE4_PARAMETER_STEP);
+            let tangent_len_sq = tangent.length_squared();
+            if tangent_len_sq > f32::EPSILON {
+                self.parameter += (player_anchor - self.cached_point).dot(tangent) / tangent_len_sq;
+            }
+            self.parameter = self.parameter.clamp(0.0, self.spline.last_parameter());
+            self.cached_point = self.spline.sample(self.parameter);
+            return self.cached_point;
+        }
+
+        let tangent_parameter = if self.fixed_start_tangent {
+            0.0
+        } else {
+            self.parameter
+        };
+        let tangent = self
+            .spline
+            .finite_difference(tangent_parameter, 0.25)
+            .normalize_or_zero();
+        if tangent.length_squared() <= f32::EPSILON {
+            return self.spline.sample(self.parameter);
+        }
+        let plane_normal = -tangent;
+        let actual_distance = plane_normal.dot(player_anchor - previous_desired);
+        let wanted_distance =
+            MODE4_DISTANCE_MULTIPLIER * self.distance_scale * self.direction_scalar;
+        self.parameter = self
+            .spline
+            .advance_parameter_by_distance(self.parameter, wanted_distance - actual_distance);
+        self.cached_point = self.spline.sample(self.parameter);
+        self.cached_point
+    }
+
+    fn solve_target(&self, player_anchor: Vec3, desired_position: Vec3) -> Vec3 {
+        if self.map_hashcode == MODE4_SPECIAL_MAP_HASHCODE
+            && self.path_hashcode == MODE4_SPECIAL_PATH_HASHCODE
+        {
+            return Vec3::new(
+                desired_position.x,
+                desired_position.y - MODE4_SPECIAL_TARGET_Y_OFFSET,
+                desired_position.z + 1.0,
+            );
+        }
+        if self.tangent_target {
+            let tangent = self
+                .spline
+                .finite_difference(self.parameter, 1.0)
+                .normalize_or_zero();
+            let distance = -MODE4_DISTANCE_MULTIPLIER * self.distance_scale * self.direction_scalar;
+            return desired_position + tangent * distance;
+        }
+        player_anchor + Vec3::Y * MODE4_TARGET_Y_OFFSET
+    }
+
+    fn wrapped_angle_delta(previous: f32, current: f32) -> f32 {
+        let mut delta = current - previous;
+        while delta > std::f32::consts::PI {
+            delta -= std::f32::consts::TAU;
+        }
+        while delta < -std::f32::consts::PI {
+            delta += std::f32::consts::TAU;
+        }
+        delta
+    }
+
+    fn update_bank(&mut self, desired_position: Vec3, desired_target: Vec3) -> f32 {
+        if !self.bank_enabled {
+            return 0.0;
+        }
+        let delta = desired_target - desired_position;
+        let yaw = delta.x.atan2(delta.z);
+        let sample = Self::wrapped_angle_delta(self.last_target_yaw, yaw) * MODE4_BANK_SCALE;
+        self.last_target_yaw = yaw;
+        self.bank_sum -= self.bank_samples[self.bank_cursor];
+        self.bank_samples[self.bank_cursor] = sample;
+        self.bank_sum += sample;
+        self.bank_cursor = (self.bank_cursor + 1) % MODE4_BANK_SAMPLE_COUNT;
+        self.bank_sum / MODE4_BANK_SAMPLE_COUNT as f32
+    }
+
+    fn activate_pose(
+        &mut self,
+        current: NativeCameraViewportPose,
+        player_anchor: Vec3,
+    ) -> NativeCameraViewportPose {
+        let mut position = self.solve_position(player_anchor, current.position);
+        for _ in 0..10 {
+            let previous = position;
+            position = self.solve_position(player_anchor, position);
+            if previous.distance_squared(position) <= 0.01 {
+                break;
+            }
+        }
+        position = self.solve_position(player_anchor, position);
+        let target = self.solve_target(player_anchor, position);
+        let roll_degrees = self.update_bank(position, target);
+        NativeCameraViewportPose {
+            position,
+            target,
+            vertical_fov_degrees: 45.0,
+            roll_degrees,
+        }
+    }
+
+    fn update_pose(
+        &mut self,
+        previous_desired: NativeCameraViewportPose,
+        player_anchor: Vec3,
+    ) -> NativeCameraViewportPose {
+        let position = self.solve_position(player_anchor, previous_desired.position);
+        let target = self.solve_target(player_anchor, position);
+        let roll_degrees = self.update_bank(position, target);
+        NativeCameraViewportPose {
+            position,
+            target,
+            vertical_fov_degrees: 45.0,
+            roll_degrees,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct NativeCameraViewportRuntime {
     pub trigger_index: usize,
     pub mode: u32,
@@ -61,11 +413,12 @@ pub struct NativeCameraViewportRuntime {
     pub interpolating: bool,
     pub player_anchor: Vec3,
     pub boundary: Option<NativeCameraViewportBoundary>,
+    mode4: Option<NativeMode4Runtime>,
 }
 
 impl NativeCameraViewportRuntime {
     pub fn advance(&mut self, delta_seconds: f32) {
-        if !self.interpolating || self.boundary.is_some() {
+        if (!self.interpolating && self.mode != 4) || self.boundary.is_some() {
             return;
         }
 
@@ -86,6 +439,8 @@ impl NativeCameraViewportRuntime {
         self.current.target = self.current.target.lerp(self.desired.target, factor);
         self.current.vertical_fov_degrees +=
             (self.desired.vertical_fov_degrees - self.current.vertical_fov_degrees) * factor;
+        self.current.roll_degrees +=
+            (self.desired.roll_degrees - self.current.roll_degrees) * factor;
 
         if self
             .current
@@ -95,17 +450,37 @@ impl NativeCameraViewportRuntime {
             && self.current.target.distance_squared(self.desired.target) <= 1.0e-8
             && (self.current.vertical_fov_degrees - self.desired.vertical_fov_degrees).abs()
                 <= 1.0e-4
+            && (self.current.roll_degrees - self.desired.roll_degrees).abs() <= 1.0e-4
         {
             self.current = self.desired;
         }
     }
 
-    pub fn is_transitioning(self) -> bool {
-        self.interpolating
+    pub fn update_dynamic_pose(&mut self, player_anchor: Vec3) {
+        self.player_anchor = player_anchor;
+        if self.boundary.is_some() || self.mode != 4 {
+            return;
+        }
+        if let Some(mode4) = self.mode4.as_mut() {
+            self.desired = mode4.update_pose(self.desired, player_anchor);
+        }
+    }
+
+    pub fn mode4_parameter(&self) -> Option<f32> {
+        self.mode4.as_ref().map(|runtime| runtime.parameter)
+    }
+
+    pub fn mode4_direction_scalar(&self) -> Option<f32> {
+        self.mode4.as_ref().map(|runtime| runtime.direction_scalar)
+    }
+
+    pub fn is_transitioning(&self) -> bool {
+        (self.interpolating || self.mode == 4)
             && self.boundary.is_none()
             && (self.current.position != self.desired.position
                 || self.current.target != self.desired.target
-                || self.current.vertical_fov_degrees != self.desired.vertical_fov_degrees)
+                || self.current.vertical_fov_degrees != self.desired.vertical_fov_degrees
+                || self.current.roll_degrees != self.desired.roll_degrees)
     }
 }
 
@@ -117,7 +492,7 @@ fn native_mode_profile(mode: u32) -> Option<(f32, f32, f32)> {
         1 => (0.10, 0.0, 45.0),
         2 => (0.075, 0.0, 45.0),
         3 => (0.08, 1.3, 60.0),
-        4 => (0.08, 0.0, 45.0),
+        4 => (0.08, MODE4_TARGET_Y_OFFSET, 45.0),
         _ => return None,
     })
 }
@@ -278,6 +653,7 @@ pub fn controller_plan(
 }
 
 pub fn viewport_runtime(
+    map: &ProcessedMap,
     plan: NativeCameraControllerPlan,
     current: NativeCameraViewportPose,
     player_anchor: Vec3,
@@ -286,6 +662,7 @@ pub fn viewport_runtime(
         native_mode_profile(plan.mode).unwrap_or((0.0, 0.0, current.vertical_fov_degrees));
     let mut desired = current;
     desired.vertical_fov_degrees = vertical_fov_degrees;
+    let mut mode4 = None;
 
     let boundary = match plan.mode {
         0 => match plan.linked_marker_position {
@@ -313,7 +690,20 @@ pub fn viewport_runtime(
             }
             None => Some(NativeCameraViewportBoundary::MissingLinkedMarker),
         },
-        4 => Some(NativeCameraViewportBoundary::Mode4PathTraversalUnresolved),
+        4 => {
+            let native_runtime = plan
+                .path_hashcode
+                .and_then(|hashcode| map.paths.iter().find(|path| path.hashcode == hashcode))
+                .and_then(|path| NativeMode4Runtime::new(map, path, plan, current, player_anchor));
+            match native_runtime {
+                Some(mut runtime) => {
+                    desired = runtime.activate_pose(current, player_anchor);
+                    mode4 = Some(runtime);
+                    None
+                }
+                None => Some(NativeCameraViewportBoundary::Mode4PathTraversalUnresolved),
+            }
+        }
         value => Some(NativeCameraViewportBoundary::UnknownMode(value)),
     };
 
@@ -331,13 +721,16 @@ pub fn viewport_runtime(
         interpolating,
         player_anchor,
         boundary,
+        mode4,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::maps::ProcessedPathNode;
     use eurochef_edb::map::EXGeoTriggerEngineOptions;
+    use glam::Vec2;
 
     fn trigger(
         trigger_type: u32,
@@ -378,6 +771,29 @@ mod tests {
             position: Vec3::new(20.0, 8.0, -4.0),
             target: Vec3::new(21.0, 8.0, -4.0),
             vertical_fov_degrees: 90.0,
+            roll_degrees: 0.0,
+        }
+    }
+
+    fn spline_path(hashcode: u32, points: &[Vec3]) -> ProcessedPath {
+        ProcessedPath {
+            hashcode,
+            position: Vec3::ZERO,
+            flags: 0x2000_0000,
+            path_type: 0,
+            nodes: points
+                .iter()
+                .copied()
+                .map(|position| ProcessedPathNode {
+                    position,
+                    size: Vec2::ZERO,
+                    value: [0; 4],
+                    flags: 0,
+                    distance: 0.0,
+                    num_links: 0,
+                })
+                .collect(),
+            links: vec![],
         }
     }
 
@@ -455,6 +871,7 @@ mod tests {
         };
 
         let runtime = viewport_runtime(
+            &map,
             controller_plan(&map, 0).unwrap(),
             current_pose(),
             Vec3::ZERO,
@@ -481,7 +898,8 @@ mod tests {
             ..Default::default()
         };
         let current = current_pose();
-        let mut runtime = viewport_runtime(controller_plan(&map, 0).unwrap(), current, Vec3::ZERO);
+        let mut runtime =
+            viewport_runtime(&map, controller_plan(&map, 0).unwrap(), current, Vec3::ZERO);
 
         runtime.advance(1.0 / 60.0);
         assert!(
@@ -517,6 +935,7 @@ mod tests {
         };
         let player_anchor = Vec3::new(100.0, 2.0, -20.0);
         let runtime = viewport_runtime(
+            &map,
             controller_plan(&map, 0).unwrap(),
             current_pose(),
             player_anchor,
@@ -542,14 +961,15 @@ mod tests {
             ..Default::default()
         };
         let current = current_pose();
-        let runtime = viewport_runtime(controller_plan(&map, 0).unwrap(), current, Vec3::ZERO);
+        let runtime =
+            viewport_runtime(&map, controller_plan(&map, 0).unwrap(), current, Vec3::ZERO);
 
         assert_eq!(runtime.current.position, current.position);
         assert_eq!(runtime.current.target, Vec3::new(0.0, 1.3, 0.0));
     }
 
     #[test]
-    fn mode_four_viewport_remains_diagnostic_until_path_traversal_is_proven() {
+    fn mode_four_missing_path_keeps_the_native_viewport_disabled() {
         let mut data = camera_data(4, 1);
         data[1] = Some(0x0B00_0042);
         let camera = trigger(TYPE, Vec3::ZERO, data, vec![]);
@@ -558,7 +978,8 @@ mod tests {
             ..Default::default()
         };
         let current = current_pose();
-        let runtime = viewport_runtime(controller_plan(&map, 0).unwrap(), current, Vec3::ZERO);
+        let runtime =
+            viewport_runtime(&map, controller_plan(&map, 0).unwrap(), current, Vec3::ZERO);
 
         assert_eq!(runtime.current, current);
         assert_eq!(
@@ -566,6 +987,195 @@ mod tests {
             Some(NativeCameraViewportBoundary::Mode4PathTraversalUnresolved)
         );
         assert!(!runtime.is_transitioning());
+    }
+
+    #[test]
+    fn mode_four_xpath_spline_matches_native_natural_cubic_sampling() {
+        let path = spline_path(
+            0x0B00_0042,
+            &[
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+            ],
+        );
+        let spline = NativeMode4Spline::from_path(&path).unwrap();
+        let sample = spline.sample(0.5);
+        assert!((sample.x - 0.5).abs() < 1.0e-6);
+        assert!((sample.y - 0.6875).abs() < 1.0e-6);
+        assert_eq!(sample.z, 0.0);
+    }
+
+    #[test]
+    fn mode_four_distance_solver_uses_native_point_one_parameter_steps() {
+        let path = spline_path(
+            0x0B00_0042,
+            &[
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(10.0, 0.0, 0.0),
+                Vec3::new(20.0, 0.0, 0.0),
+                Vec3::new(30.0, 0.0, 0.0),
+            ],
+        );
+        let spline = NativeMode4Spline::from_path(&path).unwrap();
+        assert!((spline.advance_parameter_by_distance(1.0, 5.0) - 1.5).abs() < 1.0e-5);
+        assert!((spline.advance_parameter_by_distance(2.0, -5.0) - 1.5).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn mode_four_chase_activation_holds_native_distance_and_tangent_target() {
+        let mut data = camera_data(4, 0x10);
+        data[1] = Some(0x0B00_0042);
+        data[6] = Some(MODE4_DEFAULT_DISTANCE_SCALE.to_bits());
+        data[7] = Some(1.0f32.to_bits());
+        let camera = trigger(TYPE, Vec3::ZERO, data, vec![]);
+        let map = ProcessedMap {
+            paths: vec![spline_path(
+                0x0B00_0042,
+                &[
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(32.0, 0.0, 0.0),
+                    Vec3::new(64.0, 0.0, 0.0),
+                ],
+            )],
+            triggers: vec![camera],
+            ..Default::default()
+        };
+        let player_anchor = Vec3::new(32.0, 0.0, 0.0);
+        let runtime = viewport_runtime(
+            &map,
+            controller_plan(&map, 0).unwrap(),
+            current_pose(),
+            player_anchor,
+        );
+
+        assert_eq!(runtime.boundary, None);
+        assert_eq!(runtime.mode4_direction_scalar(), Some(-1.0));
+        assert!(runtime.desired.position.distance(Vec3::ZERO) < 0.01);
+        assert!(runtime.desired.target.distance(player_anchor) < 0.01);
+        assert!((runtime.mode4_parameter().unwrap_or_default() - 0.0).abs() < 0.001);
+        assert_eq!(runtime.current, runtime.desired);
+        assert_eq!(runtime.current.vertical_fov_degrees, 45.0);
+    }
+
+    #[test]
+    fn mode_four_recomputes_desired_pose_each_frame_before_native_smoothing() {
+        let mut data = camera_data(4, 0x10);
+        data[1] = Some(0x0B00_0042);
+        data[6] = Some(MODE4_DEFAULT_DISTANCE_SCALE.to_bits());
+        data[7] = Some(1.0f32.to_bits());
+        let camera = trigger(TYPE, Vec3::ZERO, data, vec![]);
+        let map = ProcessedMap {
+            paths: vec![spline_path(
+                0x0B00_0042,
+                &[
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(32.0, 0.0, 0.0),
+                    Vec3::new(64.0, 0.0, 0.0),
+                ],
+            )],
+            triggers: vec![camera],
+            ..Default::default()
+        };
+        let mut runtime = viewport_runtime(
+            &map,
+            controller_plan(&map, 0).unwrap(),
+            current_pose(),
+            Vec3::new(32.0, 0.0, 0.0),
+        );
+        runtime.update_dynamic_pose(Vec3::new(48.0, 0.0, 0.0));
+        assert!((runtime.desired.position.x - 16.0).abs() < 0.02);
+        assert!((runtime.desired.target.x - 48.0).abs() < 0.02);
+
+        runtime.advance(1.0 / 60.0);
+        assert!((runtime.current.position.x - 1.28).abs() < 0.02);
+        assert!(runtime.is_transitioning());
+    }
+
+    #[test]
+    fn mode_four_flag_two_derives_direction_from_path_vs_camera_look() {
+        let mut data = camera_data(4, 0x02);
+        data[1] = Some(0x0B00_0042);
+        let camera = trigger(TYPE, Vec3::ZERO, data, vec![]);
+        let map = ProcessedMap {
+            paths: vec![spline_path(
+                0x0B00_0042,
+                &[
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(32.0, 0.0, 0.0),
+                    Vec3::new(64.0, 0.0, 0.0),
+                ],
+            )],
+            triggers: vec![camera],
+            ..Default::default()
+        };
+        let runtime = viewport_runtime(
+            &map,
+            controller_plan(&map, 0).unwrap(),
+            current_pose(),
+            Vec3::new(32.0, 0.0, 0.0),
+        );
+        assert_eq!(runtime.mode4_direction_scalar(), Some(-1.0));
+    }
+
+    #[test]
+    fn mode_four_bank_uses_native_sixteen_sample_angle_filter() {
+        let mut data = camera_data(4, 0x14);
+        data[1] = Some(0x0B00_0042);
+        data[6] = Some(MODE4_DEFAULT_DISTANCE_SCALE.to_bits());
+        data[7] = Some(1.0f32.to_bits());
+        let camera = trigger(TYPE, Vec3::ZERO, data, vec![]);
+        let map = ProcessedMap {
+            paths: vec![spline_path(
+                0x0B00_0042,
+                &[
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(32.0, 0.0, 0.0),
+                    Vec3::new(64.0, 0.0, 0.0),
+                ],
+            )],
+            triggers: vec![camera],
+            ..Default::default()
+        };
+        let runtime = viewport_runtime(
+            &map,
+            controller_plan(&map, 0).unwrap(),
+            current_pose(),
+            Vec3::new(32.0, 0.0, 0.0),
+        );
+        let expected =
+            std::f32::consts::FRAC_PI_2 * MODE4_BANK_SCALE / MODE4_BANK_SAMPLE_COUNT as f32;
+        assert!((runtime.desired.roll_degrees - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn mode_four_special_map_path_pair_uses_native_fixed_target_offset() {
+        let mut data = camera_data(4, 0);
+        data[1] = Some(MODE4_SPECIAL_PATH_HASHCODE);
+        let camera = trigger(TYPE, Vec3::ZERO, data, vec![]);
+        let map = ProcessedMap {
+            hashcode: MODE4_SPECIAL_MAP_HASHCODE,
+            paths: vec![spline_path(
+                MODE4_SPECIAL_PATH_HASHCODE,
+                &[
+                    Vec3::new(0.0, 2.0, 0.0),
+                    Vec3::new(10.0, 2.0, 0.0),
+                    Vec3::new(20.0, 2.0, 0.0),
+                ],
+            )],
+            triggers: vec![camera],
+            ..Default::default()
+        };
+        let runtime = viewport_runtime(
+            &map,
+            controller_plan(&map, 0).unwrap(),
+            current_pose(),
+            Vec3::new(10.0, 2.0, 0.0),
+        );
+        assert_eq!(runtime.boundary, None);
+        assert!((runtime.desired.target.x - runtime.desired.position.x).abs() < 1.0e-6);
+        assert!((runtime.desired.target.y - (runtime.desired.position.y - 0.23)).abs() < 1.0e-6);
+        assert!((runtime.desired.target.z - (runtime.desired.position.z + 1.0)).abs() < 1.0e-6);
     }
 
     #[test]

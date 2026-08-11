@@ -364,7 +364,6 @@ impl MapFrame {
                             .iter()
                             .map(|index| *index as usize)
                             .collect(),
-                        ambience: zone.identifier.ambience,
                     }
                 })
                 .collect();
@@ -442,29 +441,22 @@ impl MapFrame {
                 lighting_key: 0,
             };
 
-            let base_sky = map.skies.first().copied();
-            let mut sky_queue = Vec::<(QueuedEntityRender, bool, Vec3)>::new();
+            let mut sky_queue = Vec::<QueuedEntityRender>::new();
             for (sky, root_translation, _) in sky_sources.iter().copied() {
                 match sky.base() {
-                    0x02000000 => sky_queue.push((
-                        QueuedEntityRender {
-                            entity: (current_file, sky),
-                            entity_alt: None,
-                            position: root_translation,
-                            rotation: Quat::IDENTITY,
-                            scale: Vec3::ONE,
-                        },
-                        base_sky == Some(sky),
-                        root_translation,
-                    )),
+                    0x02000000 => sky_queue.push(QueuedEntityRender {
+                        entity: (current_file, sky),
+                        entity_alt: None,
+                        position: root_translation,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::ONE,
+                    }),
                     0x04000000 => {
                         let sky_time = render_store
                             .read()
                             .get_script(current_file, sky)
                             .map(|script| script.time_at_frame(1.0))
                             .unwrap_or_default();
-                        let native_scaled_source = base_sky == Some(sky);
-                        let mut root_member = true;
                         render_static_script(
                             root_translation,
                             Quat::IDENTITY,
@@ -473,14 +465,7 @@ impl MapFrame {
                             sky,
                             sky_time,
                             &render_store.read(),
-                            &mut |queued| {
-                                sky_queue.push((
-                                    queued,
-                                    native_scaled_source && root_member,
-                                    root_translation,
-                                ));
-                                root_member = false;
-                            },
+                            &mut |queued| sky_queue.push(queued),
                             vec![],
                         );
                     }
@@ -488,50 +473,7 @@ impl MapFrame {
                 }
             }
 
-            let mut sky_world_queue = Vec::<QueuedEntityRender>::new();
-            painter.gl().depth_mask(false);
-            for (queued, root_member, root_translation) in &sky_queue {
-                let store = render_store.read();
-                if let Some(entity) = store.get_entity(queued.entity.0, queued.entity.1) {
-                    let (position, scale, class) = map_sky_entity_transform(
-                        *root_translation,
-                        queued.position,
-                        queued.scale,
-                        entity.entity_flags(),
-                        *root_member,
-                    );
-                    let transformed = QueuedEntityRender {
-                        entity: queued.entity,
-                        entity_alt: queued.entity_alt.clone(),
-                        position,
-                        rotation: queued.rotation,
-                        scale,
-                    };
-                    if class == MapSkyEntityClass::Ordinary {
-                        sky_world_queue.push(transformed);
-                        continue;
-                    }
-                    entity.draw_opaque(
-                        painter.gl(),
-                        &sky_render_context,
-                        transformed.position,
-                        transformed.rotation,
-                        transformed.scale,
-                        time,
-                        &store,
-                    );
-                    entity.draw_transparent(
-                        painter.gl(),
-                        &sky_render_context,
-                        transformed.position,
-                        transformed.rotation,
-                        transformed.scale,
-                        time,
-                        &store,
-                    );
-                }
-            }
-            painter.gl().depth_mask(true);
+            let sky_world_queue = sky_queue;
 
             let mut render_queue = Vec::<QueuedEntityRender>::new();
             let mut particle_queue = vec![];

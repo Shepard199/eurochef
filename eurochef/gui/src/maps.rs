@@ -161,6 +161,11 @@ impl ProcessedMap {
             return NativeVisualZoneFrame::empty(self.zones.len());
         };
 
+        // 0x004ED203 primes runtime bitset +0x1F4 from the BSP root zone's
+        // serialized +0x40 mask through 0x0053BC13(..., 1), which also sets
+        // runtime state +0x214 to 2. Every recursive 0x004ED920 entry calls
+        // 0x0053BC13(current_zone_mask, 0) again, but state 2 makes that branch
+        // a no-op. The entire traversal therefore keeps the BSP-root mask.
         let root_exclusion_mask = self.zones[root_zone].visual_zone_exclusion_mask;
         let mut traversal = NativeVisualTraversal::new(self.zones.len());
         self.collect_native_visual_zone(
@@ -1657,6 +1662,76 @@ mod tests {
     }
 
     #[test]
+    fn real_map_identifier_ambience_corpus_when_requested() {
+        let Ok(root) = std::env::var("EUROCHEF_REAL_MAP_CORPUS_ROOT") else {
+            return;
+        };
+
+        fn collect_edb_paths(root: &Path, output: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_edb_paths(&path, output);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("edb"))
+                {
+                    output.push(path);
+                }
+            }
+        }
+
+        let mut paths = Vec::new();
+        collect_edb_paths(Path::new(&root), &mut paths);
+        paths.sort();
+        let mut zone_count = 0usize;
+        let mut nonzero_count = 0usize;
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        let mut values = std::collections::BTreeMap::<u32, usize>::new();
+        let mut examples = Vec::new();
+        for path in paths {
+            let Ok(file) = File::open(&path) else {
+                continue;
+            };
+            let Ok(mut edb) = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc) else {
+                continue;
+            };
+            let file_name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            for map in read_from_file(&mut edb) {
+                for (zone_index, zone) in map.zones.iter().enumerate() {
+                    let ambience = zone.identifier.ambience;
+                    zone_count += 1;
+                    assert!(ambience.is_finite());
+                    min = min.min(ambience);
+                    max = max.max(ambience);
+                    *values.entry(ambience.to_bits()).or_default() += 1;
+                    if ambience != 0.0 {
+                        nonzero_count += 1;
+                        if examples.len() < 32 {
+                            examples.push((file_name.clone(), zone_index, ambience));
+                        }
+                    }
+                }
+            }
+        }
+
+        eprintln!(
+            "IDENTIFIER_AMBIENCE_CORPUS zones={zone_count} nonzero={nonzero_count} unique={} min={min} max={max}",
+            values.len()
+        );
+        eprintln!("IDENTIFIER_AMBIENCE_VALUES {values:08X?}");
+        eprintln!("IDENTIFIER_AMBIENCE_EXAMPLES {examples:?}");
+        assert_eq!(zone_count, 351);
+    }
+
+    #[test]
     fn robots_npc_uses_runtime_proven_getters_and_alternate_cutscene_slots() {
         let data = [
             Some(7),
@@ -2161,6 +2236,7 @@ mod tests {
         let mut camera_controller_plan_count = 0usize;
         let mut camera_mode_counts = std::collections::BTreeMap::<u32, usize>::new();
         let mut camera_plans_with_marker = 0usize;
+
         let mut portal_endpoint_in_zone_range = 0usize;
         let mut portal_endpoint_outside_zone_range = 0usize;
         let mut portal_self_pairs = 0usize;
@@ -2201,6 +2277,30 @@ mod tests {
                         camera_controller_plan_count += 1;
                         *camera_mode_counts.entry(plan.mode).or_default() += 1;
                         camera_plans_with_marker += usize::from(plan.linked_marker_index.is_some());
+                        if plan.mode == 4 {
+                            let path = plan.path_hashcode.and_then(|hashcode| {
+                                map.paths.iter().find(|path| path.hashcode == hashcode)
+                            });
+                            assert!(
+                                path.is_some_and(|path| {
+                                    path.path_type == 0
+                                        && path.flags & 0x2000_0000 != 0
+                                        && path.links.is_empty()
+                                        && !path.nodes.is_empty()
+                                }),
+                                "CAMERA_MODE4 file={} trigger={} path={:?} type={:?} flags={:?} nodes={:?} links={:?} data6={:?} data7={:?} opts=0x{:X}",
+                                source_path.file_name().and_then(|name| name.to_str()).unwrap_or("?"),
+                                trigger_index,
+                                plan.path_hashcode.map(|value| format!("0x{value:08X}")),
+                                path.map(|path| path.path_type),
+                                path.map(|path| path.flags),
+                                path.map(|path| path.nodes.len()),
+                                path.map(|path| path.links.len()),
+                                plan.mode4_data6,
+                                plan.mode4_data7,
+                                plan.mode4_option_flags,
+                            );
+                        }
                     }
                 }
                 for portal in &map.portals {
@@ -3680,6 +3780,83 @@ mod tests {
                 0,
                 "0x{background:08X} must retain the camera-relative background flag"
             );
+        }
+    }
+
+    #[test]
+    fn real_m02_city_base_sky_rejects_the_misattributed_h01_main_transform_when_requested() {
+        let Ok(path) = std::env::var("EUROCHEF_REAL_M02_CITY_EDB") else {
+            return;
+        };
+
+        let file = File::open(&path).expect("m02_city fixture is missing");
+        let mut city_edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+            .expect("m02_city fixture is not a valid PC EDB");
+        let city_script = UXGeoScript::read_hashcodes(&mut city_edb, &[0x8400_0019])
+            .expect("m02_city base sky Script did not parse")
+            .into_iter()
+            .next()
+            .expect("m02_city base sky Script 0x84000019 is missing");
+        let city_root = city_script
+            .commands
+            .first()
+            .expect("m02_city base sky Script has no root command");
+        assert_eq!(city_root.controller_header_index, 0);
+        assert_eq!(city_root.controller_index, 0);
+        assert_eq!(city_root.parent_controller_index, u8::MAX);
+        assert!(matches!(
+            city_root.data,
+            UXGeoScriptCommandData::Entity {
+                hashcode: 0x8200_0030,
+                ..
+            }
+        ));
+
+        let city_controller = city_script
+            .controllers
+            .first()
+            .expect("m02_city base sky root controller is missing");
+        assert_eq!(city_controller.ctrl_mask, 0);
+        assert!(city_controller.channels.vector_0.is_empty());
+        assert!(city_controller.channels.vector_1.is_empty());
+
+        let h01_path = std::path::Path::new(&path)
+            .parent()
+            .expect("m02_city fixture has no parent directory")
+            .join("h01_main.edb");
+        let file = File::open(&h01_path).expect("h01_main fixture is missing beside m02_city");
+        let mut h01_edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+            .expect("h01_main fixture is not a valid PC EDB");
+        let h01_script = UXGeoScript::read_hashcodes(&mut h01_edb, &[0x0400_0001])
+            .expect("h01_main Script 0x04000001 did not parse")
+            .into_iter()
+            .next()
+            .expect("h01_main Script 0x04000001 is missing");
+        let h01_command = h01_script
+            .commands
+            .get(6)
+            .expect("h01_main Script 0x04000001 command6 is missing");
+        let h01_controller = h01_script
+            .controllers
+            .get(h01_command.controller_header_index as usize)
+            .expect("h01_main command6 controller is missing");
+        assert_eq!(h01_controller.ctrl_mask & 0x14, 0x14);
+
+        let (_, position) = h01_controller
+            .channels
+            .vector_0
+            .first()
+            .expect("h01_main command6 position key is missing");
+        let (_, scale) = h01_controller
+            .channels
+            .vector_1
+            .first()
+            .expect("h01_main command6 scale key is missing");
+        let expected_position = [21.152079_f32, 12.63301, -5.5051265];
+        let expected_scale = [1.6899993_f32; 3];
+        for axis in 0..3 {
+            assert!((position[axis] - expected_position[axis]).abs() < 1.0e-5);
+            assert!((scale[axis] - expected_scale[axis]).abs() < 1.0e-6);
         }
     }
 

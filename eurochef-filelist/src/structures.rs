@@ -58,7 +58,7 @@ pub struct FileInfo5 {
 }
 
 #[binrw]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileLoc5 {
     pub addr: u32,
     pub filelist_num: u32,
@@ -96,7 +96,7 @@ pub struct FileInfo9 {
 }
 
 #[binrw]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileLoc9 {
     pub unk0: u32,
     pub addr: u32,
