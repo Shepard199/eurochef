@@ -16,6 +16,8 @@ use eurochef_edb::{
 use eurochef_shared::maps::{TriggerDefinition, TriggerInformation};
 use serde::Serialize;
 
+use super::resource_atlas::discover_edb_paths_near_manifest;
+
 #[derive(Debug, Clone)]
 struct ManifestEntry {
     declared_uid: Option<u32>,
@@ -515,6 +517,13 @@ fn read_manifest(path: &Path) -> Result<Vec<ManifestEntry>> {
             continue;
         }
         let source_path = PathBuf::from(source_text);
+        if !source_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("edb"))
+        {
+            continue;
+        }
         let source_path = if source_path.is_absolute() {
             source_path
         } else {
@@ -524,6 +533,16 @@ fn read_manifest(path: &Path) -> Result<Vec<ManifestEntry>> {
             declared_uid: parse_u32(uid_text.trim()),
             source_path,
         });
+    }
+
+    if entries.is_empty() {
+        entries = discover_edb_paths_near_manifest(path)?
+            .into_iter()
+            .map(|source_path| ManifestEntry {
+                declared_uid: None,
+                source_path,
+            })
+            .collect();
     }
 
     Ok(entries)
@@ -1127,9 +1146,38 @@ fn optional_decimal(value: Option<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_runtime_preview, invalid_links, parse_u32, resolve_visual, valid_link_index,
-        FileCatalogEntry, TriggerPathMatch,
+        classify_runtime_preview, invalid_links, parse_u32, read_manifest, resolve_visual,
+        valid_link_index, FileCatalogEntry, TriggerPathMatch,
     };
+
+    #[test]
+    fn manifest_without_legacy_source_paths_discovers_canonical_extracted_edbs() {
+        let unique = format!(
+            "eurochef-trigger-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let manifest_dir = root.join("_eurotools_out/edb");
+        let extracted_dir = root.join("_eurotools_out/extracted_main/robots/binary/_bin_pc/maps");
+        std::fs::create_dir_all(&manifest_dir).expect("create manifest directory");
+        std::fs::create_dir_all(&extracted_dir).expect("create extracted EDB directory");
+        let manifest = manifest_dir.join("manifest.tsv");
+        std::fs::write(&manifest, "name\tuid\nmap\t0x01000001\n")
+            .expect("write modern manifest fixture");
+        let edb = extracted_dir.join("m_test.edb");
+        std::fs::write(&edb, []).expect("write EDB fixture");
+
+        let entries = read_manifest(&manifest).expect("fallback manifest discovery");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].declared_uid, None);
+        assert_eq!(entries[0].source_path, edb);
+
+        std::fs::remove_dir_all(root).expect("remove manifest fixture");
+    }
 
     #[test]
     fn parses_manifest_hashes_without_guessing_decimal_eight_digit_ids() {

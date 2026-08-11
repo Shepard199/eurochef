@@ -87,8 +87,11 @@ pub enum RobotsScriptPayloadDiagnostic {
         packed_color: u32,
         /// Payload +0x10, copied to dynamic-light +0x34.
         runtime_scalar_34: f32,
-        /// Payload +0x14, copied to dynamic-light +0x38.
-        runtime_scalar_38: f32,
+        /// Payload +0x14, copied to dynamic-light +0x38. Native manager 0x00523105
+        /// uses it as the spatial portal-query extent, object selection compares
+        /// distance against `(radius + object_bound_radius)`, and PC shader upload
+        /// 0x0056DCC4 sends `1.0 / radius` to the vertex shader.
+        radius: f32,
     },
     /// Opcode 10 reaches 0x004FA262 and EXItemAnimator_Camera initializer
     /// 0x00567A14. Names intentionally use native object offsets because the
@@ -136,9 +139,9 @@ impl RobotsScriptPayloadDiagnostic {
                 raw_mode_tail,
                 packed_color,
                 runtime_scalar_34,
-                runtime_scalar_38,
+                radius,
             } => format!(
-                "native 0x004FA0DD -> dynamic light: raw+00=0x{raw_word_0:08X}, orientation_selector={orientation_selector}, raw+06=0x{raw_orientation_tail:04X}, mode=0x{mode_byte:02X} (bit1={}), raw+09={:02X}{:02X}{:02X}, packed_color=0x{packed_color:08X}, +0x34={runtime_scalar_34:.9}, +0x38={runtime_scalar_38:.9}",
+                "native 0x004FA0DD -> dynamic light: raw+00=0x{raw_word_0:08X}, orientation_selector={orientation_selector}, raw+06=0x{raw_orientation_tail:04X}, mode=0x{mode_byte:02X} (containing-zone-only={}), raw+09={:02X}{:02X}{:02X}, packed_color=0x{packed_color:08X}, raw+0x34={runtime_scalar_34:.9}, radius={radius:.9}",
                 (mode_byte & 2) != 0,
                 raw_mode_tail[0],
                 raw_mode_tail[1],
@@ -258,7 +261,7 @@ pub fn robots_script_payload_diagnostic(
             raw_mode_tail: data.get(9..12)?.try_into().ok()?,
             packed_color: word(12)?,
             runtime_scalar_34: float(16)?,
-            runtime_scalar_38: float(20)?,
+            radius: float(20)?,
         }),
         10 if data.len() >= 24 => Some(RobotsScriptPayloadDiagnostic::Camera {
             raw_word_0: word(0)?,
@@ -823,7 +826,7 @@ mod tests {
                 raw_mode_tail: [0, 0, 8],
                 packed_color: 0xFF02_0FFF,
                 runtime_scalar_34: 1.0,
-                runtime_scalar_38: 4.0,
+                radius: 4.0,
             })
         );
     }

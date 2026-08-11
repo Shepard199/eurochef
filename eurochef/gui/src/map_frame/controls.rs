@@ -178,7 +178,52 @@ impl MapFrame {
                             "Apply active native Camera to viewport",
                         )
                         .on_hover_text(
-                            "Applies the instruction-proven mode 0/3 position, target, SetVFOV and fixed-60-Hz interpolation. Mode 4 remains diagnostic until its path traversal is recovered.",
+                            "Applies the instruction-proven shipped Camera modes 0/3/4, native SetVFOV, fixed-60-Hz interpolation and mode-4 XPath_Spline solver.",
+                        );
+                        let live_player_changed = ui
+                            .checkbox(
+                                &mut self.native_camera_live_player_preview,
+                                "Live player pose for Camera",
+                            )
+                            .on_hover_text(
+                                "Feeds Camera mode 3/4 a live editor-controlled player position initialized from the serialized XTrigger_Player. This is a pose source for the recovered Camera controller, not a fabricated replacement for native player collision/physics.",
+                            )
+                            .changed();
+                        if live_player_changed && self.native_camera_live_player_preview {
+                            self.reset_native_camera_player_preview(current_map);
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Reset player to XTrigger_Player").clicked() {
+                                self.reset_native_camera_player_preview(current_map);
+                            }
+                            ui.add_enabled(
+                                self.native_camera_live_player_preview,
+                                egui::DragValue::new(&mut self.native_camera_player_preview.speed_mul)
+                                    .range(0.0..=5.0)
+                                    .speed(0.05)
+                                    .prefix("move speed "),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Player XYZ");
+                            ui.add_enabled(
+                                self.native_camera_live_player_preview,
+                                egui::DragValue::new(&mut self.native_camera_player_preview.position.x)
+                                    .speed(0.05),
+                            );
+                            ui.add_enabled(
+                                self.native_camera_live_player_preview,
+                                egui::DragValue::new(&mut self.native_camera_player_preview.position.y)
+                                    .speed(0.05),
+                            );
+                            ui.add_enabled(
+                                self.native_camera_live_player_preview,
+                                egui::DragValue::new(&mut self.native_camera_player_preview.position.z)
+                                    .speed(0.05),
+                            );
+                        });
+                        ui.small(
+                            "While a native Camera is active: WASD/A-D move the live player pose, Q/E move vertically, drag changes its movement heading. The recovered Camera consumes this moving position each frame; full Robots player physics remains a separate gameplay-runtime boundary.",
                         );
                         ui.monospace(format!(
                             "Camera [{:.3}, {:.3}, {:.3}]  active zone {}",
@@ -259,7 +304,7 @@ impl MapFrame {
                                     }
                                 }
                                 ui.small(
-                                    "Mode 0/3 and shipped mode-4 XPath_Spline viewport pose, SetVFOV, dynamic path follow and interpolation are native. Mode 1/2 gameplay controller state remains unresolved; editor player anchor is still the static map player marker.",
+                                    "Mode 0/3 and shipped mode-4 XPath_Spline viewport pose, SetVFOV, dynamic path follow and interpolation are native. Mode 1/2 gameplay controller state remains unresolved. Mode 3/4 now consume the live player-pose preview above; only full Player gameplay physics/collision remains outside the Camera runtime.",
                                 );
                             } else {
                                 ui.monospace("Active XTrigger_Camera: stale or invalid controller plan");

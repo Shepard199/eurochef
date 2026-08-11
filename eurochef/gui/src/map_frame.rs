@@ -48,17 +48,20 @@ use crate::{
     render::{
         billboard::BillboardRenderer,
         blend::{set_blending_mode, BlendMode},
-        camera::NativeViewCamera,
+        camera::{Camera3D, FpsCamera, NativeViewCamera},
         entity::EntityRenderer,
         gl_helper,
         particle::{ParticlePreviewSettings, ParticleRenderer},
         pickbuffer::{decode_pick_value, PickBuffer, PickBufferType},
         robots_global_lighting,
-        script::{collect_script_particles, render_script, render_static_script},
+        script::{
+            collect_script_dynamic_lights, collect_script_particles, render_script,
+            render_static_script,
+        },
         trigger::{CollisionDatumRenderer, LinkLineRenderer, SelectCubeRenderer},
         tweeny::{self, Tweeny3D},
         viewer::{BaseViewer, CameraType, RenderContext},
-        NativeLight, NativeLightZone, RenderStore, RobotsFog,
+        NativeDynamicLight, NativeLight, NativeLightZone, RenderStore, RobotsFog,
     },
     scripts::fan::{advance_native_fan_angle, apply_native_fan_rotation},
     sound_preview::{SharedSoundPreview, SoundVoiceGroup},
@@ -120,6 +123,10 @@ pub struct MapFrame {
     apply_native_camera_viewport: bool,
     native_camera_runtime: Option<NativeCameraViewportRuntime>,
     native_camera_last_time: Option<f64>,
+    native_camera_live_player_preview: bool,
+    native_camera_player_preview: FpsCamera,
+    native_camera_player_preview_map: Option<u32>,
+    native_camera_player_preview_last_time: Option<f64>,
     preview_zone_background: bool,
     show_portals: bool,
     runtime_path_playback_speed: f32,
@@ -763,6 +770,10 @@ impl MapFrame {
             apply_native_camera_viewport: true,
             native_camera_runtime: None,
             native_camera_last_time: None,
+            native_camera_live_player_preview: true,
+            native_camera_player_preview: FpsCamera::default(),
+            native_camera_player_preview_map: None,
+            native_camera_player_preview_last_time: None,
             preview_zone_background: false,
             show_portals: false,
             runtime_path_playback_speed: 1.0,
@@ -874,6 +885,12 @@ impl MapFrame {
         if self.selected_map != previous_map {
             self.runtime_motion_start_time = None;
             self.runtime_event_states.clear();
+            self.active_camera_trigger = None;
+            self.native_camera_runtime = None;
+            self.native_camera_last_time = None;
+            self.native_camera_player_preview_map = None;
+            self.native_camera_player_preview_last_time = None;
+            self.viewer.lock().clear_native_camera();
             self.script_animation_start_time = None;
             self.selected_trigger = None;
             self.selected_sound = None;
@@ -931,14 +948,18 @@ mod tests {
         ROBOTS_EVENT_DEACTIVATE,
     };
     use crate::maps::{
-        read_from_file, ProcessedMap, ProcessedPath, ProcessedPathNode, ProcessedTrigger,
+        read_from_file, robots_camera_controller_plan, robots_camera_viewport_runtime,
+        NativeCameraViewportPose, ProcessedMap, ProcessedPath, ProcessedPathNode, ProcessedTrigger,
     };
     use crate::render::{entity::EntityRenderer, RenderStore};
     use egui::{Pos2, Rect};
     use eurochef_edb::{edb::EdbFile, map::EXGeoTriggerEngineOptions, versions::Platform};
     use eurochef_shared::{
         maps::TriggerInformation,
-        script::{UXGeoScript, UXGeoScriptCommand, UXGeoScriptCommandData},
+        script::{
+            robots_script_payload_diagnostic, RobotsScriptPayloadDiagnostic, UXGeoScript,
+            UXGeoScriptCommand, UXGeoScriptCommandData,
+        },
     };
     use glam::{Mat4, Quat, Vec2, Vec3};
     use std::{fs::File, io::BufReader};
@@ -1720,6 +1741,81 @@ mod tests {
     }
 
     #[test]
+    fn real_m02_city_camera_modes_follow_moving_player_when_requested() {
+        let Ok(path) = std::env::var("EUROCHEF_REAL_M02_CITY_EDB") else {
+            return;
+        };
+        let file = File::open(&path).expect("m02_city fixture is missing");
+        let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+            .expect("m02_city fixture is not a valid PC EDB");
+        let maps = read_from_file(&mut edb);
+        let map = maps.first().expect("m02_city map is missing");
+        let player = map
+            .triggers
+            .iter()
+            .find(|trigger| trigger.ttype == 0)
+            .map(|trigger| trigger.position)
+            .expect("m02_city must contain a serialized XTrigger_Player");
+        let moved_player = player + Vec3::new(17.0, 3.0, 11.0);
+        let current = NativeCameraViewportPose {
+            position: player + Vec3::new(4.0, 6.0, -8.0),
+            target: player + Vec3::Y,
+            vertical_fov_degrees: 55.0,
+            roll_degrees: 0.0,
+        };
+
+        let mut mode3_checked = 0usize;
+        let mut mode4_checked = 0usize;
+        for (trigger_index, trigger) in map.triggers.iter().enumerate() {
+            if trigger.ttype != 1 {
+                continue;
+            }
+            let Some(plan) = robots_camera_controller_plan(map, trigger_index) else {
+                continue;
+            };
+            if !matches!(plan.mode, 3 | 4) {
+                continue;
+            }
+            let mut runtime = robots_camera_viewport_runtime(map, plan, current, player);
+            if runtime.boundary.is_some() {
+                continue;
+            }
+            let before = runtime.desired;
+            runtime.update_dynamic_pose(moved_player);
+            assert_eq!(runtime.player_anchor, moved_player);
+            assert!(runtime.desired.is_finite());
+
+            if plan.mode == 3 {
+                mode3_checked += 1;
+                assert!(
+                    runtime
+                        .desired
+                        .target
+                        .distance(moved_player + Vec3::Y * 1.3)
+                        < 1.0e-5
+                );
+                assert!(runtime.desired.target.distance(before.target) > 1.0);
+            } else {
+                mode4_checked += 1;
+                assert!(
+                    runtime.desired.position.distance(before.position) > 1.0e-5
+                        || runtime.desired.target.distance(before.target) > 1.0e-5,
+                    "mode-4 Camera #{trigger_index} did not react to a moved player pose"
+                );
+            }
+        }
+
+        assert!(
+            mode3_checked > 0,
+            "m02_city has no usable shipped mode-3 Camera"
+        );
+        assert!(
+            mode4_checked > 0,
+            "m02_city has no usable shipped mode-4 Camera"
+        );
+    }
+
+    #[test]
     fn real_m02_city_zones_2_3_and_22_use_native_sky_roots_when_requested() {
         let Ok(path) = std::env::var("EUROCHEF_REAL_M02_CITY_EDB") else {
             return;
@@ -1818,6 +1914,48 @@ mod tests {
             .expect("m02_city script fixture is invalid");
         let scripts =
             UXGeoScript::read_all(&mut script_edb).expect("m02_city scripts did not parse");
+
+        let oriented = scripts
+            .iter()
+            .find(|script| script.hashcode == 0x8400_0034)
+            .and_then(|script| script.commands.get(4))
+            .expect("City Script 0x84000034 command 4 is missing");
+        let UXGeoScriptCommandData::Unknown { cmd, data } = &oriented.data else {
+            panic!("City 0x84000034 command 4 is no longer the native opcode-7 payload");
+        };
+        assert_eq!(*cmd, 7);
+        let Some(RobotsScriptPayloadDiagnostic::DynamicLight {
+            orientation_selector,
+            mode_byte,
+            runtime_scalar_34,
+            radius,
+            ..
+        }) = robots_script_payload_diagnostic(7, data)
+        else {
+            panic!("City oriented dynamic-light payload did not decode");
+        };
+        assert_eq!(orientation_selector, 1);
+        assert_eq!(mode_byte & 2, 0);
+        assert_eq!(runtime_scalar_34, 0.0);
+        assert_eq!(radius, 6.0);
+
+        let containing_only = scripts
+            .iter()
+            .find(|script| script.hashcode == 0x8400_0015)
+            .and_then(|script| script.commands.get(2))
+            .expect("City Script 0x84000015 command 2 is missing");
+        let UXGeoScriptCommandData::Unknown { cmd, data } = &containing_only.data else {
+            panic!("City 0x84000015 command 2 is no longer the native opcode-7 payload");
+        };
+        assert_eq!(*cmd, 7);
+        let Some(RobotsScriptPayloadDiagnostic::DynamicLight {
+            mode_byte, radius, ..
+        }) = robots_script_payload_diagnostic(7, data)
+        else {
+            panic!("City containing-zone dynamic-light payload did not decode");
+        };
+        assert_ne!(mode_byte & 2, 0);
+        assert_eq!(radius, 4.0);
 
         let entity_file = File::open(std::env::var("EUROCHEF_REAL_M02_CITY_EDB").unwrap())
             .expect("m02_city entity fixture is missing");

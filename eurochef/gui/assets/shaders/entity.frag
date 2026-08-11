@@ -29,6 +29,12 @@ uniform vec4 u_nativeLightDirectionType[EC_MAX_NATIVE_LIGHTS];
 uniform vec4 u_nativeLightColorEffect[EC_MAX_NATIVE_LIGHTS];
 uniform vec2 u_nativeLightParameters[EC_MAX_NATIVE_LIGHTS];
 
+const int EC_MAX_DYNAMIC_LIGHTS = 4;
+uniform int u_dynamicLightCount;
+uniform vec4 u_dynamicLightPositionRadius[EC_MAX_DYNAMIC_LIGHTS];
+uniform vec4 u_dynamicLightDirectionMode[EC_MAX_DYNAMIC_LIGHTS];
+uniform vec4 u_dynamicLightColour[EC_MAX_DYNAMIC_LIGHTS];
+
 uniform int u_fogEnabled;
 uniform vec3 u_fogColor;
 uniform vec2 u_fogNearFar;
@@ -103,6 +109,35 @@ vec3 nativeLighting(vec3 normal) {
   return accumulated * u_nativeLightStrength;
 }
 
+vec3 dynamicLighting(vec3 normal) {
+  vec3 accumulated = vec3(0.0);
+  for (int i = 0; i < EC_MAX_DYNAMIC_LIGHTS; ++i) {
+    if (i >= u_dynamicLightCount) break;
+    vec4 positionRadius = u_dynamicLightPositionRadius[i];
+    vec4 directionMode = u_dynamicLightDirectionMode[i];
+    vec3 colour = u_dynamicLightColour[i].rgb;
+    if (directionMode.w > 0.5) {
+      // The oriented PC path uploads position, normalized direction and colour,
+      // but no inverse-radius constant. Radius already participates in the exact
+      // CPU object/zone broad phase; the device equivalent is directional N.L.
+      accumulated += colour * nativeLightPositiveDot(dot(normal, -directionMode.xyz));
+      continue;
+    }
+
+    vec3 toLight = positionRadius.xyz - f_worldPos;
+    float distanceToLight = length(toLight);
+    if (distanceToLight <= 0.000001 || distanceToLight >= positionRadius.w) continue;
+    // PC upload 0x0056DCC4 provides 1/radius to the legacy D3D vertex shader.
+    // The exact token-level device formula is not present in the recovered CPU
+    // code; this OpenGL equivalent keeps the proven cutoff/inverse-radius lanes
+    // and a linear radial falloff rather than assigning meaning to raw +0x34.
+    float radial = max(1.0 - distanceToLight / positionRadius.w, 0.0);
+    float normalFactor = nativeLightPositiveDot(dot(normal, toLight / distanceToLight));
+    accumulated += colour * radial * normalFactor;
+  }
+  return accumulated * u_nativeLightStrength;
+}
+
 float nativeFogAmount(float depth) {
   float span = u_fogNearFar.y - u_fogNearFar.x;
   float t = abs(span) > 0.000001
@@ -147,11 +182,12 @@ void main() {
         }
         // u_tint is the legacy renderer's material/pass globalDiffuse multiplier.
         o_color = vec4(vertexBase.rgb * globalLight * u_tint.rgb, vertexBase.a * u_tint.a);
+        o_color.rgb += texel.rgb * dynamicLighting(worldNormal);
     } else {
         o_color = vertexBase * u_tint;
         // The direct local-light diagnostic is intentionally after globalDiffuse,
         // matching the original positional-light composition order.
-        o_color.rgb += texel.rgb * nativeLighting(worldNormal);
+        o_color.rgb += texel.rgb * (nativeLighting(worldNormal) + dynamicLighting(worldNormal));
     }
 #endif
 

@@ -932,6 +932,48 @@ pub(crate) fn runtime_platform_contact_linear_velocity(
     Some((current - previous) * FIXED_HZ)
 }
 
+#[allow(dead_code)] // Kept dormant until Maps owns a real gameplay peer-body registration state.
+pub(crate) fn runtime_platform_one_tick_angular_delta(
+    degrees_per_second: Vec3,
+    fixed_step_count: u8,
+) -> Vec3 {
+    degrees_per_second * (fixed_step_count as f32 * (1.0 / 60.0)).to_radians()
+}
+
+#[allow(dead_code)] // Do not bind this to the editor player proxy; it requires native peer-body state.
+pub(crate) fn runtime_platform_peer_body_carry_velocity(
+    linear_velocity: Vec3,
+    platform_origin: Vec3,
+    peer_origin: Vec3,
+    one_tick_euler_radians: Vec3,
+    frame_step_scalar: f32,
+) -> Vec3 {
+    if frame_step_scalar.abs() <= f32::EPSILON {
+        return linear_velocity;
+    }
+
+    // XItemPhysics_Platform::ContactPointVelocityTransfer (0x0041DCF0):
+    // the peer XItem pose origin is rotated around the platform-owner origin.
+    // The native finite rotation is Ry * Rx * Rz, not an omega-cross-radius
+    // approximation and not a collision-manifold contact point.
+    let angles = one_tick_euler_radians * frame_step_scalar;
+    let (sin_x, cos_x) = angles.x.sin_cos();
+    let (sin_y, cos_y) = angles.y.sin_cos();
+    let (sin_z, cos_z) = angles.z.sin_cos();
+    let relative = peer_origin - platform_origin;
+    let rotated = Vec3::new(
+        (cos_y * cos_z + sin_z * sin_y * sin_x) * relative.x
+            + (cos_z * sin_y * sin_x - sin_z * cos_y) * relative.y
+            + (sin_y * cos_x) * relative.z,
+        (sin_z * cos_x) * relative.x + (cos_z * cos_x) * relative.y - sin_x * relative.z,
+        (sin_z * cos_y * sin_x - cos_z * sin_y) * relative.x
+            + (cos_y * cos_z * sin_x + sin_z * sin_y) * relative.y
+            + (cos_x * cos_y) * relative.z,
+    );
+
+    linear_velocity + (rotated - relative) * (60.0 / frame_step_scalar)
+}
+
 pub(crate) fn trigger_base_rotation(trigger: &ProcessedTrigger) -> Quat {
     Quat::from_euler(
         glam::EulerRot::ZXY,
@@ -1060,6 +1102,52 @@ pub(crate) fn runtime_trigger_preview_rotation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_one_tick_angular_delta_matches_native_fixed_60hz_units() {
+        let delta = runtime_platform_one_tick_angular_delta(Vec3::new(60.0, -120.0, 30.0), 1);
+        let expected = Vec3::new(1.0, -2.0, 0.5) * std::f32::consts::PI / 180.0;
+        assert!(
+            delta.distance(expected) < 1.0e-7,
+            "delta={delta:?} expected={expected:?}"
+        );
+    }
+
+    #[test]
+    fn platform_peer_body_carry_uses_native_finite_rotation_order() {
+        let linear = Vec3::new(2.0, -3.0, 4.0);
+        let platform_origin = Vec3::new(10.0, 20.0, -5.0);
+        let relative = Vec3::new(1.25, -0.75, 2.5);
+        let peer_origin = platform_origin + relative;
+        let angles = Vec3::new(0.31, -0.22, 0.47);
+        let rotated = Quat::from_rotation_y(angles.y)
+            * (Quat::from_rotation_x(angles.x) * (Quat::from_rotation_z(angles.z) * relative));
+        let expected = linear + (rotated - relative) * 60.0;
+        let actual = runtime_platform_peer_body_carry_velocity(
+            linear,
+            platform_origin,
+            peer_origin,
+            angles,
+            1.0,
+        );
+        assert!(
+            actual.distance(expected) < 1.0e-4,
+            "actual={actual:?} expected={expected:?}"
+        );
+    }
+
+    #[test]
+    fn platform_peer_body_carry_does_not_invent_rotation_without_a_peer_step() {
+        let linear = Vec3::new(1.0, 2.0, 3.0);
+        let actual = runtime_platform_peer_body_carry_velocity(
+            linear,
+            Vec3::new(5.0, 6.0, 7.0),
+            Vec3::new(8.0, 9.0, 10.0),
+            Vec3::ZERO,
+            1.0,
+        );
+        assert!(actual.distance(linear) < 1.0e-6);
+    }
 
     #[test]
     fn platform_spin_preserves_the_body_local_rotation_axis() {

@@ -59,11 +59,15 @@ impl MapFrame {
             context.request_repaint();
         }
 
+        self.update_native_camera_player_preview(ui, &response, map, time);
         self.sync_native_camera_viewport(map, time);
         if self
             .native_camera_runtime
             .as_ref()
             .is_some_and(|runtime| runtime.is_transitioning())
+            || (self.native_camera_live_player_preview
+                && self.apply_native_camera_viewport
+                && self.active_camera_trigger.is_some())
         {
             context.request_repaint();
         }
@@ -430,17 +434,6 @@ impl MapFrame {
             sky_uniforms.native_fog_zone_override = sky_sources
                 .first()
                 .and_then(|(_, _, zone_index)| *zone_index);
-            let sky_render_context = RenderContext {
-                shaders: &v.shaders,
-                uniforms: &sky_uniforms,
-                lighting_key: 0,
-            };
-            let render_context = RenderContext {
-                shaders: &v.shaders,
-                uniforms: &v.uniforms,
-                lighting_key: 0,
-            };
-
             let mut sky_queue = Vec::<QueuedEntityRender>::new();
             for (sky, root_translation, _) in sky_sources.iter().copied() {
                 match sky.base() {
@@ -477,6 +470,7 @@ impl MapFrame {
 
             let mut render_queue = Vec::<QueuedEntityRender>::new();
             let mut particle_queue = vec![];
+            let mut dynamic_light_queue = vec![];
 
             // Render base (ref) entities
             if render_filter.contains(RenderFilter::MapZone) {
@@ -539,6 +533,17 @@ impl MapFrame {
                                 script_time,
                                 &render_store.read(),
                                 &mut particle_queue,
+                                vec![],
+                            );
+                            collect_script_dynamic_lights(
+                                position,
+                                rotation,
+                                scale,
+                                current_file,
+                                p.object_ref,
+                                script_time,
+                                &render_store.read(),
+                                &mut dynamic_light_queue,
                                 vec![],
                             );
                         }
@@ -675,6 +680,17 @@ impl MapFrame {
                                         &mut particle_queue,
                                         vec![],
                                     );
+                                    collect_script_dynamic_lights(
+                                        trigger_position,
+                                        rotation,
+                                        t.scale,
+                                        visual_file,
+                                        script_hashcode,
+                                        script_time,
+                                        &render_store.read(),
+                                        &mut dynamic_light_queue,
+                                        vec![],
+                                    );
                                     resolved_trigger_visuals[i] = render_queue.len() > queue_start;
                                     if resolved_trigger_visuals[i] {
                                         continue;
@@ -729,6 +745,17 @@ impl MapFrame {
                                     script_time,
                                     &render_store.read(),
                                     &mut particle_queue,
+                                    vec![],
+                                );
+                                collect_script_dynamic_lights(
+                                    trigger_position,
+                                    rotation,
+                                    t.scale,
+                                    visual_file,
+                                    v,
+                                    script_time,
+                                    &render_store.read(),
+                                    &mut dynamic_light_queue,
                                     vec![],
                                 );
 
@@ -787,6 +814,17 @@ impl MapFrame {
                                         script_time,
                                         &render_store.read(),
                                         &mut particle_queue,
+                                        vec![],
+                                    );
+                                    collect_script_dynamic_lights(
+                                        trigger_position,
+                                        rotation,
+                                        t.scale * pickup.scale,
+                                        pickup.file,
+                                        pickup.object,
+                                        script_time,
+                                        &render_store.read(),
+                                        &mut dynamic_light_queue,
                                         vec![],
                                     );
                                     // Do not hide the trigger placeholder for a broken
@@ -863,6 +901,31 @@ impl MapFrame {
                     }
                 }
             }
+
+            v.uniforms.native_dynamic_lights = dynamic_light_queue
+                .into_iter()
+                .map(|light| NativeDynamicLight {
+                    position: light.position,
+                    direction: light.direction,
+                    colour: light.colour,
+                    radius: light.radius,
+                    zone_indices: map.native_dynamic_light_zone_indices(
+                        light.position,
+                        light.radius,
+                        light.containing_zone_only,
+                    ),
+                })
+                .collect();
+            let sky_render_context = RenderContext {
+                shaders: &v.shaders,
+                uniforms: &sky_uniforms,
+                lighting_key: 0,
+            };
+            let render_context = RenderContext {
+                shaders: &v.shaders,
+                uniforms: &v.uniforms,
+                lighting_key: 0,
+            };
 
             if render_filter.contains(RenderFilter::Opaque) {
                 for r in &sky_world_queue {

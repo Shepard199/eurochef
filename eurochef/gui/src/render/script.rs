@@ -1,6 +1,9 @@
 use eurochef_edb::{script::EXGeoAnimScriptControllerHeader, Hashcode, HashcodeUtils};
-use eurochef_shared::script::{UXGeoScript, UXGeoScriptCommand, UXGeoScriptCommandData};
-use glam::{Quat, Vec3};
+use eurochef_shared::script::{
+    robots_script_payload_diagnostic, RobotsScriptPayloadDiagnostic, UXGeoScript,
+    UXGeoScriptCommand, UXGeoScriptCommandData,
+};
+use glam::{Quat, Vec3, Vec4};
 
 use crate::{map_frame::QueuedEntityRender, render::tweeny::ease_in_out_sine};
 
@@ -620,6 +623,142 @@ pub fn collect_script_animations(
                     queue,
                     child_ancestry,
                     static_scene,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QueuedDynamicLight {
+    pub position: Vec3,
+    pub direction: Option<Vec3>,
+    pub colour: Vec4,
+    pub radius: f32,
+    pub containing_zone_only: bool,
+}
+
+fn unpack_dynamic_light_colour(packed: u32) -> Vec4 {
+    const BYTE_TO_FLOAT: f32 = 1.0 / 255.0;
+    Vec4::new(
+        (packed & 0xff) as f32 * BYTE_TO_FLOAT,
+        ((packed >> 8) & 0xff) as f32 * BYTE_TO_FLOAT,
+        ((packed >> 16) & 0xff) as f32 * BYTE_TO_FLOAT,
+        ((packed >> 24) & 0xff) as f32 * BYTE_TO_FLOAT,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn queue_dynamic_light(
+    output: &mut Vec<QueuedDynamicLight>,
+    position: Vec3,
+    rotation: Quat,
+    scale: Vec3,
+    data: &[u8],
+) {
+    let Some(RobotsScriptPayloadDiagnostic::DynamicLight {
+        orientation_selector,
+        mode_byte,
+        packed_color,
+        radius,
+        ..
+    }) = robots_script_payload_diagnostic(7, data)
+    else {
+        return;
+    };
+    if !radius.is_finite() || radius <= 0.0 {
+        return;
+    }
+    let direction =
+        (orientation_selector != 0).then(|| rotation.mul_vec3(scale * Vec3::Z).normalize_or_zero());
+    output.push(QueuedDynamicLight {
+        position,
+        direction,
+        colour: unpack_dynamic_light_colour(packed_color),
+        radius,
+        containing_zone_only: mode_byte & 2 != 0,
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn collect_script_dynamic_lights(
+    position: Vec3,
+    rotation: Quat,
+    scale: Vec3,
+    current_file: Hashcode,
+    script_hashcode: Hashcode,
+    current_time: f32,
+    render_store: &RenderStore,
+    output: &mut Vec<QueuedDynamicLight>,
+    ancestry: Vec<Hashcode>,
+) {
+    collect_script_dynamic_lights_inner(
+        position,
+        rotation,
+        scale,
+        current_file,
+        script_hashcode,
+        current_time,
+        render_store,
+        output,
+        ancestry,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_script_dynamic_lights_inner(
+    position: Vec3,
+    rotation: Quat,
+    scale: Vec3,
+    current_file: Hashcode,
+    script_hashcode: Hashcode,
+    current_time: f32,
+    render_store: &RenderStore,
+    output: &mut Vec<QueuedDynamicLight>,
+    mut ancestry: Vec<Hashcode>,
+) {
+    if ancestry.len() >= MAX_SCRIPT_RECURSION_DEPTH || ancestry.contains(&script_hashcode) {
+        return;
+    }
+    let Some(script) = render_store.get_script(current_file, script_hashcode) else {
+        return;
+    };
+    ancestry.push(script_hashcode);
+
+    let current_frame = (script.frame_at_time(current_time) + 1.0e-4).floor() as isize;
+    for command in &script.commands {
+        if !command.range().contains(&current_frame) {
+            continue;
+        }
+        let controller = command_controller(&script.controllers, command.controller_header_index);
+        let transform = controller_transform(script, command, controller, current_time);
+        let world_position = position + rotation.mul_vec3(scale * transform.0);
+        let world_rotation = rotation * transform.1;
+        let world_scale = scale * transform.2;
+
+        match &command.data {
+            UXGeoScriptCommandData::Unknown { cmd, data } if command.opcode == 7 && *cmd == 7 => {
+                queue_dynamic_light(output, world_position, world_rotation, world_scale, data);
+            }
+            UXGeoScriptCommandData::SubScript { hashcode, file } => {
+                let child_file = if *file == u32::MAX || hashcode.is_local() {
+                    current_file
+                } else {
+                    *file
+                };
+                let child_time =
+                    (current_time - script.time_at_frame(command.start as f32)).max(0.0);
+                collect_script_dynamic_lights_inner(
+                    world_position,
+                    world_rotation,
+                    world_scale,
+                    child_file,
+                    *hashcode,
+                    child_time,
+                    render_store,
+                    output,
+                    ancestry.clone(),
                 );
             }
             _ => {}
@@ -1260,6 +1399,118 @@ mod tests {
         );
         assert_eq!(end.len(), 1);
         assert!((end[0].phase - 59.0 / 60.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn dynamic_light_commands_follow_script_transform_timing_and_native_payload() {
+        let file = 0x0100_001D;
+        let parent_hash = 0x0400_00F0;
+        let child_hash = 0x0400_00F1;
+        let mut payload = Vec::new();
+        for word in [
+            0xFFFF_FFFF,
+            0x0000_0001,
+            0x0000_0000,
+            0xFF02_0FFF,
+            1.0_f32.to_bits(),
+            4.0_f32.to_bits(),
+        ] {
+            payload.extend_from_slice(&word.to_le_bytes());
+        }
+
+        let child = UXGeoScript {
+            hashcode: child_hash,
+            framerate: 30.0,
+            length: 30,
+            num_threads: 1,
+            commands: vec![UXGeoScriptCommand {
+                opcode: 7,
+                start: 0,
+                length: 30,
+                controller_header_index: u16::MAX,
+                controller_index: u8::MAX,
+                parent_controller_index: u8::MAX,
+                data: UXGeoScriptCommandData::Unknown {
+                    cmd: 7,
+                    data: payload,
+                },
+            }],
+            serialized_controller_count: 0,
+            controller_record_metadata: vec![],
+            controllers: vec![],
+            controller_group_indices: vec![],
+            controller_groups: vec![],
+        };
+        let controller = EXGeoAnimScriptControllerHeader {
+            controller_count: 1,
+            channel_count: 1,
+            ctrl_mask: 0x4,
+            ctrl_channel_mask: 0x4,
+            channels: EXGeoAnimScriptControllerChannels {
+                vector_0: vec![(0.0, [1.0, 2.0, 3.0])],
+                ..Default::default()
+            },
+        };
+        let parent = UXGeoScript {
+            hashcode: parent_hash,
+            framerate: 30.0,
+            length: 30,
+            num_threads: 1,
+            commands: vec![UXGeoScriptCommand {
+                opcode: 1,
+                start: 0,
+                length: 30,
+                controller_header_index: 0,
+                controller_index: 0,
+                parent_controller_index: u8::MAX,
+                data: UXGeoScriptCommandData::SubScript {
+                    hashcode: child_hash,
+                    file: u32::MAX,
+                },
+            }],
+            serialized_controller_count: 1,
+            controller_record_metadata: vec![[1, 1]],
+            controllers: vec![controller.clone()],
+            controller_group_indices: vec![vec![0]],
+            controller_groups: vec![vec![controller]],
+        };
+        let mut store = RenderStore::new();
+        store.insert_script(file, parent);
+        store.insert_script(file, child);
+
+        let mut queue = Vec::new();
+        collect_script_dynamic_lights(
+            Vec3::new(10.0, 0.0, 0.0),
+            Quat::IDENTITY,
+            Vec3::splat(2.0),
+            file,
+            parent_hash,
+            0.0,
+            &store,
+            &mut queue,
+            vec![],
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].position, Vec3::new(12.0, 4.0, 6.0));
+        assert!(queue[0].direction.is_some());
+        assert!((queue[0].radius - 4.0).abs() < f32::EPSILON);
+        let expected_colour = Vec4::new(1.0, 15.0 / 255.0, 2.0 / 255.0, 1.0);
+        assert!((queue[0].colour - expected_colour).abs().max_element() < 1.0e-6);
+        assert!(!queue[0].containing_zone_only);
+
+        let mut after = Vec::new();
+        collect_script_dynamic_lights(
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::ONE,
+            file,
+            parent_hash,
+            1.0,
+            &store,
+            &mut after,
+            vec![],
+        );
+        assert!(after.is_empty());
     }
 
     #[test]

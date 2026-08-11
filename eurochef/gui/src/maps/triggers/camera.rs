@@ -458,11 +458,26 @@ impl NativeCameraViewportRuntime {
 
     pub fn update_dynamic_pose(&mut self, player_anchor: Vec3) {
         self.player_anchor = player_anchor;
-        if self.boundary.is_some() || self.mode != 4 {
+        if self.boundary.is_some() {
             return;
         }
-        if let Some(mode4) = self.mode4.as_mut() {
-            self.desired = mode4.update_pose(self.desired, player_anchor);
+        match self.mode {
+            3 => {
+                // Mode-3 vfunc 0x00478CD0 reads the live player XYZ every time it
+                // builds the desired target, adds the profile Y offset and calls
+                // SetTarget. SetTarget copies desired -> current when the native
+                // controller has interpolation disabled.
+                self.desired.target = player_anchor + Vec3::Y * 1.3;
+                if !self.interpolating {
+                    self.current.target = self.desired.target;
+                }
+            }
+            4 => {
+                if let Some(mode4) = self.mode4.as_mut() {
+                    self.desired = mode4.update_pose(self.desired, player_anchor);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -934,7 +949,7 @@ mod tests {
             ..Default::default()
         };
         let player_anchor = Vec3::new(100.0, 2.0, -20.0);
-        let runtime = viewport_runtime(
+        let mut runtime = viewport_runtime(
             &map,
             controller_plan(&map, 0).unwrap(),
             current_pose(),
@@ -945,6 +960,12 @@ mod tests {
         assert_eq!(runtime.current.target, Vec3::new(100.0, 3.3, -20.0));
         assert_eq!(runtime.current.vertical_fov_degrees, 60.0);
         assert_eq!(runtime.interpolation_rate, 0.08);
+
+        let moved_player = Vec3::new(104.0, 4.0, -18.0);
+        runtime.update_dynamic_pose(moved_player);
+        assert_eq!(runtime.player_anchor, moved_player);
+        assert_eq!(runtime.desired.target, Vec3::new(104.0, 5.3, -18.0));
+        assert_eq!(runtime.current.target, runtime.desired.target);
     }
 
     #[test]

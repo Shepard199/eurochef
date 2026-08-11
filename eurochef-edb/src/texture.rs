@@ -23,22 +23,28 @@ pub struct EXGeoTexture {
     #[brw(if(version <= 205))]
     unk0: u32,
 
-    pub width: u16,        // 0x0
-    pub height: u16,       // 0x2
-    pub depth: u16,        // 0x4
-    pub game_flags: u16,   // 0x6
-    pub scroll_u: i16,     // 0x8
-    pub scroll_v: i16,     // 0xa
-    pub frame_count: u8,   // 0xc
-    pub image_count: u8,   // 0xd
-    pub frame_rate: u8,    // 0xe
-    _pad0: u8,             // 0xf
-    pub values_used: u8,   // 0x10
+    pub width: u16,      // 0x0
+    pub height: u16,     // 0x2
+    pub depth: u16,      // 0x4
+    pub game_flags: u16, // 0x6
+    /// Robots PC v248: native world-face path 0x0041AD50 reads this exact i16,
+    /// multiplies it by 0.002, derives the triangle U direction from position/UV
+    /// data and adds the resulting tangential surface velocity to XItemPhysics.
+    pub scroll_u: i16, // 0x8
+    /// Same native surface-motion path as scroll_u, along the triangle V direction.
+    /// These fields are texture-scroll-driven conveyor/surface motion, not friction
+    /// or restitution coefficients.
+    pub scroll_v: i16, // 0xa
+    pub frame_count: u8, // 0xc
+    pub image_count: u8, // 0xd
+    pub frame_rate: u8,  // 0xe
+    _pad0: u8,           // 0xf
+    pub values_used: u8, // 0x10
     pub regions_count: u8, // 0x11
-    pub mip_count: u8,     // 0x12
-    pub format: u8,        // 0x13
-    pub unk_14: u32,       // 0x14
-    pub color: [u8; 4],    // 0x18
+    pub mip_count: u8,   // 0x12
+    pub format: u8,      // 0x13
+    pub unk_14: u32,     // 0x14
+    pub color: [u8; 4],  // 0x18
 
     // TODO(cohae): Might apply to predator as well
     /// If set, contains the hashcode of another file

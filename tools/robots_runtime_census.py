@@ -57,6 +57,8 @@ EXACT_VTABLES = {
     "EXItemAnimator_DynLight": 0x005F4510,
     "EXItemAnimator_Collision": 0x005F5890,
     "EXItemAnimator_Camera": 0x005F5908,
+    "EXItemRender": 0x005F3D40,
+    "EXItemRender_SkinAnim": 0x005F3D38,
 }
 
 CLASS_COVERAGE = {
@@ -98,17 +100,31 @@ CLASS_COVERAGE = {
     "XItemHandler_Monster_EW11_FatBot": ("diagnostic", "exact_base_monster_vtable_context"),
     "XItemHandler_Monster_TestAnimBot": ("diagnostic", "exact_base_monster_vtable_context"),
     "EXItemAnimator_Anim": ("partial", "anim_and_animskin_frame_preview"),
+    "EXItemAnimator_AnimModifier": (
+        "diagnostic",
+        "spine_and_head_tracking_helpers_fp_idle_gate_and_left_right_pose_mirror",
+    ),
     "EXItemAnimator_Entity": ("partial", "entity_assembly_and_vehicle_wheel_transforms"),
     "EXItemAnimator_Map": (
         "partial",
         "map_geometry_preview_and_native_collision_query_consumers",
     ),
+    "EXItemAnimator_ForceFeedback": (
+        "diagnostic",
+        "forcefeedback_hash_factory_exact_vtable_with_base_animator_behavior",
+    ),
+    "EXItemAnimator_Collision": (
+        "diagnostic",
+        "single_collision_datum_init_owner_pose_refresh_append_and_spatial_query_dispatch",
+    ),
     "EXItemAnimator_DynLight": (
         "diagnostic",
         "dynamic_light_record_attach_transform_color_update_and_detach",
     ),
+    "EXItemAnimator_Sound": ("diagnostic", "sound_resource_bind_reset_and_audio_manager_update"),
     "EXItemAnimator_Particle": ("partial", "native_particle_command_preview"),
     "EXItemAnimator_Script": ("partial", "script_timeline_and_geometry_preview"),
+    "EXItemRender": ("diagnostic", "two_slot_descriptor_and_deleting_destructor_base"),
     "EXItemRender_SkinAnim": ("partial", "animskin_render_path"),
     "XItemPhysics": (
         "diagnostic",
@@ -130,7 +146,10 @@ CLASS_COVERAGE = {
         "diagnostic",
         "target_attraction_acceleration_and_velocity_damping",
     ),
-    "XItemPhysics_Platform": ("partial", "contact_registration_and_linear_carry"),
+    "XItemPhysics_Platform": (
+        "partial",
+        "peer_registration_linear_and_angular_carry_with_temporal_script_entity_pose_cache",
+    ),
     "XItemPhysics_Projectile": (
         "diagnostic",
         "ballistic_integrator_and_projectile_hit_owner_latch",
@@ -391,6 +410,7 @@ PHYSICS_GENERIC_SLOT_ROLES = {
     2: "runtime_descriptor",
     3: "destructor",
     4: "world_collision_query_dispatch",
+    16: "platform_relative_script_entity_pose_delta_consumer",
     23: "object_contact_callback",
     25: "collision_record_handled_flag",
     26: "contact_callback_primary",
@@ -411,8 +431,8 @@ PHYSICS_CLASS_SLOT_ROLES = {
     ("XItemPhysics_PickupAttract", 0): "target_attraction_update",
     ("XItemPhysics_Platform", 0): "moving_platform_update",
     ("XItemPhysics_Platform", 12): "platform_contact_dispatch",
-    ("XItemPhysics_Platform", 26): "platform_contact_registration",
-    ("XItemPhysics_Platform", 27): "platform_contact_point_velocity_transfer",
+    ("XItemPhysics_Platform", 26): "platform_peer_attachment_registration",
+    ("XItemPhysics_Platform", 27): "platform_peer_body_origin_velocity_transfer_and_reference_pose_cache_seed",
     ("XItemPhysics_Projectile", 0): "ballistic_projectile_update",
     ("XItemPhysics_Projectile", 23): "projectile_hit_owner_latch",
     ("XItemPhysics_ProjectileRayCast", 0): "swept_raycast_update",
@@ -429,14 +449,33 @@ ANIMATOR_GENERIC_SLOT_ROLES = {
     3: "object_size_getter",
 }
 ANIMATOR_CLASS_SLOT_ROLES = {
+    ("EXItemAnimator_AnimModifier", 4): "spine_modifier_head_tracking_fp_idle_gate_and_left_right_pose_mirror_update",
+    ("EXItemAnimator_Collision", 8): "collision_datum_owner_pose_refresh_and_base_update",
+    ("EXItemAnimator_Collision", 11): "collision_datum_append_and_base_dispatch",
+    ("EXItemAnimator_Collision", 12): "collision_datum_transform_and_spatial_query_dispatch",
     ("EXItemAnimator_DynLight", 5): "dynamic_light_transform_color_update",
     ("EXItemAnimator_DynLight", 6): "bind_accept_true",
+    ("EXItemAnimator_Sound", 4): "sound_transition_and_audio_state_reset",
+    ("EXItemAnimator_Sound", 5): "sound_runtime_audio_manager_update",
+    ("EXItemAnimator_Sound", 6): "sound_resource_bind_and_runtime_state_init",
+    ("EXItemAnimator_Sound", 8): "sound_audio_state_reset",
     ("EXItemAnimator_Map", 4): "map_noop_hook",
     ("EXItemAnimator_Map", 5): "map_bind_gate_false",
     ("EXItemAnimator_Map", 6): "owner_resource_bind_and_transform_cache",
-    ("EXItemAnimator_Map", 14): "map_collision_query_narrowphase_0051A943",
-    ("EXItemAnimator_Map", 15): "map_collision_query_narrowphase_00519CB8",
-    ("EXItemAnimator_Map", 18): "map_section_query_and_cached_contact_update",
+    ("EXItemAnimator_Map", 14): "map_geometry_query_variant_a_narrowphase_0051A943",
+    ("EXItemAnimator_Map", 15): "map_geometry_query_variant_b_narrowphase_00519CB8",
+    ("EXItemAnimator_Map", 16): "map_transformed_query_geometry_dispatch",
+    ("EXItemAnimator_Map", 17): "map_single_mutable_query_record_dispatch",
+    ("EXItemAnimator_Map", 18): "map_transformed_world_geometry_query_dispatch",
+    ("EXItemAnimator_Entity", 14): "entity_geometry_query_variant_a_dispatch",
+    ("EXItemAnimator_Entity", 15): "entity_geometry_query_variant_b_dispatch",
+    ("EXItemAnimator_Entity", 16): "entity_transformed_query_geometry_dispatch",
+    ("EXItemAnimator_Entity", 17): "entity_single_mutable_query_record_dispatch",
+    ("EXItemAnimator_Entity", 18): "entity_transformed_world_geometry_query_dispatch",
+    ("EXItemAnimator_Script", 14): "script_child_geometry_query_variant_a_forwarding",
+    ("EXItemAnimator_Script", 15): "script_child_geometry_query_variant_b_forwarding",
+    ("EXItemAnimator_Script", 16): "script_child_transformed_query_geometry_forwarding",
+    ("EXItemAnimator_Script", 18): "script_child_transformed_world_geometry_query_forwarding",
     ("EXItemAnimator_Map", 25): "owner_transform_and_timeline_evaluation",
 }
 

@@ -83,6 +83,39 @@ impl ProcessedMap {
         robots_map_zone_index_by_bsp(&self.bsp_nodes, self.zones.len(), point)
     }
 
+    /// Mirrors the dynamic-light zone broad phase at Robots.exe 0x00523105 ->
+    /// 0x0055475E. The containing BSP zone is always first. Ordinary lights may
+    /// additionally spill into directly connected portal neighbours when the
+    /// light-to-portal geometric distance is below the serialized radius; mode
+    /// bit 1 keeps the light in the containing zone only.
+    pub fn native_dynamic_light_zone_indices(
+        &self,
+        point: Vec3,
+        radius: f32,
+        containing_zone_only: bool,
+    ) -> Vec<usize> {
+        let Some(root_zone) = self.native_zone_index(point) else {
+            return Vec::new();
+        };
+        let mut zones = vec![root_zone];
+        if containing_zone_only || !radius.is_finite() || radius <= 0.0 {
+            return zones;
+        }
+
+        for portal in &self.portals {
+            let Some(neighbour) = robots_portal_neighbor_zone(portal, root_zone, self.zones.len())
+            else {
+                continue;
+            };
+            if robots_portal_distance_to_point(portal, point) < radius
+                && !zones.contains(&neighbour)
+            {
+                zones.push(neighbour);
+            }
+        }
+        zones
+    }
+
     /// Reproduces the local-map streaming request traversal used by
     /// Robots.exe 0x004EEAB3. This is the transient +0x6E request set, not the
     /// renderer's +0x6A activated-resource state and not the visual portal list
@@ -564,6 +597,59 @@ pub fn robots_portal_neighbor_zone(
     } else {
         None
     }
+}
+
+fn point_triangle_distance_squared(point: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
+    let ab = b - a;
+    let ac = c - a;
+    let ap = point - a;
+    let d1 = ab.dot(ap);
+    let d2 = ac.dot(ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return ap.length_squared();
+    }
+
+    let bp = point - b;
+    let d3 = ab.dot(bp);
+    let d4 = ac.dot(bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return bp.length_squared();
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let v = d1 / (d1 - d3);
+        return (point - (a + ab * v)).length_squared();
+    }
+
+    let cp = point - c;
+    let d5 = ab.dot(cp);
+    let d6 = ac.dot(cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return cp.length_squared();
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6);
+        return (point - (a + ac * w)).length_squared();
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && d4 >= d3 && d5 >= d6 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return (point - (b + (c - b) * w)).length_squared();
+    }
+
+    let denominator = 1.0 / (va + vb + vc);
+    let v = vb * denominator;
+    let w = vc * denominator;
+    (point - (a + ab * v + ac * w)).length_squared()
+}
+
+pub fn robots_portal_distance_to_point(portal: &ProcessedPortal, point: Vec3) -> f32 {
+    let [a, b, c, d] = portal.vertices;
+    point_triangle_distance_squared(point, a, b, c)
+        .min(point_triangle_distance_squared(point, a, c, d))
+        .max(0.0)
+        .sqrt()
 }
 
 #[derive(Debug, Clone)]

@@ -12,7 +12,8 @@ use super::{
     gl_helper, robots_advance_live_lighting, robots_transform_world_light_sample,
     robots_world_light_sample,
     viewer::RenderContext,
-    NativeLight, NativeLightZone, RenderStore, RobotsDirectionalSlot, RobotsFog,
+    NativeDynamicLight, NativeLight, NativeLightZone, RenderStore, RobotsDirectionalSlot,
+    RobotsFog,
 };
 
 const NAVMESH_TEXTURE_DATA: &[u8] =
@@ -235,6 +236,33 @@ fn select_native_lights<'a>(
     selected
 }
 
+fn select_native_dynamic_lights<'a>(
+    lights: &'a [NativeDynamicLight],
+    zone_index: Option<usize>,
+    object_center: Vec3,
+    object_radius: f32,
+) -> Vec<&'a NativeDynamicLight> {
+    const MAX_DYNAMIC_LIGHTS: usize = 4;
+    let Some(zone_index) = zone_index else {
+        return Vec::new();
+    };
+    let mut selected = Vec::with_capacity(MAX_DYNAMIC_LIGHTS);
+    for light in lights {
+        if !light.zone_indices.contains(&zone_index) {
+            continue;
+        }
+        let reach = light.radius.max(0.0) + object_radius.max(0.0);
+        if object_center.distance_squared(light.position) >= reach * reach {
+            continue;
+        }
+        selected.push(light);
+        if selected.len() == MAX_DYNAMIC_LIGHTS {
+            break;
+        }
+    }
+    selected
+}
+
 #[derive(Clone)]
 struct EntityMeshGpu {
     vertex_count: usize,
@@ -263,6 +291,8 @@ pub struct EntityRenderer {
     /// MapZone geometry is rendered at world origin, so its light query must sample the
     /// serialized zone bounds rather than the render transform position.
     pub native_light_sample_position: Option<Vec3>,
+    local_bound_center: Vec3,
+    local_bound_radius: f32,
 }
 
 impl EntityRenderer {
@@ -280,6 +310,8 @@ impl EntityRenderer {
             navmesh_texture_scale: 1.0 / 16.0,
             native_light_zone: None,
             native_light_sample_position: None,
+            local_bound_center: Vec3::ZERO,
+            local_bound_radius: 0.0,
             file_hashcode,
         }
     }
@@ -309,6 +341,12 @@ impl EntityRenderer {
         self.serialized_vertex_count = Some(vertex_data.len());
         let bounding_box = mesh.bounding_box();
         let center = (bounding_box.0 + bounding_box.1) / 2.0;
+        self.local_bound_center = center;
+        self.local_bound_radius = mesh
+            .vertex_data
+            .iter()
+            .map(|vertex| Vec3::from(vertex.pos).distance(center))
+            .fold(0.0f32, f32::max);
 
         let vertex_array = gl.create_vertex_array().unwrap();
         gl.bind_vertex_array(Some(vertex_array));
@@ -444,6 +482,7 @@ impl EntityRenderer {
 
         self.upload_global_lighting(gl, shader, position, context);
         self.upload_native_lights(gl, shader, position, context);
+        self.upload_native_dynamic_lights(gl, shader, position, rotation, scale, context);
         self.upload_native_fog(gl, shader, position, context);
         gl.uniform_1_i32(gl.get_uniform_location(shader, "u_texture").as_ref(), 0);
         gl.uniform_4_f32(
@@ -706,6 +745,74 @@ impl EntityRenderer {
             gl.get_uniform_location(shader, "u_nativeLightParameters[0]")
                 .as_ref(),
             &parameters,
+        );
+    }
+
+    unsafe fn upload_native_dynamic_lights(
+        &self,
+        gl: &glow::Context,
+        shader: glow::Program,
+        object_position: Vec3,
+        object_rotation: Quat,
+        object_scale: Vec3,
+        context: &RenderContext,
+    ) {
+        const MAX_DYNAMIC_LIGHTS: usize = 4;
+        let object_center =
+            object_position + object_rotation.mul_vec3(object_scale * self.local_bound_center);
+        let object_radius =
+            self.local_bound_radius * object_scale.abs().max_element().max(f32::EPSILON);
+        let zone_index = self
+            .native_light_zone
+            .filter(|index| *index < context.uniforms.native_light_zones.len())
+            .or_else(|| {
+                containing_native_light_zone(&context.uniforms.native_light_zones, object_center)
+            });
+        let lights = if context.uniforms.native_lights_enabled {
+            select_native_dynamic_lights(
+                &context.uniforms.native_dynamic_lights,
+                zone_index,
+                object_center,
+                object_radius,
+            )
+        } else {
+            Vec::new()
+        };
+
+        let mut positions = [0.0f32; MAX_DYNAMIC_LIGHTS * 4];
+        let mut directions = [0.0f32; MAX_DYNAMIC_LIGHTS * 4];
+        let mut colours = [0.0f32; MAX_DYNAMIC_LIGHTS * 4];
+        for (index, light) in lights.iter().enumerate() {
+            let offset = index * 4;
+            positions[offset..offset + 3].copy_from_slice(&light.position.to_array());
+            positions[offset + 3] = light.radius.max(f32::EPSILON);
+            if let Some(direction) = light.direction {
+                directions[offset..offset + 3]
+                    .copy_from_slice(&direction.normalize_or_zero().to_array());
+                directions[offset + 3] = 1.0;
+            }
+            colours[offset..offset + 4].copy_from_slice(&light.colour.to_array());
+        }
+
+        gl.uniform_1_i32(
+            gl.get_uniform_location(shader, "u_dynamicLightCount")
+                .as_ref(),
+            lights.len() as i32,
+        );
+        gl.uniform_4_f32_slice(
+            gl.get_uniform_location(shader, "u_dynamicLightPositionRadius[0]")
+                .as_ref(),
+            &positions,
+        );
+        gl.uniform_4_f32_slice(
+            gl.get_uniform_location(shader, "u_dynamicLightDirectionMode[0]")
+                .as_ref(),
+            &directions,
+        );
+        gl.uniform_4_f32_slice(
+            gl.get_uniform_location(shader, "u_dynamicLightColour[0]")
+                .as_ref(),
+            &colours,
         );
     }
 
@@ -1059,10 +1166,11 @@ impl EntityRenderer {
 mod tests {
     use super::{
         containing_native_light_zone, native_light_feature_factor, native_light_range_factor,
-        robots_entity_fog_enabled, robots_linear_fog_amount, select_native_lights,
+        robots_entity_fog_enabled, robots_linear_fog_amount, select_native_dynamic_lights,
+        select_native_lights,
     };
-    use crate::render::{NativeLight, NativeLightZone, RobotsFog};
-    use glam::Vec3;
+    use crate::render::{NativeDynamicLight, NativeLight, NativeLightZone, RobotsFog};
+    use glam::{Vec3, Vec4};
 
     fn light(light_type: u16, x: f32) -> NativeLight {
         NativeLight {
@@ -1075,6 +1183,30 @@ mod tests {
             light_type,
             beam_angle_degrees: 60.0,
         }
+    }
+
+    #[test]
+    fn native_dynamic_light_query_keeps_first_four_after_zone_and_bound_filter() {
+        let lights = (0..7)
+            .map(|index| NativeDynamicLight {
+                position: Vec3::new(index as f32 * 2.0, 0.0, 0.0),
+                direction: None,
+                colour: Vec4::ONE,
+                radius: 10.0,
+                zone_indices: if index == 6 { vec![1] } else { vec![0] },
+            })
+            .collect::<Vec<_>>();
+        let selected = select_native_dynamic_lights(&lights, Some(0), Vec3::ZERO, 1.0);
+        assert_eq!(selected.len(), 4);
+        assert_eq!(selected[0].position.x, 0.0);
+        assert_eq!(selected[3].position.x, 6.0);
+
+        let outside = select_native_dynamic_lights(&lights, Some(0), Vec3::splat(100.0), 0.0);
+        assert!(outside.is_empty());
+        let wrong_zone =
+            select_native_dynamic_lights(&lights, Some(1), Vec3::new(12.0, 0.0, 0.0), 1.0);
+        assert_eq!(wrong_zone.len(), 1);
+        assert_eq!(wrong_zone[0].position.x, 12.0);
     }
 
     #[test]

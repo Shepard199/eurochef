@@ -50,6 +50,15 @@ pub struct NativeLight {
     pub beam_angle_degrees: f32,
 }
 
+#[derive(Debug, Clone)]
+pub struct NativeDynamicLight {
+    pub position: glam::Vec3,
+    pub direction: Option<glam::Vec3>,
+    pub colour: glam::Vec4,
+    pub radius: f32,
+    pub zone_indices: Vec<usize>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct NativeLightingTriangle {
     pub positions: [glam::Vec3; 3],
@@ -241,6 +250,7 @@ pub struct RenderUniforms {
     pub native_lights_enabled: bool,
     pub native_light_strength: f32,
     pub native_lights: Vec<NativeLight>,
+    pub native_dynamic_lights: Vec<NativeDynamicLight>,
     pub native_light_zones: Vec<NativeLightZone>,
     pub native_fog_zones: Vec<RobotsFog>,
     pub native_fog_zone_override: Option<usize>,
