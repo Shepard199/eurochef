@@ -3,7 +3,8 @@ mod catalog;
 
 pub(crate) use adpcm::decode_eurocom_ima_adpcm;
 pub(crate) use catalog::{
-    NativeSoundCatalog, NativeSoundProfile, NativeSoundProfileCatalog, NativeWave,
+    robots_sound_details_bank_uid, NativeSoundCatalog, NativeSoundProfile,
+    NativeSoundProfileCatalog, NativeWave,
 };
 
 pub(crate) struct DecodedWave {

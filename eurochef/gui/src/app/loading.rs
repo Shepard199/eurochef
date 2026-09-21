@@ -429,6 +429,77 @@ impl EurochefApp {
                             "Resolved {} runtime-created Monster/NPC character visuals",
                             resolved_characters
                         );
+                        let pattern_groups = maps::resolve_robots_pattern_groups(
+                            &mut map,
+                            &self.path_cache,
+                            platform,
+                        )?;
+                        info!("Resolved {} Robots PatternGroup resources", pattern_groups);
+                        let (ball_track_pairs, ball_track_schedules) =
+                            maps::resolve_robots_ball_track_pairs(
+                                &mut map,
+                                &self.path_cache,
+                                platform,
+                            )?;
+                        info!(
+                            "Resolved {} Robots BallTrack resource pairs and {} alternate schedules",
+                            ball_track_pairs,
+                            ball_track_schedules
+                        );
+                        let (mission_definitions, inventory_definitions) =
+                            maps::resolve_robots_mission_runtime_databases(
+                                &mut map,
+                                &self.path_cache,
+                                platform,
+                            )?;
+                        info!(
+                            "Resolved {} Robots Mission definitions and {} Inventory definitions",
+                            mission_definitions, inventory_definitions
+                        );
+                        let missile_rows = maps::resolve_robots_missile_database(
+                            &mut map,
+                            &self.path_cache,
+                            platform,
+                        )?;
+                        info!("Resolved {} Robots Missile definitions", missile_rows);
+                        let (explosion_rows, explosion_fragments) =
+                            maps::resolve_robots_explosion_database(
+                                &mut map,
+                                &self.path_cache,
+                                platform,
+                            )?;
+                        info!(
+                            "Resolved {} Robots Explosion definitions and {} fragment definitions",
+                            explosion_rows, explosion_fragments
+                        );
+                        let player_hit_area = maps::resolve_robots_player_hit_area(
+                            &mut map,
+                            &self.path_cache,
+                            platform,
+                        )?;
+                        info!("Resolved Robots Player HitArea: {}", player_hit_area);
+                        let (shop_groups, shop_items) = maps::resolve_robots_shop_database(
+                            &mut map,
+                            &self.path_cache,
+                            platform,
+                        )?;
+                        info!(
+                            "Resolved {} Robots Shop groups and {} Shop item definitions",
+                            shop_groups, shop_items
+                        );
+                        let text_groups =
+                            maps::resolve_robots_text_groups(&mut map, &self.path_cache, platform)?;
+                        info!("Resolved {} Robots TextGroup resources", text_groups);
+                        let sweeper_boss_pattern_rows = maps::resolve_robots_sweeper_boss_patterns(
+                            &mut edb,
+                            &mut map,
+                            &self.path_cache,
+                            platform,
+                        )?;
+                        info!(
+                            "Resolved {} Robots SweeperBoss pattern rows",
+                            sweeper_boss_pattern_rows
+                        );
                     }
                     sound_preview.lock().preload_hashes(
                         map.iter()

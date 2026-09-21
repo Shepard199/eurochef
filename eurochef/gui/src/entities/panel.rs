@@ -4,7 +4,13 @@ impl EntityListPanel {
     pub(crate) fn show(&mut self, context: &egui::Context, ui: &mut egui::Ui) {
         if self.entity_renderer.is_some() {
             ui.horizontal(|ui| {
-                if ui.button("< Back").clicked() {
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new("‹ Back").strong())
+                            .corner_radius(egui::CornerRadius::same(6)),
+                    )
+                    .clicked()
+                {
                     self.entity_renderer = None;
                     return;
                 }
@@ -22,7 +28,11 @@ impl EntityListPanel {
                 .show(ui, |ui| {
                     if !self.skins.is_empty() {
                         ui.spacing_mut().item_spacing = [16., 2.].into();
-                        ui.heading(format!("{} Skeletons", fa::WALKING));
+                        Self::show_section_header(
+                            ui,
+                            format!("{} Skeletons", fa::WALKING),
+                            self.skins.len(),
+                        );
                         ui.spacing_mut().item_spacing = [16., 8.].into();
                         ui.separator();
                         let skin_ids = self
@@ -40,7 +50,11 @@ impl EntityListPanel {
 
                     if !self.ref_entities.is_empty() {
                         ui.spacing_mut().item_spacing = [16., 2.].into();
-                        ui.heading("\u{e52f} Ref Meshes");
+                        Self::show_section_header(
+                            ui,
+                            "\u{e52f} Ref Meshes",
+                            self.ref_entities.len(),
+                        );
                         ui.spacing_mut().item_spacing = [16., 8.].into();
                         ui.separator();
                         let refent_ids = self
@@ -58,7 +72,11 @@ impl EntityListPanel {
 
                     if !self.entities.is_empty() {
                         ui.spacing_mut().item_spacing = [16., 2.].into();
-                        ui.heading(format!("{} Meshes", fa::CUBE));
+                        Self::show_section_header(
+                            ui,
+                            format!("{} Meshes", fa::CUBE),
+                            self.entities.len(),
+                        );
                         ui.spacing_mut().item_spacing = [16., 8.].into();
                         ui.separator();
                         let entity_ids = self
@@ -87,179 +105,264 @@ impl EntityListPanel {
         self.render_previews(context);
     }
 
+    fn show_section_header(ui: &mut egui::Ui, title: impl Into<String>, count: usize) {
+        ui.horizontal(|ui| {
+            ui.heading(title.into());
+            egui::Frame::new()
+                .fill(ui.visuals().widgets.noninteractive.bg_fill)
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::symmetric(7, 2))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(count.to_string()).strong().small());
+                });
+        });
+    }
+
     fn show_section(&mut self, ui: &mut egui::Ui, ids: Vec<(u32, Option<String>)>, ty: i32) {
+        const CARD_WIDTH: f32 = 256.0;
+        const PREVIEW_HEIGHT: f32 = 238.0;
+
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = [16., 16.].into();
             for (ii, (i, err)) in ids.iter().enumerate() {
                 let kind = if ty == 2 { "AnimSkin" } else { "Entity" };
                 let resource_label = format_typed_hashcode_with_id(&self.hashcodes, kind, *i);
-                ui.allocate_ui(egui::Vec2::new(256., 256. + 48.), |ui| {
-                    ui.spacing_mut().item_spacing = [4., 4.].into();
-                    ui.vertical(|ui| {
-                        if let Some(err) = err {
-                            let (rect, response) = ui
-                                .allocate_exact_size(egui::vec2(256., 256.), egui::Sense::click());
+                let robots_surface_mask_counts = match ty {
+                    0 => self
+                        .entities
+                        .iter()
+                        .find(|ir| ir.hashcode == *i)
+                        .and_then(|ir| ir.data.as_ref().ok())
+                        .map(|(_, mesh)| mesh.robots_surface_mask_counts.clone())
+                        .unwrap_or_default(),
+                    1 => self
+                        .ref_entities
+                        .iter()
+                        .find(|ir| ir.hashcode == *i)
+                        .and_then(|ir| ir.data.as_ref().ok())
+                        .map(|(_, mesh)| mesh.robots_surface_mask_counts.clone())
+                        .unwrap_or_default(),
+                    _ => BTreeMap::new(),
+                };
 
-                            ui.painter().rect_filled(
-                                rect,
-                                egui::CornerRadius::ZERO,
-                                Color32::BLACK,
-                            );
+                // Every tile reserves the same footprint, so a long resource
+                // name cannot shift later rows or make a visual grid ragged.
+                ui.allocate_ui_with_layout(
+                    egui::Vec2::new(CARD_WIDTH, PREVIEW_HEIGHT + 78.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                    let card = egui::Frame::new()
+                        .fill(ui.visuals().widgets.noninteractive.weak_bg_fill)
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            ui.visuals().widgets.noninteractive.bg_stroke.color,
+                        ))
+                        .corner_radius(egui::CornerRadius::same(10))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.set_width(CARD_WIDTH - 18.0);
+                            ui.spacing_mut().item_spacing = [4., 7.].into();
 
-                            ui.painter().text(
-                                rect.left_top() + egui::vec2(24., 24.),
-                                egui::Align2::CENTER_CENTER,
-                                font_awesome::EXCLAMATION_TRIANGLE,
-                                egui::FontId::proportional(24.),
-                                Color32::RED,
-                            );
+                            let preview_size = egui::vec2(CARD_WIDTH - 18.0, PREVIEW_HEIGHT);
+                            let response = if let Some(err) = err {
+                                let (rect, response) =
+                                    ui.allocate_exact_size(preview_size, egui::Sense::hover());
+                                let error_fill = Color32::from_rgb(52, 18, 24);
+                                let error_stroke =
+                                    egui::Stroke::new(1.0, Color32::from_rgb(180, 55, 68));
 
-                            response.on_hover_ui(|ui| {
-                                ui.label(format!("{resource_label} failed:"));
-                                ui.colored_label(
-                                    Color32::LIGHT_RED,
-                                    cutoff_string(strip_ansi_codes(err), 1024),
+                                ui.painter().rect(
+                                    rect,
+                                    egui::CornerRadius::same(8),
+                                    error_fill,
+                                    error_stroke,
+                                    egui::StrokeKind::Inside,
                                 );
-                            });
+                                ui.painter().text(
+                                    rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    font_awesome::EXCLAMATION_TRIANGLE,
+                                    egui::FontId::proportional(36.),
+                                    Color32::LIGHT_RED,
+                                );
 
-                            return;
-                        }
-
-                        let response = if let Some(Some(tex)) = self.entity_previews.get(i) {
-                            egui::Image::new((tex.id(), egui::vec2(256., 256.)))
-                                .uv(egui::Rect::from_min_size(
-                                    egui::Pos2::ZERO,
-                                    [1.0, 1.0].into(),
-                                ))
-                                .sense(egui::Sense::click())
-                                .ui(ui)
-                        } else {
-                            let (rect, response) =
-                                ui.allocate_exact_size([256., 256.].into(), egui::Sense::click());
-
-                            ui.painter().rect_filled(
-                                rect,
-                                egui::CornerRadius {
-                                    nw: 8,
-                                    ne: 8,
-                                    ..Default::default()
-                                },
-                                Color32::from_rgb(50, 50, 50),
-                            );
-
-                            ui.painter().text(
-                                rect.center() + [0., 16.].into(),
-                                egui::Align2::CENTER_CENTER,
-                                fa::CLOCK,
-                                egui::FontId::proportional(96.),
-                                Color32::WHITE,
-                            );
-
-                            response
-                        };
-
-                        let response = response.on_hover_ui(|ui| {
-                            ui.label(format!(
-                                "{resource_label}\nIndex: {ii}\nHashcode: 0x{i:08X}"
-                            ));
-                        });
-
-                        if response
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .clicked()
-                        {
-                            self.entity_label = resource_label.clone();
-
-                            if ty != 2 {
-                                self.entity_renderer = Some(EntityFrame::new(
-                                    self.file,
-                                    self.render_store.clone(),
-                                    &self.gl,
-                                    &[if ty == 0 {
-                                        &self
-                                            .entities
-                                            .iter()
-                                            .find(|ir| ir.hashcode == *i)
-                                            .as_ref()
-                                            .unwrap()
-                                            .data
-                                            .as_ref()
-                                            .unwrap()
-                                            .1
-                                    } else {
-                                        &self
-                                            .ref_entities
-                                            .iter()
-                                            .find(|ir| ir.hashcode == *i)
-                                            .as_ref()
-                                            .unwrap()
-                                            .data
-                                            .as_ref()
-                                            .unwrap()
-                                            .1
-                                    }],
-                                    self.platform,
-                                ));
+                                response.on_hover_ui(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("{resource_label} failed")).strong(),
+                                    );
+                                    ui.colored_label(
+                                        Color32::LIGHT_RED,
+                                        cutoff_string(strip_ansi_codes(err), 1024),
+                                    );
+                                })
+                            } else if let Some(Some(tex)) = self.entity_previews.get(i) {
+                                egui::Image::new((tex.id(), preview_size))
+                                    .uv(egui::Rect::from_min_size(
+                                        egui::Pos2::ZERO,
+                                        [1.0, 1.0].into(),
+                                    ))
+                                    .sense(egui::Sense::click())
+                                    .ui(ui)
                             } else {
-                                let mut combined_entities = vec![];
-                                let skin = &self
-                                    .skins
-                                    .iter()
-                                    .find(|ir| ir.hashcode == *i)
-                                    .as_ref()
-                                    .unwrap()
-                                    .data
-                                    .as_ref()
-                                    .unwrap();
+                                let (rect, response) =
+                                    ui.allocate_exact_size(preview_size, egui::Sense::click());
+                                let loading_fill =
+                                    ui.visuals().faint_bg_color.linear_multiply(0.72);
 
-                                let entity_indices: Vec<u32> = skin
-                                    .entities
-                                    .iter()
-                                    .chain(skin.more_entities.iter())
-                                    .map(|d| d.entity_index & 0x00ffffff)
-                                    .collect();
+                                ui.painter().rect_filled(
+                                    rect,
+                                    egui::CornerRadius::same(8),
+                                    loading_fill,
+                                );
+                                ui.painter().text(
+                                    rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    fa::CLOCK,
+                                    egui::FontId::proportional(48.),
+                                    ui.visuals().weak_text_color(),
+                                );
 
-                                for i in entity_indices {
-                                    combined_entities
-                                        .push(&self.entities[i as usize].data.as_ref().unwrap().1);
-                                }
-
-                                self.entity_renderer = Some(EntityFrame::new(
-                                    self.file,
-                                    self.render_store.clone(),
-                                    &self.gl,
-                                    &combined_entities,
-                                    self.platform,
-                                ));
-                            }
-                        }
-
-                        ui.horizontal_wrapped(|ui| {
-                            match ty {
-                                2 => {
-                                    ui.colored_label(
-                                        egui::Rgba::from_srgba_premultiplied(255, 130, 55, 255),
-                                        fa::WALKING.to_string(),
-                                    );
-                                }
-                                1 => {
-                                    ui.colored_label(
-                                        egui::Rgba::from_srgba_premultiplied(55, 160, 0, 255),
-                                        "\u{e52f}",
-                                    );
-                                }
-                                0 => {
-                                    ui.colored_label(
-                                        egui::Rgba::from_srgba_premultiplied(55, 160, 255, 255),
-                                        fa::CUBE.to_string(),
-                                    );
-                                }
-                                _ => {}
+                                response
                             };
-                            ui.label(RichText::new(&resource_label).strong());
+
+                            let response = if err.is_some() {
+                                response
+                            } else {
+                                response.on_hover_ui(|ui| {
+                                    ui.label(format!(
+                                        "{resource_label}\nIndex: {ii}\nHashcode: 0x{i:08X}"
+                                    ));
+                                    if !robots_surface_mask_counts.is_empty() {
+                                        ui.separator();
+                                        ui.strong("Robots Native Surface Metadata");
+                                        for (mask, count) in &robots_surface_mask_counts {
+                                            ui.label(format!(
+                                                "{}: {} face(s)",
+                                                robots_surface_mask_label(*mask),
+                                                count
+                                            ));
+                                        }
+                                        ui.small(
+                                            "Isolated face mapping only: native 0x0041C2C0 ORs all active contact-face metadata before category selection.",
+                                        );
+                                    }
+                                })
+                            };
+
+                            if err.is_none()
+                                && response
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .clicked()
+                            {
+                                self.entity_label = resource_label.clone();
+
+                                if ty != 2 {
+                                    self.entity_renderer = Some(EntityFrame::new(
+                                        self.file,
+                                        self.render_store.clone(),
+                                        &self.gl,
+                                        &[if ty == 0 {
+                                            &self
+                                                .entities
+                                                .iter()
+                                                .find(|ir| ir.hashcode == *i)
+                                                .as_ref()
+                                                .unwrap()
+                                                .data
+                                                .as_ref()
+                                                .unwrap()
+                                                .1
+                                        } else {
+                                            &self
+                                                .ref_entities
+                                                .iter()
+                                                .find(|ir| ir.hashcode == *i)
+                                                .as_ref()
+                                                .unwrap()
+                                                .data
+                                                .as_ref()
+                                                .unwrap()
+                                                .1
+                                        }],
+                                        self.platform,
+                                    ));
+                                } else {
+                                    let mut combined_entities = vec![];
+                                    let skin = &self
+                                        .skins
+                                        .iter()
+                                        .find(|ir| ir.hashcode == *i)
+                                        .as_ref()
+                                        .unwrap()
+                                        .data
+                                        .as_ref()
+                                        .unwrap();
+
+                                    let entity_indices: Vec<u32> = skin
+                                        .entities
+                                        .iter()
+                                        .chain(skin.more_entities.iter())
+                                        .map(|d| d.entity_index & 0x00ffffff)
+                                        .collect();
+
+                                    for i in entity_indices {
+                                        combined_entities.push(
+                                            &self.entities[i as usize].data.as_ref().unwrap().1,
+                                        );
+                                    }
+
+                                    self.entity_renderer = Some(EntityFrame::new(
+                                        self.file,
+                                        self.render_store.clone(),
+                                        &self.gl,
+                                        &combined_entities,
+                                        self.platform,
+                                    ));
+                                }
+                            }
+
+                            let (badge_color, badge_icon, badge_label) = match ty {
+                                2 => (
+                                    Color32::from_rgb(255, 130, 55),
+                                    fa::WALKING.to_string(),
+                                    "Skeleton",
+                                ),
+                                1 => (
+                                    Color32::from_rgb(55, 180, 95),
+                                    "\u{e52f}".to_string(),
+                                    "Ref Mesh",
+                                ),
+                                _ => (
+                                    Color32::from_rgb(55, 160, 255),
+                                    fa::CUBE.to_string(),
+                                    "Mesh",
+                                ),
+                            };
+
+                            egui::Frame::new()
+                                .fill(badge_color.linear_multiply(0.2))
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .inner_margin(egui::Margin::symmetric(6, 2))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(format!("{badge_icon}  {badge_label}"))
+                                            .color(badge_color)
+                                            .strong()
+                                            .small(),
+                                    );
+                                });
+
+                            ui.add(
+                                egui::Label::new(RichText::new(&resource_label).strong())
+                                    .truncate()
+                                    .show_tooltip_when_elided(true),
+                            );
                         });
-                    });
-                });
+
+                    card.response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    },
+                );
             }
         });
         ui.add_space(16.0);

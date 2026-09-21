@@ -7,6 +7,15 @@ use eurochef_edb::binrw::BinReaderExt;
 use eurochef_edb::{edb::EdbFile, versions::Platform, Hashcode};
 use eurochef_shared::filesystem::path::DissectedFilelistPath;
 use eurochef_shared::maps::{format_hashcode, DefinitionDataType};
+use eurochef_shared::robots_runtime::inventory::{
+    RobotsInventoryDefinition, ROBOTS_INVENTORY_FILE_UID, ROBOTS_INVENTORY_SPREADSHEET_UID,
+};
+use eurochef_shared::robots_runtime::mission::{
+    RobotsMissionDefinition, ROBOTS_MISSIONS_FILE_UID, ROBOTS_MISSIONS_SPREADSHEET_UID,
+};
+use eurochef_shared::robots_runtime::shop::{
+    read_robots_shop_database, ROBOTS_SHOP_FILE_UID, ROBOTS_SHOP_SPREADSHEET_UID,
+};
 use eurochef_shared::spreadsheets::{SpreadsheetDefinitions, UXGeoSpreadsheet};
 
 pub fn execute_command(filename: String, output_folder: Option<String>) -> anyhow::Result<()> {
@@ -20,6 +29,48 @@ pub fn execute_command(filename: String, output_folder: Option<String>) -> anyho
     let file = File::open(&filename)?;
     let reader = BufReader::new(file);
     let mut edb = EdbFile::new(Box::new(reader), Platform::Pc)?;
+
+    if edb.header.hashcode == ROBOTS_SHOP_FILE_UID {
+        let database = read_robots_shop_database(&mut edb)?;
+        let mut groups =
+            File::create(output_folder.join(format!("{ROBOTS_SHOP_SPREADSHEET_UID:08x}_0.csv")))?;
+        writeln!(groups, "shop_uid,slot,item_uid,price")?;
+        for group in &database.groups {
+            for (slot, item) in group.slots.iter().enumerate() {
+                writeln!(
+                    groups,
+                    "0x{:08x},{slot},0x{:08x},{}",
+                    group.shop_uid, item.item_uid, item.price
+                )?;
+            }
+        }
+
+        let mut items =
+            File::create(output_folder.join(format!("{ROBOTS_SHOP_SPREADSHEET_UID:08x}_1.csv")))?;
+        writeln!(items, "uid,word_04,display_resource_uid,word_0c,word_10,name_text_uid,description_text_uid,quantity_word_1c,purchase_quantity,word_20")?;
+        for item in &database.items {
+            writeln!(
+                items,
+                "0x{:08x},0x{:08x},0x{:08x},0x{:08x},0x{:08x},0x{:08x},0x{:08x},0x{:08x},{},0x{:08x}",
+                item.uid,
+                item.words_04_to_20[0],
+                item.display_resource_uid(),
+                item.words_04_to_20[2],
+                item.words_04_to_20[3],
+                item.name_text_uid(),
+                item.description_text_uid(),
+                item.words_04_to_20[6],
+                item.purchase_quantity(),
+                item.words_04_to_20[7]
+            )?;
+        }
+        info!(
+            groups = database.groups.len(),
+            items = database.items.len(),
+            "Successfully extracted Robots shop spreadsheet"
+        );
+        return Ok(());
+    }
 
     let (spreadsheet_definitions, hashcodes) =
         if let Some(dissected_path) = DissectedFilelistPath::dissect(&filename) {
@@ -87,6 +138,73 @@ pub fn execute_command(filename: String, output_folder: Option<String>) -> anyho
             UXGeoSpreadsheet::Data(data) => {
                 for (sheet_num, sheet) in data.iter().enumerate() {
                     edb.seek(SeekFrom::Start(sheet.address as u64))?;
+                    if edb.header.hashcode == ROBOTS_MISSIONS_FILE_UID
+                        && *hashcode == ROBOTS_MISSIONS_SPREADSHEET_UID
+                    {
+                        let mut output = File::create(
+                            output_folder.join(format!("{hashcode:08x}_{sheet_num}.csv")),
+                        )?;
+                        writeln!(
+                            output,
+                            "mission_uid,objective_uid,hud_item_uid,mission_text_uid"
+                        )?;
+                        for _ in 0..sheet.row_count {
+                            let words = [
+                                edb.read_type(edb.endian)?,
+                                edb.read_type(edb.endian)?,
+                                edb.read_type(edb.endian)?,
+                                edb.read_type(edb.endian)?,
+                            ];
+                            if let Some(row) = RobotsMissionDefinition::from_native_words(words) {
+                                writeln!(
+                                    output,
+                                    "0x{:08x},0x{:08x},0x{:08x},0x{:08x}",
+                                    row.mission_uid,
+                                    row.objective_uid,
+                                    row.hud_item_uid,
+                                    row.mission_text_uid
+                                )?;
+                            }
+                        }
+                        continue;
+                    }
+                    if edb.header.hashcode == ROBOTS_INVENTORY_FILE_UID
+                        && *hashcode == ROBOTS_INVENTORY_SPREADSHEET_UID
+                    {
+                        let mut output = File::create(
+                            output_folder.join(format!("{hashcode:08x}_{sheet_num}.csv")),
+                        )?;
+                        writeln!(
+                            output,
+                            "uid,word_04,word_08,word_0c,word_10,word_14,target_word_18,target"
+                        )?;
+                        for _ in 0..sheet.row_count {
+                            let words = [
+                                edb.read_type(edb.endian)?,
+                                edb.read_type(edb.endian)?,
+                                edb.read_type(edb.endian)?,
+                                edb.read_type(edb.endian)?,
+                                edb.read_type(edb.endian)?,
+                                edb.read_type(edb.endian)?,
+                                edb.read_type(edb.endian)?,
+                            ];
+                            if let Some(row) = RobotsInventoryDefinition::from_native_words(words) {
+                                writeln!(
+                                    output,
+                                    "0x{:08x},0x{:08x},0x{:08x},0x{:08x},0x{:08x},0x{:08x},0x{:08x},{}",
+                                    row.uid,
+                                    row.words_04_to_14[0],
+                                    row.words_04_to_14[1],
+                                    row.words_04_to_14[2],
+                                    row.words_04_to_14[3],
+                                    row.words_04_to_14[4],
+                                    row.target_word_18,
+                                    row.target(0, 0)
+                                )?;
+                            }
+                        }
+                        continue;
+                    }
                     let sheet_definition = match spreadsheet_definition.0.get(hashcode) {
                         None => {
                             error!("Missing spreadsheet definition for file {:08x} spreadsheet {hashcode:08x} sheet #{sheet_num} (address 0x{:x})", edb.header.hashcode, sheet.address);

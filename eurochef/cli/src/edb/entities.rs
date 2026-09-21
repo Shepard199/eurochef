@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::File,
     io::{BufReader, Cursor, Seek, SeekFrom, Write},
     path::Path,
@@ -21,6 +21,151 @@ use crate::{
     edb::{gltf_export, resource_file_stem, resource_file_stem_in_edb, TICK_STRINGS},
     PlatformArg,
 };
+
+#[derive(serde::Serialize)]
+struct RobotsCollisionTriangleExport {
+    mesh_index: u32,
+    group_index: u32,
+    group_header_raw: u16,
+    face_index: u32,
+    positions: [[f32; 3]; 3],
+    surface_metadata: u16,
+    trailing_raw: u16,
+}
+
+#[derive(serde::Serialize)]
+struct RobotsCollisionSurfaceContractExport {
+    classifier: &'static str,
+    contact_accumulation: &'static str,
+    metadata_mask: u16,
+}
+
+#[derive(serde::Serialize)]
+struct RobotsCollisionExport<'a> {
+    schema: &'static str,
+    source_edb: &'a str,
+    source_file: u32,
+    entity_id: &'a str,
+    source_space: &'static str,
+    canonical_ue_asset_transform: &'static str,
+    surface_contract: RobotsCollisionSurfaceContractExport,
+    triangle_count: usize,
+    surface_metadata_counts: BTreeMap<u16, usize>,
+    triangles: Vec<RobotsCollisionTriangleExport>,
+}
+
+fn collect_robots_collision_triangles(
+    entity: &EXGeoEntity,
+    mesh_index: &mut u32,
+    triangles: &mut Vec<RobotsCollisionTriangleExport>,
+    surface_metadata_counts: &mut BTreeMap<u16, usize>,
+) -> anyhow::Result<()> {
+    match entity {
+        EXGeoEntity::Mesh(mesh) => {
+            let current_mesh_index = *mesh_index;
+            *mesh_index += 1;
+            let Some(face_info) = &mesh.robots_face_info else {
+                return Ok(());
+            };
+            for (group_index, group) in face_info.groups.iter().enumerate() {
+                for (face_index, face) in group.faces.iter().enumerate() {
+                    let [a, b, c] = face.vertex_indices.map(usize::from);
+                    let Some(a) = mesh.vertices.get(a) else {
+                        anyhow::bail!(
+                            "collision face references vertex {} outside mesh {} vertex count {}",
+                            a,
+                            current_mesh_index,
+                            mesh.vertices.len()
+                        );
+                    };
+                    let Some(b) = mesh.vertices.get(b) else {
+                        anyhow::bail!(
+                            "collision face references vertex {} outside mesh {} vertex count {}",
+                            b,
+                            current_mesh_index,
+                            mesh.vertices.len()
+                        );
+                    };
+                    let Some(c) = mesh.vertices.get(c) else {
+                        anyhow::bail!(
+                            "collision face references vertex {} outside mesh {} vertex count {}",
+                            c,
+                            current_mesh_index,
+                            mesh.vertices.len()
+                        );
+                    };
+                    *surface_metadata_counts
+                        .entry(face.surface_metadata)
+                        .or_default() += 1;
+                    triangles.push(RobotsCollisionTriangleExport {
+                        mesh_index: current_mesh_index,
+                        group_index: group_index as u32,
+                        group_header_raw: group.header_raw,
+                        face_index: face_index as u32,
+                        positions: [a.pos, b.pos, c.pos],
+                        surface_metadata: face.surface_metadata,
+                        trailing_raw: face.trailing_raw,
+                    });
+                }
+            }
+        }
+        EXGeoEntity::Split(split) => {
+            for child in &split.entities {
+                collect_robots_collision_triangles(
+                    child,
+                    mesh_index,
+                    triangles,
+                    surface_metadata_counts,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn export_robots_collision(
+    output_folder: &Path,
+    source_edb: &str,
+    source_file: u32,
+    ent_id: &str,
+    entity: &EXGeoEntity,
+) -> anyhow::Result<Option<String>> {
+    let mut mesh_index = 0;
+    let mut triangles = Vec::new();
+    let mut surface_metadata_counts = BTreeMap::new();
+    collect_robots_collision_triangles(
+        entity,
+        &mut mesh_index,
+        &mut triangles,
+        &mut surface_metadata_counts,
+    )?;
+    if triangles.is_empty() {
+        return Ok(None);
+    }
+
+    let filename = format!("{ent_id}.robots_collision.json");
+    let file = File::create(output_folder.join(&filename))?;
+    let export = RobotsCollisionExport {
+        schema: "robots-collision-v1",
+        source_edb,
+        source_file,
+        entity_id: ent_id,
+        source_space: "native EuroChef entity-local coordinates",
+        canonical_ue_asset_transform: "(-x, -z, y) * 100",
+        surface_contract: RobotsCollisionSurfaceContractExport {
+            classifier: "robots-v248-contact-surface-v1",
+            contact_accumulation:
+                "bitwise OR surface_metadata across touching native faces before classification",
+            metadata_mask: 0x78,
+        },
+        triangle_count: triangles.len(),
+        surface_metadata_counts,
+        triangles,
+    };
+    serde_json::to_writer_pretty(file, &export)?;
+    Ok(Some(filename))
+}
 
 fn export_static_mesh_obj<W: Write>(
     mut out: W,
@@ -459,6 +604,9 @@ pub fn execute_command(
             }
             _ => {}
         }
+
+        export_robots_collision(output_folder, &source_edb, header.hashcode, ent_id, &ent)
+            .with_context(|| format!("failed to export native collision for {ent_id}"))?;
 
         if let EXGeoEntity::Mesh(ref mesh) = ent {
             if mesh.data.vertex_count == 0 {

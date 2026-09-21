@@ -36,6 +36,9 @@ pub enum SoundVoiceGroup {
     Manual,
     MapAmbient,
     ObjectAudio,
+    AiPermanent,
+    AiTransient,
+    Message,
     Script,
     MapScript,
 }
@@ -43,6 +46,7 @@ pub enum SoundVoiceGroup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SoundVoiceKey {
     Manual,
+    Message,
     MapAmbient {
         map_hashcode: u32,
         sound_index: usize,
@@ -51,6 +55,13 @@ pub enum SoundVoiceKey {
         map_hashcode: u32,
         trigger_index: usize,
         channel: u8,
+    },
+    AiPermanent {
+        sound_uid: u32,
+    },
+    AiTransient {
+        owner_key: u64,
+        sound_uid: u32,
     },
     Script {
         file: u32,
@@ -69,8 +80,11 @@ impl SoundVoiceKey {
     fn group(self) -> SoundVoiceGroup {
         match self {
             Self::Manual => SoundVoiceGroup::Manual,
+            Self::Message => SoundVoiceGroup::Message,
             Self::MapAmbient { .. } => SoundVoiceGroup::MapAmbient,
             Self::ObjectAudio { .. } => SoundVoiceGroup::ObjectAudio,
+            Self::AiPermanent { .. } => SoundVoiceGroup::AiPermanent,
+            Self::AiTransient { .. } => SoundVoiceGroup::AiTransient,
             Self::Script { .. } => SoundVoiceGroup::Script,
             Self::MapScript { .. } => SoundVoiceGroup::MapScript,
         }
@@ -550,18 +564,22 @@ impl SoundPreview {
         }
         if !self.object_audio_enabled {
             self.stop_group(SoundVoiceGroup::ObjectAudio, 0.05);
+            self.stop_group(SoundVoiceGroup::AiPermanent, 0.05);
+            self.stop_group(SoundVoiceGroup::AiTransient, 0.05);
         }
         if !self.script_enabled {
+            self.stop_group(SoundVoiceGroup::Message, 0.05);
             self.stop_group(SoundVoiceGroup::Script, 0.05);
             self.stop_group(SoundVoiceGroup::MapScript, 0.05);
         }
 
         ui.small(format!(
-            "{} | active {} (ambient {}, object {}, script panel {}, map script {}) | decoding {} | unavailable/failed {}",
+            "{} | active {} (ambient {}, object {}, message {}, script panel {}, map script {}) | decoding {} | unavailable/failed {}",
             self.status,
             self.voices.len(),
             self.voice_count(SoundVoiceGroup::MapAmbient),
             self.voice_count(SoundVoiceGroup::ObjectAudio),
+            self.voice_count(SoundVoiceGroup::Message),
             self.voice_count(SoundVoiceGroup::Script),
             self.voice_count(SoundVoiceGroup::MapScript),
             self.pending_decodes.len(),
@@ -919,8 +937,12 @@ impl SoundPreview {
         match group {
             SoundVoiceGroup::Manual => true,
             SoundVoiceGroup::MapAmbient => self.ambient_enabled,
-            SoundVoiceGroup::ObjectAudio => self.object_audio_enabled,
-            SoundVoiceGroup::Script | SoundVoiceGroup::MapScript => self.script_enabled,
+            SoundVoiceGroup::ObjectAudio
+            | SoundVoiceGroup::AiPermanent
+            | SoundVoiceGroup::AiTransient => self.object_audio_enabled,
+            SoundVoiceGroup::Message | SoundVoiceGroup::Script | SoundVoiceGroup::MapScript => {
+                self.script_enabled
+            }
         }
     }
 
@@ -928,8 +950,12 @@ impl SoundPreview {
         let group_volume = match group {
             SoundVoiceGroup::Manual => self.manual_volume,
             SoundVoiceGroup::MapAmbient => self.ambient_volume,
-            SoundVoiceGroup::ObjectAudio => self.object_audio_volume,
-            SoundVoiceGroup::Script | SoundVoiceGroup::MapScript => self.script_volume,
+            SoundVoiceGroup::ObjectAudio
+            | SoundVoiceGroup::AiPermanent
+            | SoundVoiceGroup::AiTransient => self.object_audio_volume,
+            SoundVoiceGroup::Message | SoundVoiceGroup::Script | SoundVoiceGroup::MapScript => {
+                self.script_volume
+            }
         };
         (base_volume * group_volume * self.master_volume).max(0.0)
     }
@@ -1434,8 +1460,12 @@ impl SoundPreview {
                 let group_volume = match key.group() {
                     SoundVoiceGroup::Manual => manual,
                     SoundVoiceGroup::MapAmbient => ambient,
-                    SoundVoiceGroup::ObjectAudio => object_audio,
-                    SoundVoiceGroup::Script | SoundVoiceGroup::MapScript => script,
+                    SoundVoiceGroup::ObjectAudio
+                    | SoundVoiceGroup::AiPermanent
+                    | SoundVoiceGroup::AiTransient => object_audio,
+                    SoundVoiceGroup::Message
+                    | SoundVoiceGroup::Script
+                    | SoundVoiceGroup::MapScript => script,
                 };
                 voice.target_volume = (voice.base_volume * group_volume * master).max(0.0);
             }

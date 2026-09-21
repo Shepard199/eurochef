@@ -107,6 +107,10 @@ struct ScriptHealthSummary {
     scripts_parse_failed: usize,
     geometry_scripts: usize,
     effect_control_scripts: usize,
+    collision_commands: usize,
+    collision_sphere_commands: usize,
+    collision_capsule_commands: usize,
+    collision_shape_mode_counts: BTreeMap<String, usize>,
     scripts_with_cycles: usize,
     scripts_with_missing_controller_slots: usize,
     unresolved_entities: usize,
@@ -248,6 +252,7 @@ pub fn execute_command(manifest_path: String, output_folder: Option<String>) -> 
         &output_folder.join("script_health_commands.tsv"),
         &report.rows,
     )?;
+    write_collision_commands_tsv(&output_folder.join("collision_commands.tsv"), &report.rows)?;
     write_summary_tsv(
         &output_folder.join("script_health_summary.tsv"),
         &report.summary,
@@ -345,6 +350,21 @@ fn analyze_script(
                 );
             }
             UXGeoScriptCommandData::Sound { .. } => {}
+        }
+        if let Some(RobotsScriptPayloadDiagnostic::Collision {
+            datum_shape_mode, ..
+        }) = &detail.native_payload
+        {
+            summary.collision_commands += 1;
+            increment(
+                &mut summary.collision_shape_mode_counts,
+                format!("0x{datum_shape_mode:02X}"),
+            );
+            if *datum_shape_mode == 3 {
+                summary.collision_capsule_commands += 1;
+            } else {
+                summary.collision_sphere_commands += 1;
+            }
         }
         commands.push(detail);
     }
@@ -1117,6 +1137,54 @@ fn write_commands_tsv(path: &Path, rows: &[ScriptHealthRow]) -> Result<()> {
     Ok(())
 }
 
+fn write_collision_commands_tsv(path: &Path, rows: &[ScriptHealthRow]) -> Result<()> {
+    let mut file = File::create(path)?;
+    writeln!(
+        file,
+        "edb_path\tedb_uid\tscript_uid\tcommand_index\tstart\tlength\tdatum_shape_mode\truntime_shape\tserialized_shape_scalar_0\tserialized_shape_scalar_1\tserialized_shape_scalar_2\tobject_140\traw_mode_tail"
+    )?;
+    for row in rows {
+        for command in &row.commands {
+            let Some(RobotsScriptPayloadDiagnostic::Collision {
+                object_140,
+                datum_shape_mode,
+                raw_mode_tail,
+                serialized_shape_scalar_0,
+                serialized_shape_scalar_1,
+                serialized_shape_scalar_2,
+            }) = &command.native_payload
+            else {
+                continue;
+            };
+            let runtime_shape = if *datum_shape_mode == 3 {
+                "capsule"
+            } else {
+                "sphere"
+            };
+            writeln!(
+                file,
+                "{}\t0x{:08X}\t0x{:08X}\t{}\t{}\t{}\t0x{:02X}\t{}\t{:.9}\t{:.9}\t{:.9}\t0x{:08X}\t{:02X}{:02X}{:02X}",
+                escape_tsv(&row.edb_path),
+                row.edb_uid,
+                row.script_uid,
+                command.command_index,
+                command.start,
+                command.length,
+                datum_shape_mode,
+                runtime_shape,
+                serialized_shape_scalar_0,
+                serialized_shape_scalar_1,
+                serialized_shape_scalar_2,
+                object_140,
+                raw_mode_tail[0],
+                raw_mode_tail[1],
+                raw_mode_tail[2],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn write_summary_tsv(path: &Path, summary: &ScriptHealthSummary) -> Result<()> {
     let mut file = File::create(path)?;
     writeln!(file, "category\tkey\tcount")?;
@@ -1128,6 +1196,15 @@ fn write_summary_tsv(path: &Path, summary: &ScriptHealthSummary) -> Result<()> {
         ("scripts_parse_failed", summary.scripts_parse_failed),
         ("geometry_scripts", summary.geometry_scripts),
         ("effect_control_scripts", summary.effect_control_scripts),
+        ("collision_commands", summary.collision_commands),
+        (
+            "collision_sphere_commands",
+            summary.collision_sphere_commands,
+        ),
+        (
+            "collision_capsule_commands",
+            summary.collision_capsule_commands,
+        ),
         ("scripts_with_cycles", summary.scripts_with_cycles),
         (
             "scripts_with_missing_controller_slots",
@@ -1165,6 +1242,9 @@ fn write_summary_tsv(path: &Path, summary: &ScriptHealthSummary) -> Result<()> {
     }
     for (key, count) in &summary.native_role_counts {
         writeln!(file, "native_role\t{}\t{}", escape_tsv(key), count)?;
+    }
+    for (key, count) in &summary.collision_shape_mode_counts {
+        writeln!(file, "collision_shape_mode\t{}\t{}", escape_tsv(key), count)?;
     }
     for (key, count) in &summary.event_type_counts {
         writeln!(file, "event_type\t{}\t{}", escape_tsv(key), count)?;

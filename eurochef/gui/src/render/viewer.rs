@@ -10,7 +10,7 @@ use super::{
     RenderUniforms,
 };
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CameraType {
     Orbit,
     Fly,
@@ -67,15 +67,42 @@ impl BaseViewer {
     pub fn show_toolbar(&mut self, ui: &mut egui::Ui) {
         if self.selected_camera == CameraType::Orbit {
             ui.checkbox(&mut self.orthographic, "Orthographic");
+        } else {
+            ui.checkbox(&mut self.camera_fly.invert_mouse_y, "Invert mouse Y");
         }
         ui.checkbox(&mut self.show_grid, "Show grid");
 
+        let mut requested_camera = self.selected_camera;
         egui::ComboBox::from_label("Camera")
             .selected_text(self.selected_camera.to_string())
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.selected_camera, CameraType::Orbit, "Orbit");
-                ui.selectable_value(&mut self.selected_camera, CameraType::Fly, "Fly");
+                ui.selectable_value(&mut requested_camera, CameraType::Orbit, "Orbit");
+                ui.selectable_value(&mut requested_camera, CameraType::Fly, "Fly");
             });
+        if requested_camera != self.selected_camera {
+            self.set_camera_type_preserve_view(requested_camera);
+        }
+    }
+
+    fn set_camera_type_preserve_view(&mut self, requested: CameraType) {
+        if requested == self.selected_camera {
+            return;
+        }
+
+        match (self.selected_camera, requested) {
+            (CameraType::Orbit, CameraType::Fly) => {
+                let inverse = self.camera_orbit.calculate_matrix().inverse();
+                let position = inverse.transform_point3(Vec3::ZERO);
+                let direction = inverse.transform_vector3(Vec3::Z).normalize_or_zero();
+                self.camera_fly.set_pose_from_direction(position, direction);
+            }
+            (CameraType::Fly, CameraType::Orbit) => {
+                self.camera_orbit
+                    .set_pose_from_direction(self.camera_fly.position, self.camera_fly.front);
+            }
+            _ => {}
+        }
+        self.selected_camera = requested;
     }
 
     pub fn camera(&self) -> &dyn Camera3D {
@@ -122,10 +149,11 @@ impl BaseViewer {
 
     pub fn update(&mut self, ui: &mut egui::Ui, response: &egui::Response) {
         if ui.input(|i| i.key_pressed(egui::Key::F)) {
-            self.selected_camera = match self.selected_camera {
+            let requested = match self.selected_camera {
                 CameraType::Orbit => CameraType::Fly,
                 CameraType::Fly => CameraType::Orbit,
             };
+            self.set_camera_type_preserve_view(requested);
         }
 
         if ui.input(|i| i.key_pressed(egui::Key::G)) {

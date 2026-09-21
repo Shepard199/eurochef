@@ -1,5 +1,36 @@
 use super::*;
 
+fn control_card<R>(
+    ui: &mut egui::Ui,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(20, 23, 40))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(67, 71, 104)))
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, add_contents)
+}
+
+fn control_tab(ui: &mut egui::Ui, active_tab: &mut usize, tab: usize, icon: char, label: &str) {
+    let selected = *active_tab == tab;
+    if ui
+        .selectable_label(selected, format!("{icon} {label}"))
+        .on_hover_text(label)
+        .clicked()
+    {
+        *active_tab = tab;
+    }
+}
+
+fn control_badge(ui: &mut egui::Ui, label: impl std::fmt::Display, colour: egui::Color32) {
+    egui::Frame::new()
+        .fill(colour.gamma_multiply(0.18))
+        .corner_radius(egui::CornerRadius::same(5))
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(ui, |ui| ui.colored_label(colour, label.to_string()));
+}
+
 impl MapFrame {
     pub(super) fn draw_map_controls(
         &mut self,
@@ -17,15 +48,25 @@ impl MapFrame {
 
         self.textfield_focused = false;
         let mut render_options_changed = false;
+        // Persist the compact segmented navigation in egui memory rather than
+        // adding UI-only state to MapFrame or changing map/runtime semantics.
+        let tab_id = egui::Id::new("map_controls_active_tab");
+        let mut active_tab = ctx.data(|data| data.get_temp::<usize>(tab_id).unwrap_or(0));
         let response = egui::Window::new("Map Controls")
             .default_pos(egui::pos2(12.0, 72.0))
             .default_width(340.0)
             .min_width(290.0)
             .scroll([false, true])
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(13, 16, 29))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(92, 82, 142)))
+                    .corner_radius(egui::CornerRadius::same(10)),
+            )
             .show(ctx, |ui| -> anyhow::Result<()> {
                 if let Some(dev_map) = robots_dev_map_info(self.file) {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.strong(format!("DEV MAP: {}", dev_map.label));
+                    control_card(ui, |ui| {
+                        ui.strong(format!("{} DEV MAP: {}", font_awesome::FLASK, dev_map.label));
                         ui.monospace(format!(
                             "Level {}  {}  EDB 0x{:08X}",
                             dev_map.level_id, dev_map.source_edb, dev_map.file
@@ -38,9 +79,21 @@ impl MapFrame {
                     ui.add_space(4.0);
                 }
 
-                egui::CollapsingHeader::new("Scene & Lighting")
-                    .default_open(true)
-                    .show(ui, |ui| {
+                // Four tabs replace the previous always-open diagnostic wall.
+                // The active tab is persistent for this egui session and does
+                // not change map loading, playback, or render state.
+                control_card(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        control_tab(ui, &mut active_tab, 0, font_awesome::LIGHTBULB, "Lighting & Scene");
+                        control_tab(ui, &mut active_tab, 1, font_awesome::CAMERA, "Camera & Runtime");
+                        control_tab(ui, &mut active_tab, 2, font_awesome::CUBE, "Geometry & Triggers");
+                        control_tab(ui, &mut active_tab, 3, font_awesome::VOLUME_UP, "Audio & Particles");
+                    });
+                });
+                ui.add_space(6.0);
+
+                if active_tab == 0 {
+                    control_card(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Sky override");
                             let response = egui::TextEdit::singleline(&mut self.sky_ent)
@@ -160,10 +213,62 @@ impl MapFrame {
                                     });
                             });
                     });
+                }
 
-                egui::CollapsingHeader::new("Map runtime")
-                    .default_open(true)
-                    .show(ui, |ui| {
+                if active_tab == 1 {
+                    control_card(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            match active_zone_index {
+                                Some(zone) => control_badge(
+                                    ui,
+                                    format!("{} Zone #{zone}", font_awesome::CUBE),
+                                    egui::Color32::from_rgb(77, 196, 133),
+                                ),
+                                None => control_badge(
+                                    ui,
+                                    format!("{} Outside MapZone", font_awesome::EXCLAMATION_TRIANGLE),
+                                    egui::Color32::from_rgb(232, 166, 63),
+                                ),
+                            }
+                            let camera_status = self
+                                .active_camera_trigger
+                                .map(|index| format!("{} Camera #{index}", font_awesome::CAMERA))
+                                .unwrap_or_else(|| format!("{} Free camera", font_awesome::EYE));
+                            control_badge(ui, camera_status, egui::Color32::from_rgb(112, 158, 255));
+                        });
+                        ui.add_space(6.0);
+                        egui::CollapsingHeader::new("Native surface diagnostics")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                if let Some(zone_index) = active_zone_index {
+                                    ui.monospace(format!("Active MapZone {zone_index}"));
+                                    if let Some(counts) =
+                                        current_map.zone_surface_mask_counts.get(zone_index)
+                                    {
+                                        if counts.is_empty() {
+                                            ui.label("No nonzero Robots face-info surface metadata in this zone.");
+                                        } else {
+                                            for (mask, count) in counts {
+                                                ui.label(format!(
+                                                    "{}: {} face(s)",
+                                                    crate::entities::robots_surface_mask_label(*mask),
+                                                    count
+                                                ));
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    ui.label("Camera is outside a resolved MapZone.");
+                                }
+                                ui.small(
+                                    "Diagnostic only. Native 0x0041C2C0 ORs all active contact-face metadata before choosing the runtime surface category; isolated face masks are not a fabricated editor collision result.",
+                                );
+                            });
+                        ui.checkbox(&mut self.show_native_surfaces, "Native Surface Faces")
+                            .on_hover_text(
+                                "Draws diagnostic outlines for nonzero Robots v248 face_info surface metadata. These are exact source collision/material faces; colours are editor-only diagnostics, not native material colours.",
+                            );
+
                         ui.checkbox(
                             &mut self.preview_zone_background,
                             "Serialized zone background preview",
@@ -175,10 +280,10 @@ impl MapFrame {
                             .on_hover_text("Draws the four serialized EXGeoPortal boundary edges. Portal traversal and level-state transfer are not fabricated.");
                         ui.checkbox(
                             &mut self.apply_native_camera_viewport,
-                            "Apply active native Camera to viewport",
+                            "Apply native Camera to viewport",
                         )
                         .on_hover_text(
-                            "Applies the instruction-proven shipped Camera modes 0/3/4, native SetVFOV, fixed-60-Hz interpolation and mode-4 XPath_Spline solver.",
+                            "Applies the instruction-proven ordinary Player mode 1 plus trigger-owned Camera modes 0/3/4, native SetVFOV and fixed-60-Hz interpolation. Default mode 1 is accepted for gameplay MapZone state only while the static target-to-eye path is unobstructed; native Camera contact correction near walls remains a Physics boundary.",
                         );
                         let live_player_changed = ui
                             .checkbox(
@@ -186,7 +291,7 @@ impl MapFrame {
                                 "Live player pose for Camera",
                             )
                             .on_hover_text(
-                                "Feeds Camera mode 3/4 a live editor-controlled player position initialized from the serialized XTrigger_Player. This is a pose source for the recovered Camera controller, not a fabricated replacement for native player collision/physics.",
+                                "Feeds ordinary Camera mode 1 and trigger Camera modes 3/4 a live editor-controlled Player pose initialized from the serialized XTrigger_Player position and heading. This is a pose source for the recovered Camera controller, not a fabricated replacement for native player collision/physics.",
                             )
                             .changed();
                         if live_player_changed && self.native_camera_live_player_preview {
@@ -222,8 +327,85 @@ impl MapFrame {
                                     .speed(0.05),
                             );
                         });
+                        ui.separator();
+                        ui.strong("Sweeper synchronized inputs");
+                        ui.horizontal(|ui| {
+                            ui.checkbox(
+                                &mut self.native_sweeper_player_health_known,
+                                "Known Player health",
+                            );
+                            ui.add_enabled(
+                                self.native_sweeper_player_health_known,
+                                egui::DragValue::new(
+                                    &mut self.native_sweeper_player_current_health,
+                                )
+                                .speed(0.25)
+                                .prefix("current "),
+                            );
+                            ui.add_enabled(
+                                self.native_sweeper_player_health_known,
+                                egui::DragValue::new(&mut self.native_sweeper_player_max_health)
+                                    .speed(0.25)
+                                    .prefix("max "),
+                            );
+                        });
+                        let health_input_valid = self.native_sweeper_player_current_health.is_finite()
+                            && self.native_sweeper_player_max_health.is_finite()
+                            && self.native_sweeper_player_current_health >= 0.0
+                            && self.native_sweeper_player_max_health > 0.0
+                            && self.native_sweeper_player_current_health
+                                <= self.native_sweeper_player_max_health;
+                        if self.native_sweeper_player_health_known && !health_input_valid {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(232, 166, 63),
+                                "Health input is invalid; Sweeper keeps it unknown.",
+                            );
+                        }
+
+                        let seed_text = self.native_global_gameplay_rng_seed_input.trim();
+                        let seed_hex = seed_text
+                            .strip_prefix("0x")
+                            .or_else(|| seed_text.strip_prefix("0X"))
+                            .unwrap_or(seed_text);
+                        let parsed_seed = (!seed_hex.is_empty())
+                            .then(|| u32::from_str_radix(seed_hex, 16).ok())
+                            .flatten();
+                        ui.horizontal(|ui| {
+                            ui.label("Observed global RNG");
+                            let response = egui::TextEdit::singleline(
+                                &mut self.native_global_gameplay_rng_seed_input,
+                            )
+                            .desired_width(92.0)
+                            .hint_text("hex seed")
+                            .show(ui)
+                            .response;
+                            self.textfield_focused |= response.has_focus();
+                            if ui
+                                .add_enabled(parsed_seed.is_some(), egui::Button::new("Anchor"))
+                                .clicked()
+                            {
+                                self.native_global_gameplay_rng =
+                                    RuntimeRobotsGlobalRngState::from_observed_seed(
+                                        parsed_seed.expect("enabled only for a valid seed"),
+                                    );
+                            }
+                            if ui.button("Clear").clicked() {
+                                self.native_global_gameplay_rng.invalidate();
+                            }
+                        });
+                        ui.monospace(match self.native_global_gameplay_rng.seed() {
+                            Some(seed) => format!(
+                                "RNG {:?}: 0x{seed:08X}, draws {}",
+                                self.native_global_gameplay_rng.provenance,
+                                self.native_global_gameplay_rng.draws_from_anchor,
+                            ),
+                            None => "RNG UnknownSession".to_owned(),
+                        });
                         ui.small(
-                            "While a native Camera is active: WASD/A-D move the live player pose, Q/E move vertically, drag changes its movement heading. The recovered Camera consumes this moving position each frame; full Robots player physics remains a separate gameplay-runtime boundary.",
+                            "Anchor only with a seed observed at the exact currently represented native runtime boundary. A sampled seed from an unrelated live moment is not synchronization. Player health is likewise used only when explicitly marked known.",
+                        );
+                        ui.small(
+                            "While native Camera viewport is enabled: WASD/A-D move the live Player pose, Q/E move vertically, drag changes Player heading. Ordinary mode 1 and recovered trigger Camera modes consume this pose each frame; Player physics and mode-1 Camera contact correction remain separate runtime boundaries.",
                         );
                         ui.monospace(format!(
                             "Camera [{:.3}, {:.3}, {:.3}]  active zone {}",
@@ -437,10 +619,10 @@ impl MapFrame {
                             ui.monospace(format!("Raw isounds: {:?}", current_map.isounds));
                         }
                     });
+                }
 
-                egui::CollapsingHeader::new("Geometry")
-                    .default_open(true)
-                    .show(ui, |ui| {
+                if active_tab == 2 {
+                    control_card(ui, |ui| {
                         render_options_changed |= ui
                             .checkbox(
                                 &mut self.show_flag_0x10_geometry,
@@ -465,9 +647,7 @@ impl MapFrame {
                             .changed();
                     });
 
-                egui::CollapsingHeader::new("Audio")
-                    .default_open(true)
-                    .show(ui, |ui| {
+                    control_card(ui, |ui| {
                         ui.checkbox(&mut self.show_sounds, "Show Sounds")
                             .on_hover_text("Shows serialized EXGeoSound emitters. Click a marker to inspect the sound reference, volume, fades, tracking type and radii.");
                         egui::CollapsingHeader::new("EuroSound settings")
@@ -475,9 +655,7 @@ impl MapFrame {
                             .show(ui, |ui| self.sound_preview.lock().draw_settings(ui));
                     });
 
-                egui::CollapsingHeader::new("Triggers & Runtime")
-                    .default_open(true)
-                    .show(ui, |ui| -> anyhow::Result<()> {
+                    control_card(ui, |ui| -> anyhow::Result<()> {
                         ui.checkbox(&mut self.show_triggers, "Show Triggers");
                         ui.add_enabled(
                             self.show_triggers,
@@ -504,6 +682,26 @@ impl MapFrame {
                             .changed()
                         {
                             self.reset_all_runtime_events();
+                        }
+                        if ui
+                            .add_enabled(
+                                self.show_triggers && self.animate_runtime_paths,
+                                egui::Checkbox::new(&mut self.simulate_ai, "Simulate AI"),
+                            )
+                            .on_hover_text("Runs recovered fixed-step NPC/AI simulation. Native Camera mode uses real TriggerManager XItem spawn/despawn and consumes the real gameplay RNG only when it is explicitly anchored; otherwise AI uses a separate deterministic preview RNG without mutating the unknown native session seed. Fly/Orbit always uses the editor-preview XItem set and preview RNG so PatrolNavMesh/Flee/Attack behavior can actually run.")
+                            .changed()
+                        {
+                            self.native_ai_fixed_last_time = None;
+                            self.native_ai_fixed_accumulator = 0.0;
+                            self.native_ai_engine_frame_counter = 0;
+                            self.native_ai_explosion_fragment_phase_counter = 0;
+                            self.native_ai_preview_live.clear();
+                            self.native_ai_preview_map = None;
+                            self.native_ai_preview_gameplay_rng =
+                                RuntimeRobotsGlobalRngState::fresh_process_startup();
+                            self.native_ai_preview_process_lcg_seed = Some(
+                                eurochef_shared::robots_runtime::process_rng::ROBOTS_PROCESS_LCG_STARTUP_SEED,
+                            );
                         }
                         ui.add_enabled(
                             self.show_triggers && self.animate_runtime_paths,
@@ -576,12 +774,11 @@ impl MapFrame {
                         }
                         Ok(())
                     })
-                    .body_returned
-                    .transpose()?;
+                    .inner?;
+                }
 
-                egui::CollapsingHeader::new("Scripts & Particles")
-                    .default_open(true)
-                    .show(ui, |ui| {
+                if active_tab == 3 {
+                    control_card(ui, |ui| {
                         if ui
                             .checkbox(&mut self.animate_scripts, "Animate Scripts")
                             .changed()
@@ -607,9 +804,12 @@ impl MapFrame {
                         ui.checkbox(&mut self.particle_settings.enabled, "Native Particles")
                             .on_hover_text("Uses native EXParticleSys simulation: serialized rate and pool, lifetime variance, emitter box, angular/speed distribution, acceleration, damping, render selectors and appended RGBA/scale/rotation curves.");
                     });
+                }
 
                 Ok(())
             });
+
+        ctx.data_mut(|data| data.insert_temp(tab_id, active_tab));
 
         if let Some(response) = response {
             if let Some(inner) = response.inner {

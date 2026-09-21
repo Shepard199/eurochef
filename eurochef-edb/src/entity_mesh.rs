@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::{
     common::{EXVector2, EXVector3},
-    entity::EXGeoMeshEntityData,
+    entity::{read_robots_v248_face_info, EXGeoMeshEntityData, RobotsFaceInfo},
     versions::Platform,
 };
 
@@ -26,6 +26,8 @@ pub struct EXGeoMeshEntity {
     pub tristrips: Vec<EXGeoEntityTriStrip>,
     pub tristrips_gx: Vec<GxTriStrip>,
     pub tristrips_ps2: Vec<Ps2TriStrip>,
+    /// Robots PC v248 native per-face collision/material metadata from serialized Mesh +0x68.
+    pub robots_face_info: Option<RobotsFaceInfo>,
 }
 
 impl BinRead for EXGeoMeshEntity {
@@ -37,6 +39,17 @@ impl BinRead for EXGeoMeshEntity {
         (version, platform): Self::Args<'_>,
     ) -> binrw::BinResult<Self> {
         let data: EXGeoMeshEntityData = reader.read_type_args(endian, (version, platform))?;
+        let robots_face_info = if version == 248 && platform == Platform::Pc {
+            data.face_info
+                .as_ref()
+                .filter(|pointer| pointer.offset_relative() != 0)
+                .map(|pointer| {
+                    read_robots_v248_face_info(reader, endian, pointer.offset_absolute())
+                })
+                .transpose()?
+        } else {
+            None
+        };
 
         let indices = if platform.is_gx() {
             vec![]
@@ -205,6 +218,7 @@ impl BinRead for EXGeoMeshEntity {
             tristrips,
             tristrips_gx,
             tristrips_ps2,
+            robots_face_info,
             data,
         })
     }

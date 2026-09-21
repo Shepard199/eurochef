@@ -38,6 +38,108 @@ pub fn robots_map_zone_index_by_bsp(
     })
 }
 
+/// Exact zero-thickness segment traversal used by Robots.exe `0x005557D6 ->
+/// 0x00555808` for Map raycasts. Leaves are returned in traversal order and
+/// deduplicated exactly like the native short output list.
+pub fn robots_map_zone_indices_for_segment_by_bsp(
+    bsp_nodes: &[EXGeoBspNode],
+    zone_count: usize,
+    start: Vec3,
+    end: Vec3,
+) -> Vec<usize> {
+    fn visit(
+        bsp_nodes: &[EXGeoBspNode],
+        zone_count: usize,
+        child: i16,
+        start: Vec3,
+        end: Vec3,
+        out: &mut Vec<usize>,
+        depth: usize,
+    ) {
+        if depth > 0x1_0000 || out.len() >= 16 {
+            return;
+        }
+        if child <= 0 {
+            let zone = usize::try_from(-(child as i32)).ok();
+            if let Some(zone) = zone.filter(|zone| *zone < zone_count) {
+                if !out.contains(&zone) {
+                    out.push(zone);
+                }
+            }
+            return;
+        }
+        let Some(node) = bsp_nodes.get(child as usize) else {
+            return;
+        };
+        visit_node(bsp_nodes, zone_count, node, start, end, out, depth + 1);
+    }
+
+    fn visit_node(
+        bsp_nodes: &[EXGeoBspNode],
+        zone_count: usize,
+        node: &EXGeoBspNode,
+        start: Vec3,
+        end: Vec3,
+        out: &mut Vec<usize>,
+        depth: usize,
+    ) {
+        let plane = node.pos;
+        let start_distance =
+            start.x * plane[0] + start.y * plane[1] + start.z * plane[2] + plane[3];
+        let end_distance = end.x * plane[0] + end.y * plane[1] + end.z * plane[2] + plane[3];
+        if start_distance >= 0.0 && end_distance >= 0.0 {
+            visit(bsp_nodes, zone_count, node.nodes[0], start, end, out, depth);
+            return;
+        }
+        if start_distance < 0.0 && end_distance < 0.0 {
+            visit(bsp_nodes, zone_count, node.nodes[1], start, end, out, depth);
+            return;
+        }
+
+        let denominator = start_distance - end_distance;
+        let t = if denominator == 0.0 {
+            0.0
+        } else {
+            (start_distance / denominator).clamp(0.0, 1.0)
+        };
+        let split = start.lerp(end, t);
+        let first_side = usize::from(start_distance < 0.0);
+        visit(
+            bsp_nodes,
+            zone_count,
+            node.nodes[first_side],
+            start,
+            split,
+            out,
+            depth,
+        );
+        visit(
+            bsp_nodes,
+            zone_count,
+            node.nodes[1 - first_side],
+            split,
+            end,
+            out,
+            depth,
+        );
+    }
+
+    if zone_count == 0 || bsp_nodes.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    visit_node(
+        bsp_nodes,
+        zone_count,
+        &bsp_nodes[0],
+        start,
+        end,
+        &mut out,
+        0,
+    );
+    out
+}
+
 /// AABB helper retained for diagnostics and legacy corpus checks only.
 /// `0x004E9E71` is a loaded map/submap selector, not a MapZone selector.
 pub fn robots_map_zone_index_by_bounds(

@@ -15,6 +15,10 @@ triggers:
   2:
     name: "XTrigger_Distance"
     icon: "xtrigger_distance"
+    values:
+      0:
+        name: "Radius x10 (Signed)"
+        type: u32
   3:
     name: "XTrigger_Monster_Test"
     icon: "xtrigger_monster"
@@ -172,6 +176,16 @@ triggers:
     name: "XTrigger_Pickup"
   31:
     name: "XTrigger_FixSwitch"
+    values:
+      0:
+        name: "Initial State (Low Byte)"
+        type: u32
+      2:
+        name: "Transition Duration (s)"
+        type: float
+      4:
+        name: "FixSwitch Interaction Flags"
+        type: u32
   32:
     name: "XTrigger_Hazard"
     icon: "tr_killzone"
@@ -220,6 +234,22 @@ triggers:
     icon: "xtrigger_displaymessage"
   40:
     name: "XTrigger_BallTrack"
+    values:
+      1:
+        name: "Alternate Scheduler / Two-Phase Stop Enable"
+        type: u32
+      2:
+        name: "HubTrack Pair Sheet Index"
+        type: u32
+      3:
+        name: "Alternate Schedule Sheet Index"
+        type: u32
+      4:
+        name: "Alternate Path Spacing Distance"
+        type: float
+      5:
+        name: "Alternate Schedule Cycle Limit"
+        type: u32
   41:
     name: "XTrigger_Pickup"
   42:
@@ -267,6 +297,31 @@ triggers:
     icon: "xtrigger_interact"
   50:
     name: "XTrigger_Fluid"
+    values:
+      0:
+        name: "Water Grid Width"
+        type: u32
+      1:
+        name: "Water Grid Height"
+        type: u32
+      2:
+        name: "Native Fluid Scalar A (Envelope / Solver)"
+        type: float
+      3:
+        name: "Native Fluid Scalar B (Envelope / Wave Disturbance)"
+        type: float
+      4:
+        name: "Water Entity Quad Size"
+        type: float
+      5:
+        name: "Initial Random Wave Count"
+        type: u32
+      6:
+        name: "Fluid Flags (bit0 = periodic waves)"
+        type: u32
+      7:
+        name: "Periodic Wave Interval (ticks)"
+        type: u32
   51:
     name: "XTrigger_Marker_AreaOfInterest"
   53:
@@ -315,6 +370,15 @@ triggers:
         type: u32
       1:
         name: "Proximity Radius x10 (Signed)"
+        type: u32
+      2:
+        name: "Piranha Ballistic Apex Parameter"
+        type: float
+      3:
+        name: "Piranha Retarget Countdown (ticks)"
+        type: float
+      4:
+        name: "Piranha Splash Script Selector (0=None, 1=Acid, 2=Lava)"
         type: u32
   71:
     name: "XTrigger_Pickup"

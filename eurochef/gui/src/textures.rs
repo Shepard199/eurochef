@@ -151,6 +151,10 @@ impl TextureList {
             .id_salt("section_scroll_area")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                // Match EntityListPanel: a fixed tile footprint keeps normal,
+                // linked, and failed textures aligned in one predictable grid.
+                let preview_size = egui::vec2(128., 128.) * self.zoom;
+                let card_size = preview_size + egui::vec2(16., 54.);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = [4. * self.zoom; 2].into();
                     for (i, it) in self.textures.iter().enumerate() {
@@ -171,15 +175,35 @@ impl TextureList {
                         if it.hashcode == 0x06000000 {
                             continue;
                         }
+                        // The old branches filtered here; do it before the
+                        // card closure so Rust can keep the loop control flow.
+                        if self.filter_animated
+                            && !matches!(
+                                &it.data,
+                                Ok(texture)
+                                    if texture.external_texture.is_none() && texture.frame_count > 1
+                            )
+                        {
+                            continue;
+                        }
 
+                        ui.allocate_ui_with_layout(
+                            card_size,
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                egui::Frame::new()
+                                    .fill(ui.visuals().widgets.noninteractive.weak_bg_fill)
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        ui.visuals().widgets.noninteractive.bg_stroke.color,
+                                    ))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .inner_margin(egui::Margin::same(8))
+                                    .show(ui, |ui| {
                         match (&it.data, it.data.as_ref().map(|d| d.external_texture).ok().flatten()) {
                             (Ok(t), None) => {
-                                if self.filter_animated && t.frame_count <= 1 {
-                                    continue;
-                                }
-
                                 ui.vertical(|ui| {
-                                    ui.set_max_width(128.0 * self.zoom);
+                                    ui.set_width(preview_size.x);
                                     let time = self.start_time.elapsed().as_secs_f32();
                                     let frametime_scale =
                                         t.frame_count as f32 / t.frames.len() as f32;
@@ -198,7 +222,7 @@ impl TextureList {
 
                                     let response = egui::Image::new((
                                         current.id(),
-                                        egui::vec2(128., 128.) * self.zoom,
+                                        preview_size,
                                     ))
                                     .sense(egui::Sense::click())
                                     .ui(ui)
@@ -270,15 +294,12 @@ impl TextureList {
 
                                     ui.add(
                                         egui::Label::new(RichText::new(&resource_label).strong())
-                                            .wrap(),
+                                            .truncate()
+                                            .show_tooltip_when_elided(true),
                                     );
                                 });
                             }
                             (_, Some((ext_file, ext_texture))) => {
-                                // We don't know anything about linked textures, skip if filtered
-                                if self.filter_animated {
-                                    continue;
-                                }
                                 let external_identity =
                                     eurochef_edb::robots_texture_identity::active_record(
                                         ext_file,
@@ -286,9 +307,9 @@ impl TextureList {
                                     );
 
                                 ui.vertical(|ui| {
-                                    ui.set_max_width(128.0 * self.zoom);
+                                    ui.set_width(preview_size.x);
                                     let (rect, response) = ui.allocate_exact_size(
-                                        egui::vec2(128., 128.) * self.zoom,
+                                        preview_size,
                                         egui::Sense::click(),
                                     );
                                     ui.painter().rect_filled(
@@ -331,20 +352,16 @@ impl TextureList {
                                     });
                                     ui.add(
                                         egui::Label::new(RichText::new(&resource_label).strong())
-                                            .wrap(),
+                                            .truncate()
+                                            .show_tooltip_when_elided(true),
                                     );
                                 });
                             }
                             (Err(e), _) => {
-                                // We don't know anything about failed textures, skip if filtered
-                                if self.filter_animated {
-                                    continue;
-                                }
-
                                 ui.vertical(|ui| {
-                                    ui.set_max_width(128.0 * self.zoom);
+                                    ui.set_width(preview_size.x);
                                     let (rect, response) = ui.allocate_exact_size(
-                                        egui::vec2(128., 128.) * self.zoom,
+                                        preview_size,
                                         egui::Sense::click(),
                                     );
                                     ui.painter().rect_filled(
@@ -373,11 +390,15 @@ impl TextureList {
                                     });
                                     ui.add(
                                         egui::Label::new(RichText::new(&resource_label).strong())
-                                            .wrap(),
+                                            .truncate()
+                                            .show_tooltip_when_elided(true),
                                     );
                                 });
                             },
                         }
+                                    });
+                            },
+                        );
                     }
                 });
             });

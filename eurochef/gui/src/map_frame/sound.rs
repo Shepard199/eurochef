@@ -350,6 +350,93 @@ impl MapFrame {
         preview.sync_object_audio_loops(desired, 0.05);
     }
 
+    fn sync_ai_permanent_sounds(&mut self, listener_position: Vec3, listener_rotation: Quat) {
+        let emitters = self
+            .native_ai_permanent_sounds
+            .values()
+            .filter_map(|registration| {
+                self.runtime_character_bodies
+                    .get(&registration.owner_key)
+                    .map(|body| (registration.sound_uid, body.owner_position))
+            })
+            .collect::<Vec<_>>();
+        let transient_emitters = std::mem::take(&mut self.native_ai_transient_sounds)
+            .into_iter()
+            .filter_map(|request| {
+                self.runtime_character_bodies
+                    .get(&request.owner_key)
+                    .map(|body| (request, body.owner_position))
+            })
+            .collect::<Vec<_>>();
+
+        let mut preview = self.sound_preview.lock();
+        if !preview.object_audio_enabled {
+            preview.stop_group(SoundVoiceGroup::AiPermanent, 0.05);
+            preview.stop_group(SoundVoiceGroup::AiTransient, 0.05);
+            return;
+        }
+
+        preview.preload_hashes(
+            emitters
+                .iter()
+                .map(|(sound_uid, _)| *sound_uid)
+                .chain(
+                    transient_emitters
+                        .iter()
+                        .map(|(request, _)| request.sound_uid),
+                ),
+        );
+        let desired = emitters
+            .into_iter()
+            .filter_map(|(sound_uid, emitter_position)| {
+                let mix = native_sound_spatial_mix(
+                    &mut preview,
+                    sound_uid,
+                    listener_position,
+                    listener_rotation,
+                    emitter_position,
+                );
+                (mix.gain > 0.0001).then_some((
+                    SoundVoiceKey::AiPermanent { sound_uid },
+                    SoundVoiceSpec {
+                        hashcode: sound_uid,
+                        looping: mix.looping,
+                        volume: mix.gain,
+                        speed: 1.0,
+                        pan: mix.pan,
+                        fade_in_seconds: 0.03,
+                        fade_out_seconds: 0.05,
+                        seek_seconds: 0.0,
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        preview.sync_group(SoundVoiceGroup::AiPermanent, desired, 0.05);
+
+        for (request, emitter_position) in transient_emitters {
+            let mix = native_sound_spatial_mix(
+                &mut preview,
+                request.sound_uid,
+                listener_position,
+                listener_rotation,
+                emitter_position,
+            );
+            if mix.gain <= 0.0001 {
+                continue;
+            }
+            let mut spec = SoundVoiceSpec::one_shot(request.sound_uid);
+            spec.volume = mix.gain;
+            spec.pan = mix.pan;
+            preview.restart_voice(
+                SoundVoiceKey::AiTransient {
+                    owner_key: request.owner_key,
+                    sound_uid: request.sound_uid,
+                },
+                spec,
+            );
+        }
+    }
+
     pub(super) fn sync_map_ambient_audio(
         &mut self,
         map: &ProcessedMap,
@@ -361,6 +448,7 @@ impl MapFrame {
         context: &egui::Context,
     ) {
         self.sync_object_audio_loops(map, listener_position, listener_rotation);
+        self.sync_ai_permanent_sounds(listener_position, listener_rotation);
         let mut preview = self.sound_preview.lock();
         preview.tick();
         let ambient_enabled = preview.ambient_enabled;

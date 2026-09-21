@@ -509,52 +509,6 @@ fn resolve_exporter(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
         ))
 }
 
-fn read_corpus_manifest(path: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read Script manifest {}", path.display()))?;
-    let base = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut entries = Vec::new();
-    for (line_index, line) in content.lines().enumerate() {
-        let line = line.trim_end_matches('\r');
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            continue;
-        }
-        let Some((_, source_text)) = line.split_once('\t') else {
-            if line_index == 0 {
-                continue;
-            }
-            continue;
-        };
-        let source_text = source_text.trim();
-        if source_text.is_empty()
-            || source_text.to_ascii_lowercase().contains("source edb")
-            || source_text.eq_ignore_ascii_case("path")
-        {
-            continue;
-        }
-        let source_path = PathBuf::from(source_text);
-        entries.push(if source_path.is_absolute() {
-            source_path
-        } else {
-            base.join(source_path)
-        });
-    }
-    if entries.is_empty() {
-        entries = super::resource_atlas::discover_edb_paths_near_manifest(path)?;
-        info!(
-            manifest = %path.display(),
-            files = entries.len(),
-            "Script manifest contains no direct EDB paths; discovered corpus from game root"
-        );
-    }
-    ensure!(
-        !entries.is_empty(),
-        "Script manifest {} contains no EDB paths",
-        path.display()
-    );
-    Ok(entries)
-}
-
 fn resolve_corpus_resource(
     files: &HashMap<u32, CorpusFileCatalog>,
     current_file: u32,
@@ -694,7 +648,7 @@ fn collect_corpus_animation_bindings(
     manifest_path: &Path,
     target_header: &eurochef_edb::header::EXGeoHeader,
 ) -> anyhow::Result<CorpusAnimationCatalog> {
-    let paths = read_corpus_manifest(manifest_path)?;
+    let paths = super::read_corpus_manifest_paths(manifest_path)?;
     let mut files = HashMap::<u32, CorpusFileCatalog>::new();
     for source_path in &paths {
         let platform = Platform::from_path(source_path)

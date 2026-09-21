@@ -1,0 +1,4 @@
+Robots native entity patch 0010
+Applied UTC: 2026-07-24T07:02:00.4083772Z
+Adds EXGeoNavMeshEntity 0x607 parser and native OBJ/JSON export.
+Exports metadata for 0x606 Instance and 0x608 MapZone instead of treating them as render meshes.

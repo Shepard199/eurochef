@@ -1,4 +1,8 @@
-use std::{io::Seek, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Seek,
+    sync::Arc,
+};
 
 use anyhow::Context;
 
@@ -6,20 +10,50 @@ use egui::mutex::{Mutex, RwLock};
 use eurochef_edb::{
     binrw::BinReaderExt,
     edb::EdbFile,
-    entity::{EXGeoEntity, EXGeoMapZoneEntity},
+    entity::{read_robots_v248_entity_anim_datums, EXGeoEntity, EXGeoMapZoneEntity},
     map::{
         EXGeoBaseDatum, EXGeoBspNode, EXGeoMap, EXGeoMapZone, EXGeoPlacement,
         EXGeoTriggerEngineOptions,
     },
+    robots_ball_track::{
+        read_robots_ball_track_pair, read_robots_ball_track_schedule, RobotsBallTrackPair,
+        RobotsBallTrackSchedule, ROBOTS_HUB_TRACK_FILE,
+    },
+    robots_trigger_db::{
+        read_robots_pattern_groups, RobotsPatternGroup, ROBOTS_TRIGGER_DATABASE_FILE,
+    },
     versions::Platform,
-    Hashcode,
+    Hashcode, HashcodeUtils,
 };
-use eurochef_shared::IdentifiableResult;
-use glam::{Mat4, Vec2, Vec3, Vec4};
+use eurochef_shared::{
+    robots_runtime::{
+        ai_character::RobotsAiHandlerClass,
+        explosion::{
+            read_robots_explosion_database, RobotsExplosionDatabase,
+            ROBOTS_EXPLOSION_DATABASE_FILE_UID,
+        },
+        inventory::{
+            read_robots_inventory_definitions, RobotsInventoryDefinition, ROBOTS_INVENTORY_FILE_UID,
+        },
+        mission::{
+            read_robots_mission_definitions, RobotsMissionDefinition, ROBOTS_MISSIONS_FILE_UID,
+        },
+        npc_text::{read_robots_text_groups, RobotsTextGroupCatalog, ROBOTS_TEXT_FILE_UID},
+        projectile::{
+            read_robots_missile_database, RobotsMissileDatabase, ROBOTS_MISSILE_DATABASE_FILE_UID,
+        },
+        shop::{read_robots_shop_database, RobotsShopDatabase, ROBOTS_SHOP_FILE_UID},
+    },
+    script::{UXGeoScript, UXGeoScriptCommandData},
+    IdentifiableResult,
+};
+use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use nohash_hasher::IntMap;
 
 use crate::{
-    entities::ProcessedEntityMesh,
+    entities::{
+        ProcessedEntityMesh, ProcessedNavMesh, RobotsRaycastTriangle, RobotsSurfaceTriangle,
+    },
     map_frame::MapFrame,
     map_zone::robots_map_zone_index_by_bsp,
     render::{entity::EntityRenderer, viewer::CameraType, NativeLightingTriangle, RenderStore},
@@ -32,23 +66,85 @@ mod triggers;
 
 pub(crate) use dev_map::robots_dev_map_info;
 pub use entities::{resolve_robots_character_visuals, robots_pickup_visual};
+pub(crate) use entities::{
+    robots_character_hit_query_raw_group, robots_character_runtime_type, RobotsCharacterDatabase,
+    ROBOTS_ANIM_DATUM_SOLID_COLLISION, ROBOTS_ANIM_MODE_DEFAULT, ROBOTS_MONSTER_DATABASE_FILE,
+};
+#[cfg(test)]
+pub(crate) use triggers::NativeSweeperBossTriggerEvent;
+pub(crate) use triggers::{
+    resolve_sweeper_boss_map_bindings, robots_fluid_initial_shared_rng_draw_count,
+    robots_monster_transporter_route_distance_squared, robots_sweeper_boss_spawn_selection,
+    robots_sweeper_boss_spawn_transform, robots_sweeper_ratchet_anchor,
+    sweeper_health_pickup_player_contact_guaranteed_miss, NativeMonsterTransporterFixedStep,
+    NativeMonsterTransporterPathEvent, NativeMonsterTransporterRuntime,
+    NativeSweeperBossControllerSnapshot, NativeSweeperBossGenericAiBootstrap,
+    NativeSweeperBossLiveAiSource, NativeSweeperBossMapBindings,
+    NativeSweeperBossOwnedControllerPhaseInput, NativeSweeperBossOwnedXItemPhaseInput,
+    NativeSweeperBossReplayRuntime, NativeSweeperBossSpawnSelection,
+    NativeSweeperBossSpawnTransform, NativeSweeperBossTransporterEvent, RobotsSweeperBossPatterns,
+    RobotsSweeperEyeScripts, RobotsSweeperRatchetScripts, ROBOTS_FLUID_TYPE,
+    ROBOTS_SWEEPER_APPEAR_ANIM_MODE, ROBOTS_SWEEPER_ATTACK_ANIMATION,
+    ROBOTS_SWEEPER_ATTACK_ANIM_MODE, ROBOTS_SWEEPER_ATTACK_ANIM_SET, ROBOTS_SWEEPER_ATTACK_SCRIPT,
+    ROBOTS_SWEEPER_BOSS_ANIM_MODE, ROBOTS_SWEEPER_CONTROLLER_RUNTIME_CLASS_CODE,
+    ROBOTS_SWEEPER_CONTROLLER_SAVE_SIZE, ROBOTS_SWEEPER_CONTROLLER_SERVICE_RADIUS,
+    ROBOTS_SWEEPER_CONTROLLER_TYPE, ROBOTS_SWEEPER_EYE_COUNT,
+    ROBOTS_SWEEPER_EYE_INITIAL_HIT_POINTS, ROBOTS_SWEEPER_EYE_OPEN_SECONDS,
+    ROBOTS_SWEEPER_EYE_PRESSURE_THRESHOLD, ROBOTS_SWEEPER_EYE_TYPE,
+    ROBOTS_SWEEPER_HEALTH_PICKUP_INVENTORY_ADD_EVENT, ROBOTS_SWEEPER_HEALTH_PICKUP_ITEM,
+    ROBOTS_SWEEPER_HEALTH_PICKUP_LIFETIME_SECONDS, ROBOTS_SWEEPER_HEALTH_PICKUP_REGISTRATION_MASK,
+    ROBOTS_SWEEPER_HEALTH_PICKUP_ROTATION_PER_UPDATE, ROBOTS_SWEEPER_HEALTH_PICKUP_SCRIPT,
+    ROBOTS_SWEEPER_HEALTH_PICKUP_SPAWN_X_BIAS, ROBOTS_SWEEPER_HEALTH_PICKUP_SPAWN_X_SCALE,
+    ROBOTS_SWEEPER_HEALTH_PICKUP_SPAWN_Z, ROBOTS_SWEEPER_HEALTH_PICKUP_TIMER_INITIAL_SECONDS,
+    ROBOTS_SWEEPER_HEALTH_PICKUP_TIMER_JITTER_SECONDS,
+    ROBOTS_SWEEPER_HEALTH_PICKUP_WAIT_FOR_HIT_EVENT, ROBOTS_SWEEPER_INITIAL_DIFFICULTY,
+    ROBOTS_SWEEPER_JUMP_LEFT_ANIM_MODE, ROBOTS_SWEEPER_JUMP_RIGHT_ANIM_MODE,
+    ROBOTS_SWEEPER_MAX_DIFFICULTY, ROBOTS_SWEEPER_MISSILE_EVENT,
+    ROBOTS_SWEEPER_MISSILE_LAUNCH_BONE, ROBOTS_SWEEPER_MISSILE_LIVE_BONE_FRAME,
+    ROBOTS_SWEEPER_MISSILE_RESOURCE_FILE, ROBOTS_SWEEPER_MISSILE_SCRIPT,
+    ROBOTS_SWEEPER_MONSTER_CREATE_RESOURCE, ROBOTS_SWEEPER_MONSTER_PHYSICS_DESCRIPTOR,
+    ROBOTS_SWEEPER_MONSTER_RUNTIME_TYPE, ROBOTS_SWEEPER_MONSTER_UPDATE_REGISTRATION_MASK,
+    ROBOTS_SWEEPER_MONSTER_UPDATE_REGISTRATION_PRIORITY,
+    ROBOTS_SWEEPER_MONSTER_XITEM_REGISTRATION_FLAGS, ROBOTS_SWEEPER_PATTERN_FILE,
+    ROBOTS_SWEEPER_PATTERN_ROW_COUNT, ROBOTS_SWEEPER_RAT_ARRIVAL_YAW,
+    ROBOTS_SWEEPER_RAT_BASE_SCRIPT, ROBOTS_SWEEPER_RAT_DAMAGE_PHASE_DIFFICULTY,
+    ROBOTS_SWEEPER_RAT_DEATH_ANIM_MODE, ROBOTS_SWEEPER_RAT_DEATH_ANIM_SET,
+    ROBOTS_SWEEPER_RAT_DEATH_SCRIPT, ROBOTS_SWEEPER_RAT_DEATH_SIGNAL_FRAME,
+    ROBOTS_SWEEPER_RAT_ENTITY, ROBOTS_SWEEPER_RAT_FACE_PLAYER_ALPHA,
+    ROBOTS_SWEEPER_RAT_HIT_BACK_ANIM_MODE, ROBOTS_SWEEPER_RAT_HIT_BACK_ANIM_SET,
+    ROBOTS_SWEEPER_RAT_HIT_BACK_SCRIPT, ROBOTS_SWEEPER_RAT_HIT_BACK_SIGNAL_FRAME,
+    ROBOTS_SWEEPER_RAT_HIT_FORWARD_ANIM_MODE, ROBOTS_SWEEPER_RAT_HIT_FORWARD_ANIM_SET,
+    ROBOTS_SWEEPER_RAT_HIT_FORWARD_SCRIPT, ROBOTS_SWEEPER_RAT_HIT_FORWARD_SIGNAL_FRAME,
+    ROBOTS_SWEEPER_RAT_HIT_FORWARD_THRESHOLD, ROBOTS_SWEEPER_RAT_INITIAL_HIT_POINTS,
+    ROBOTS_SWEEPER_RAT_JUMP_LEFT_YAW, ROBOTS_SWEEPER_RAT_JUMP_RIGHT_YAW,
+    ROBOTS_SWEEPER_RAT_POSITION_DATUM, ROBOTS_SWEEPER_RAT_RESOURCE_FILE,
+    ROBOTS_SWEEPER_RAT_SCRIPT_VALUE_EVENT, ROBOTS_SWEEPER_RAT_SCRIPT_VALUE_SIGNAL_1,
+    ROBOTS_SWEEPER_RAT_SCRIPT_VALUE_SIGNAL_2,
+};
 pub use triggers::{
     robots_camera_controller_plan, robots_camera_flags, robots_camera_marker_scaled_data0,
     robots_camera_mode, robots_camera_scaled_data4, robots_camera_scaled_data5,
     robots_camera_viewport_runtime, robots_direct_object_audio_profile,
     robots_monster_data15_value, robots_monster_data4_value, robots_monster_flags,
     robots_monster_is_family, robots_monster_proximity_radius, robots_monster_runtime_selector,
-    robots_monster_test_runtime_value, robots_monster_transporter_secondary_path_hash,
-    robots_npc_alternate_cutscenes, robots_npc_cutscene_is_null, robots_npc_flags,
-    robots_npc_runtime_selector, robots_npc_runtime_uid, robots_npc_text_group,
-    robots_object_audio_is_consumer, robots_object_audio_is_enabled,
-    robots_object_audio_profile_for_source, robots_trigger_path_data_slot,
-    robots_trigger_path_hash, robots_trigger_path_is_proven,
+    robots_monster_test_runtime_value, robots_monster_transporter_path_speed,
+    robots_monster_transporter_secondary_path_hash, robots_npc_alternate_cutscenes,
+    robots_npc_cutscene_is_null, robots_npc_flags, robots_npc_runtime_selector,
+    robots_npc_runtime_uid, robots_npc_text_group, robots_object_audio_is_consumer,
+    robots_object_audio_is_enabled, robots_object_audio_profile_for_source,
+    robots_trigger_path_data_slot, robots_trigger_path_hash, robots_trigger_path_is_proven,
     robots_trigger_platform_angular_velocity, robots_trigger_runtime_path_acceleration,
     robots_trigger_runtime_path_speed, robots_watchbot_enter_distance, robots_watchbot_flags,
-    robots_watchbot_leave_distance, robots_watchbot_mode, NativeCameraViewportPose,
-    NativeCameraViewportRuntime, ObjectAudioProfile,
+    robots_watchbot_leave_distance, robots_watchbot_mode, NativeCameraFadeTransitionRuntime,
+    NativeCameraOwnershipRuntime, NativeCameraSequenceRuntime, NativeCameraShakeRuntime,
+    NativeCameraViewportPose, NativeCameraViewportRuntime, NativeDefaultPlayerCameraRuntime,
+    ObjectAudioProfile, NATIVE_FADE_HIGH_THRESHOLD, NATIVE_FADE_IN_STATE,
+    NATIVE_FADE_LOW_THRESHOLD, NATIVE_FADE_OUT_STATE,
 };
+
+const ROBOTS_SWEEPER_TRANSPORTER_RESOURCE_FILE: u32 = 0x0100_007B;
+const ROBOTS_SWEEPER_TRANSPORTER_ENTITY: u32 = 0x0200_0039;
+const ROBOTS_SWEEPER_TRANSPORTER_SPAWN_DATUM: u32 = 0x1000_0011;
 
 pub struct MapViewerPanel {
     maps: Vec<ProcessedMap>,
@@ -73,9 +169,76 @@ pub struct ProcessedMap {
     pub lights: Vec<ProcessedLight>,
     pub sounds: Vec<ProcessedSound>,
     pub lighting_triangles: Vec<NativeLightingTriangle>,
+    /// Robots v248 native per-face surface metadata aggregated from each MapZone ref mesh.
+    pub zone_surface_mask_counts: Vec<BTreeMap<u16, usize>>,
+    /// Exact nonzero native surface triangles for each MapZone ref mesh.
+    pub zone_surface_triangles: Vec<Vec<RobotsSurfaceTriangle>>,
+    /// Complete native `EXGeoEntity::DoRayCast` face stream for each MapZone root entity.
+    pub zone_raycast_triangles: Vec<Option<Vec<RobotsRaycastTriangle>>>,
+    /// Native 0x607 navigation topology reached through each MapZone ref-entity.
+    /// A zone may expose multiple NavMesh children through a Split hierarchy.
+    pub zone_navmeshes: Vec<Vec<ProcessedNavMesh>>,
+    /// World-space native raycast faces for each serialized placement. `None`
+    /// means the referenced entity could not be resolved; `Some(empty)` means
+    /// it resolved and genuinely has no native raycast faces.
+    pub placement_raycast_triangles: Vec<Option<Vec<RobotsRaycastTriangle>>>,
     pub paths: Vec<ProcessedPath>,
     pub triggers: Vec<ProcessedTrigger>,
+    /// Runtime-selector visual catalog for AI XItems that are created dynamically
+    /// and therefore have no serialized trigger record to own `character_visual`.
+    /// Key is `(MonsterDatabase runtime_type, config_index)` and the payload is
+    /// exactly the same decoded AnimSkin/AnimMode/HitArea contract used by
+    /// serialized Monster/NPC/Fish triggers.
+    pub runtime_character_visuals: BTreeMap<(u32, u32), ProcessedCharacterVisual>,
+    /// Per-trigger process-global RNG draws consumed by a successfully validated native Fluid setup.
+    /// `None` means either non-Fluid or the class-specific mesh/grid setup could not be proven.
+    pub fluid_initial_shared_rng_draws: Vec<Option<u32>>,
+    /// True only when shipped Sweeper data proves no serialized/static source can create a
+    /// candidate for the native post-XItem Pickup ordinal tail (`0x00444E0A`). Dynamic runtime
+    /// producers are checked separately each fixed frame.
+    pub sweeper_post_xitem_pickup_static_zero: bool,
     pub trigger_collisions: Vec<EXGeoBaseDatum>,
+    /// Global Robots D02 trigger-database PatternGroup resources used by XTrigger_Pattern.
+    pub pattern_groups: IntMap<Hashcode, RobotsPatternGroup>,
+    /// Native T00 HubTrack spreadsheet pairs requested by serialized XTrigger_BallTrack records.
+    pub ball_track_pairs: IntMap<u32, RobotsBallTrackPair>,
+    /// Native T00 HubTrack alternate-scheduler sheets (`0x1400000E`) keyed by
+    /// serialized BallTrack data[3]. Only data[1] > 0 triggers request these rows.
+    pub ball_track_schedules: IntMap<u32, RobotsBallTrackSchedule>,
+    /// Immutable D03_Missions / HT_SpreadSheet_Missions records used by Mission/NPC runtime.
+    pub mission_definitions: Vec<RobotsMissionDefinition>,
+    /// Immutable O01_PickUps / HT_SpreadSheet_Inventory records backing family-0x47 progress.
+    pub inventory_definitions: Vec<RobotsInventoryDefinition>,
+    /// Immutable D04_Missiles / HT_SpreadSheet_Missiles catalog used by the common
+    /// AI/player projectile producer at native `0x004DFEB0`.
+    pub missile_database: Option<RobotsMissileDatabase>,
+    /// Immutable FX03_Explosion / spreadsheet 0x1400000A catalog used by
+    /// `0x004DC510 -> 0x004DC6A0 -> XItemHandler_Explosion`.
+    pub explosion_database: Option<RobotsExplosionDatabase>,
+    /// Rodney's native candidate-side HT_AnimDatum_HitArea from P01_Rodney.
+    /// Player Handler ownership remains separate from AI-character bodies.
+    pub player_hit_area: Option<ProcessedCharacterCollisionProfile>,
+    /// Rodney HT_AnimDatum_SolidCollision (0x10000001), consumed by the native
+    /// global XItem collision pair pass before Handler vslot +0x64 callbacks.
+    pub player_solid_collision: Option<ProcessedCharacterCollisionProfile>,
+    /// Immutable H05_Shop / HT_SpreadSheet_Shops catalog used by the native Shop host.
+    pub shop_database: Option<RobotsShopDatabase>,
+    /// Immutable D01_Text / HT_SpreadSheet_TextGroups catalog used by native
+    /// XTextManager group selection for NPC/simple-message presentation.
+    pub text_groups: RobotsTextGroupCatalog,
+    /// Native Bo5_Final Sweeper-boss 70×5 monster spawn pattern spreadsheet.
+    pub sweeper_boss_patterns: Option<RobotsSweeperBossPatterns>,
+    /// Standalone Eye ScriptValue profiles from FinalBoss.edb (0x010000BC).
+    pub sweeper_eye_scripts: Option<RobotsSweeperEyeScripts>,
+    /// Relevant nb11_rat Script/Event profiles used by the native Ratchet fixed-tick reducer.
+    pub sweeper_ratchet_scripts: Option<RobotsSweeperRatchetScripts>,
+    /// Static HT_AnimDatum_RatchetPosition local center from HT_Entity_Sweeper in Bo5_Final.
+    pub sweeper_ratchet_position_local: Option<[f32; 3]>,
+    /// Exact previous-live HT_AnimBone_R_Hand point sampled from the native Attack animation at frame 16.5.
+    pub sweeper_ratchet_missile_hand_local: Option<[f32; 3]>,
+    /// Static ef02_dro HT_AnimDatum_MissilePosition used by native MonsterTransporter 0x00469450
+    /// as the spawned monster's initial world position before its own Handler takes ownership.
+    pub sweeper_transporter_spawn_position_local: Option<[f32; 3]>,
 }
 
 impl ProcessedMap {
@@ -750,6 +913,70 @@ pub struct ProcessedTriggerScript {
     pub aux: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ProcessedCharacterCollisionShape {
+    Sphere { radius: f32 },
+    Capsule { half_segment: f32, radius: f32 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProcessedCharacterCollisionProfile {
+    pub animskin: Hashcode,
+    pub shape: ProcessedCharacterCollisionShape,
+    pub local_center: Vec3,
+    pub local_orientation: [f32; 4],
+    pub transform_selector: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProcessedCharacterAnimationBonePose {
+    pub position: Vec3,
+    pub rotation: Quat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProcessedCharacterAnimDatum {
+    pub hashcode: Hashcode,
+    pub animskin: Hashcode,
+    /// Native searchable AnimDatum shape. HitCheck source selectors such as
+    /// HT_AnimDatum_AttackPoint require this geometry; point-only consumers may
+    /// ignore it and use the sampled transform.
+    pub shape: ProcessedCharacterCollisionShape,
+    pub local_center: Vec3,
+    pub local_orientation: [f32; 4],
+    pub transform_selector: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProcessedCharacterRootMotionSample {
+    /// Native Robots root-motion translation after `0x005039D5` channel extraction.
+    pub position: Vec3,
+    /// Native Robots root-motion quaternion. Coordinate conversion belongs at the
+    /// engine boundary, not in the EDB decoder.
+    pub rotation: Quat,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProcessedCharacterAnimationTrack {
+    pub animation: Hashcode,
+    pub animskin: Hashcode,
+    /// Serialized EXGeoAnim +0x0C rate byte. Native divides by 60 per fixed tick;
+    /// at the default 60-Hz update and fresh node scale 1.0 this is effective frames/s.
+    pub clip_rate: u8,
+    /// AnimSet contribution +0x06. Native `0x004F2A67 -> 0x0054F8A6`
+    /// converts this to a direct layer-weight rate of `1 / transition_fixed_ticks`.
+    /// Fresh initial animation has no transition and stores zero.
+    pub transition_fixed_ticks: u16,
+    pub frame_count: usize,
+    /// One native root-motion transform per integer frame, extracted from decoded
+    /// bone 0 before pose-side root channel removal. Storage is frame-major 1:1.
+    pub root_motion_samples: Vec<ProcessedCharacterRootMotionSample>,
+    /// Root-to-selector bone chain. Pose storage is frame-major with exactly
+    /// `bone_chain.len()` local transforms per integer frame.
+    pub bone_chain: Vec<usize>,
+    pub poses: Vec<ProcessedCharacterAnimationBonePose>,
+}
+
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct ProcessedCharacterVisual {
@@ -757,6 +984,69 @@ pub struct ProcessedCharacterVisual {
     pub script: Hashcode,
     pub runtime_type: u32,
     pub config_index: u32,
+    /// Exact concrete native XItemHandler selected by `0x0047EA70` from the
+    /// MonsterDatabase runtime sheet and selector. Brain dispatch keys from this
+    /// identity; the character EDB is a resource, not the class discriminator.
+    pub handler_class: RobotsAiHandlerClass,
+    /// Native XItemHandler_AI_Character +0x628 seed from the selected
+    /// HT_SpreadSheet_MonsterDatabase row second dword.
+    pub handler_flags_628: u32,
+    /// Native Monster Handler+0x62E initial health byte from MonsterDatabase
+    /// row +0x08. NPC sheet rows are only eight bytes and expose None.
+    pub initial_health: Option<u8>,
+    /// MonsterDatabase row +0x09 copied to Handler+0x638. Native AI global manager
+    /// `0x004563C0` reads it through handler vslot +0x14C when selecting the
+    /// process-wide current-attacker owner.
+    pub attacker_priority_638: Option<u8>,
+    /// MonsterDatabase row +0x0C copied to Handler+0x634. Common Monster action
+    /// `0x004550A0` uses this explosion UID while Handler+0x628 bit0x40000 is clear.
+    pub explosion_uid_634: Option<u32>,
+    /// MonsterDatabase row +0x10 copied to Handler+0x630. Common Monster action
+    /// `0x004550A0` uses this explosion UID while Handler+0x628 bit0x40000 is set.
+    pub explosion_uid_630: Option<u32>,
+    /// MonsterDatabase row +0x14 copied to Handler+0x63C. `AI_MagneticHit`
+    /// consumes values <=100 as its vertical spring mass coefficient.
+    pub magnetic_mass: Option<u8>,
+    /// MonsterDatabase row +0x15 copied to Handler+0x63D. Native death/drop
+    /// logic owns the same byte that `AI_MagneticHit` decrements while shedding
+    /// 0x47000001 objects.
+    pub pickup_drop_count: Option<u8>,
+    /// Searchable HT_AnimDatum_MapCollisionCapsule from the selected character
+    /// EDB's AnimSkin +0x60/+0x64 channel. Shipped multi-skin character EDBs
+    /// use identical MapCollision geometry across their variations.
+    pub collision: Option<ProcessedCharacterCollisionProfile>,
+    /// Candidate-side HT_AnimDatum_HitArea (0x10000010) consumed by native
+    /// `0x00425EF0`. This is intentionally separate from MapCollisionCapsule:
+    /// the two datums can have different geometry even when they share a bone.
+    pub hit_area: Option<ProcessedCharacterCollisionProfile>,
+    /// Native-proven freshly-created AI animator state only: layer 0,
+    /// HT_Animation_Idle_Attack (0x0300000E), flags 0x3 / looping, with local
+    /// pose samples restricted to the ancestry of the MapCollision selector.
+    pub initial_animation: Option<Arc<ProcessedCharacterAnimationTrack>>,
+    /// Every unambiguous `HT_AnimMode_Default -> target mode` animation resolved
+    /// through the native AnimMode/AnimSet chain. Concrete AI brains request a
+    /// mode by hashcode; the body/runtime layer must not grow one field per NPC
+    /// animation as more shipped handlers are recovered.
+    pub animation_modes: BTreeMap<Hashcode, Arc<ProcessedCharacterAnimationTrack>>,
+    /// AnimScript bound to each resolvable AnimMode when the AnimSet contribution
+    /// targets an HT_AnimScript rather than a bare Animation. Runtime event timing
+    /// stays data-driven and reuses the shared native Script scheduler.
+    pub animation_mode_scripts: BTreeMap<Hashcode, Arc<UXGeoScript>>,
+    /// Searchable AnimDatum metadata from the selected AnimSkin. Spatial queries
+    /// keep the datum local transform separate from the animated selector chain.
+    pub anim_datums: BTreeMap<Hashcode, ProcessedCharacterAnimDatum>,
+    /// Minimal extra sampled bone chains for gameplay events that reference an
+    /// AnimDatum outside the collision selector chain, keyed by (AnimMode, datum).
+    pub animation_mode_datum_tracks:
+        BTreeMap<(Hashcode, Hashcode), Arc<ProcessedCharacterAnimationTrack>>,
+    /// Data-driven `HT_AnimMode_Default -> HT_AnimMode_Move` result, resolved
+    /// through the native AnimMode -> control -> AnimSet -> AnimScript ->
+    /// Animation chain. This is diagnostic/predecoded data only until the
+    /// gameplay state-machine ingress that activates Move is replayed.
+    pub move_animation: Option<Arc<ProcessedCharacterAnimationTrack>>,
+    /// Directional turn modes requested by AI when Handler+0x628 bit0x4 is set.
+    pub turn_on_spot_l_animation: Option<Arc<ProcessedCharacterAnimationTrack>>,
+    pub turn_on_spot_r_animation: Option<Arc<ProcessedCharacterAnimationTrack>>,
 }
 
 #[derive(Clone)]
@@ -786,6 +1076,31 @@ pub struct ProcessedTrigger {
     pub incoming_links: Vec<i32>,
 }
 
+#[cfg(test)]
+pub(crate) fn robots_sweeper_boss_trigger_event_target(
+    map: &ProcessedMap,
+    controller_trigger_index: usize,
+    event: NativeSweeperBossTriggerEvent,
+) -> Option<usize> {
+    let (owner_index, link_ordinal) = match event {
+        NativeSweeperBossTriggerEvent::ControllerLink6CommonMask1 => {
+            let controller = map.triggers.get(controller_trigger_index)?;
+            if controller.ttype != ROBOTS_SWEEPER_CONTROLLER_TYPE {
+                return None;
+            }
+            (controller_trigger_index, 6)
+        }
+        NativeSweeperBossTriggerEvent::PlayerLink0CommonMask1 => {
+            let player_index = map.triggers.iter().position(|trigger| trigger.ttype == 0)?;
+            (player_index, 0)
+        }
+    };
+    let target_index =
+        usize::try_from(*map.triggers.get(owner_index)?.links.get(link_ordinal)?).ok()?;
+    map.triggers.get(target_index)?;
+    Some(target_index)
+}
+
 impl MapViewerPanel {
     pub fn new(
         file: Hashcode,
@@ -799,7 +1114,7 @@ impl MapViewerPanel {
         sound_preview: SharedSoundPreview,
     ) -> Self {
         let mut maps = maps;
-        Self::populate_lighting_triangles(&mut maps, &ref_entities);
+        Self::populate_lighting_triangles(file, &mut maps, &ref_entities, &render_store);
         let initial_camera_position = maps.first().and_then(map_editor_start_position);
         MapViewerPanel {
             frame: {
@@ -831,11 +1146,19 @@ impl MapViewerPanel {
     }
 
     fn populate_lighting_triangles(
+        file: Hashcode,
         maps: &mut [ProcessedMap],
         ref_entities: &[IdentifiableResult<(EXGeoEntity, ProcessedEntityMesh)>],
+        render_store: &Arc<RwLock<RenderStore>>,
     ) {
+        let render_store = render_store.read();
         for map in maps {
             map.lighting_triangles.clear();
+            map.zone_surface_mask_counts = vec![BTreeMap::new(); map.mapzone_entities.len()];
+            map.zone_surface_triangles = vec![Vec::new(); map.mapzone_entities.len()];
+            map.zone_raycast_triangles = vec![None; map.mapzone_entities.len()];
+            map.zone_navmeshes = vec![Vec::new(); map.mapzone_entities.len()];
+            map.placement_raycast_triangles = vec![None; map.placements.len()];
             for (zone_index, zone_entity) in map.mapzone_entities.iter().enumerate() {
                 let Some(Ok((_, mesh))) = ref_entities
                     .iter()
@@ -844,6 +1167,22 @@ impl MapViewerPanel {
                 else {
                     continue;
                 };
+
+                if let Some(zone_surface_counts) = map.zone_surface_mask_counts.get_mut(zone_index)
+                {
+                    *zone_surface_counts = mesh.robots_surface_mask_counts.clone();
+                }
+                if let Some(zone_surface_triangles) = map.zone_surface_triangles.get_mut(zone_index)
+                {
+                    *zone_surface_triangles = mesh.robots_surface_triangles.clone();
+                }
+                if let Some(zone_raycast_triangles) = map.zone_raycast_triangles.get_mut(zone_index)
+                {
+                    *zone_raycast_triangles = Some(mesh.robots_raycast_triangles.clone());
+                }
+                if let Some(zone_navmeshes) = map.zone_navmeshes.get_mut(zone_index) {
+                    *zone_navmeshes = mesh.robots_navmeshes.clone();
+                }
 
                 for strip in mesh.strips.iter().filter(|strip| !strip.is_navmesh) {
                     let start = strip.start_index as usize;
@@ -886,6 +1225,47 @@ impl MapViewerPanel {
                         });
                     }
                 }
+            }
+
+            for (placement_index, placement) in map.placements.iter().enumerate() {
+                if placement.engine_flags & 0x08 == 0 || placement.object_ref.base() != 0x0200_0000
+                {
+                    continue;
+                }
+                let Some(resolved) =
+                    render_store.resolve_entity_hashcode(file, placement.object_ref)
+                else {
+                    continue;
+                };
+                let Some(Ok((_, mesh))) = ref_entities
+                    .iter()
+                    .find(|entry| entry.hashcode == resolved)
+                    .map(|entry| entry.data.as_ref())
+                else {
+                    continue;
+                };
+                let transform = Mat4::from_scale_rotation_translation(
+                    Vec3::from(placement.scale),
+                    Quat::from_euler(
+                        glam::EulerRot::ZXY,
+                        placement.rotation[2],
+                        placement.rotation[0],
+                        placement.rotation[1],
+                    ),
+                    Vec3::from(placement.position),
+                );
+                map.placement_raycast_triangles[placement_index] = Some(
+                    mesh.robots_raycast_triangles
+                        .iter()
+                        .map(|triangle| RobotsRaycastTriangle {
+                            positions: triangle
+                                .positions
+                                .map(|position| transform.transform_point3(position)),
+                            face_mask: triangle.face_mask,
+                            trailing_raw: triangle.trailing_raw,
+                        })
+                        .collect(),
+                );
             }
         }
     }
@@ -937,6 +1317,446 @@ impl MapViewerPanel {
     pub fn show(&mut self, context: &egui::Context, ui: &mut egui::Ui) -> anyhow::Result<()> {
         self.frame.show(ui, context, &self.maps)
     }
+}
+
+pub fn resolve_robots_pattern_groups(
+    maps: &mut [ProcessedMap],
+    path_cache: &IntMap<Hashcode, String>,
+    platform: Platform,
+) -> anyhow::Result<usize> {
+    let Some(path) = path_cache.get(&ROBOTS_TRIGGER_DATABASE_FILE) else {
+        return Ok(0);
+    };
+    let file = std::fs::File::open(path)?;
+    let mut edb = EdbFile::new(Box::new(std::io::BufReader::new(file)), platform)?;
+    let groups = read_robots_pattern_groups(&mut edb)?;
+    let catalog = groups
+        .into_iter()
+        .map(|group| (group.hashcode, group))
+        .collect::<IntMap<_, _>>();
+    let count = catalog.len();
+    for map in maps {
+        map.pattern_groups = catalog.clone();
+    }
+    Ok(count)
+}
+
+pub fn resolve_robots_ball_track_pairs(
+    maps: &mut [ProcessedMap],
+    path_cache: &IntMap<Hashcode, String>,
+    platform: Platform,
+) -> anyhow::Result<(usize, usize)> {
+    const ROBOTS_BALL_TRACK_SERIALIZED_TYPE: u32 = 40;
+
+    let Some(path) = path_cache.get(&ROBOTS_HUB_TRACK_FILE) else {
+        return Ok((0, 0));
+    };
+    let triggers = maps
+        .iter()
+        .flat_map(|map| map.triggers.iter())
+        .filter(|trigger| trigger.ttype == ROBOTS_BALL_TRACK_SERIALIZED_TYPE)
+        .collect::<Vec<_>>();
+    let mut sheet_indices = triggers
+        .iter()
+        .map(|trigger| trigger.data.get(2).copied().flatten().unwrap_or_default())
+        .collect::<Vec<_>>();
+    sheet_indices.sort_unstable();
+    sheet_indices.dedup();
+    if sheet_indices.is_empty() {
+        return Ok((0, 0));
+    }
+    let mut schedule_indices = triggers
+        .iter()
+        .filter(|trigger| {
+            trigger
+                .data
+                .get(1)
+                .copied()
+                .flatten()
+                .map(|value| value as i32 > 0)
+                .unwrap_or(false)
+        })
+        .filter_map(|trigger| trigger.data.get(3).copied().flatten())
+        .collect::<Vec<_>>();
+    schedule_indices.sort_unstable();
+    schedule_indices.dedup();
+
+    let file = std::fs::File::open(path)?;
+    let mut edb = EdbFile::new(Box::new(std::io::BufReader::new(file)), platform)?;
+    let mut catalog = IntMap::default();
+    for sheet_index in sheet_indices {
+        if let Some(pair) = read_robots_ball_track_pair(&mut edb, sheet_index)? {
+            catalog.insert(sheet_index, pair);
+        }
+    }
+    let mut schedules = IntMap::default();
+    for sheet_index in schedule_indices {
+        if let Some(schedule) = read_robots_ball_track_schedule(&mut edb, sheet_index)? {
+            schedules.insert(sheet_index, schedule);
+        }
+    }
+    let pair_count = catalog.len();
+    let schedule_count = schedules.len();
+    for map in maps {
+        map.ball_track_pairs = catalog.clone();
+        map.ball_track_schedules = schedules.clone();
+    }
+    Ok((pair_count, schedule_count))
+}
+
+pub fn resolve_robots_mission_runtime_databases(
+    maps: &mut [ProcessedMap],
+    path_cache: &IntMap<Hashcode, String>,
+    platform: Platform,
+) -> anyhow::Result<(usize, usize)> {
+    let Some(mission_path) = path_cache.get(&ROBOTS_MISSIONS_FILE_UID) else {
+        return Ok((0, 0));
+    };
+    let Some(inventory_path) = path_cache.get(&ROBOTS_INVENTORY_FILE_UID) else {
+        return Ok((0, 0));
+    };
+
+    let mission_file = std::fs::File::open(mission_path)?;
+    let mut mission_edb = EdbFile::new(Box::new(std::io::BufReader::new(mission_file)), platform)?;
+    let mission_definitions = read_robots_mission_definitions(&mut mission_edb)?;
+
+    let inventory_file = std::fs::File::open(inventory_path)?;
+    let mut inventory_edb =
+        EdbFile::new(Box::new(std::io::BufReader::new(inventory_file)), platform)?;
+    let inventory_definitions = read_robots_inventory_definitions(&mut inventory_edb)?;
+
+    let counts = (mission_definitions.len(), inventory_definitions.len());
+    for map in maps {
+        map.mission_definitions = mission_definitions.clone();
+        map.inventory_definitions = inventory_definitions.clone();
+    }
+    Ok(counts)
+}
+
+pub const ROBOTS_PLAYER_RODNEY_FILE_UID: u32 = 0x0100_0002;
+pub const ROBOTS_PLAYER_RODNEY_ANIMSKIN_UID: u32 = 0x0D00_0001;
+
+pub fn resolve_robots_player_hit_area(
+    maps: &mut [ProcessedMap],
+    path_cache: &IntMap<Hashcode, String>,
+    platform: Platform,
+) -> anyhow::Result<bool> {
+    let Some(player_path) = path_cache.get(&ROBOTS_PLAYER_RODNEY_FILE_UID) else {
+        return Ok(false);
+    };
+    let player_file = std::fs::File::open(player_path)?;
+    let mut player_edb = EdbFile::new(Box::new(std::io::BufReader::new(player_file)), platform)?;
+    let hit_area =
+        entities::preview_hit_area_profile(&mut player_edb, ROBOTS_PLAYER_RODNEY_ANIMSKIN_UID)?;
+    let solid_collision = entities::preview_anim_datum_collision_profile(
+        &mut player_edb,
+        ROBOTS_PLAYER_RODNEY_ANIMSKIN_UID,
+        entities::ROBOTS_ANIM_DATUM_SOLID_COLLISION,
+    )?;
+    for map in maps {
+        map.player_hit_area = hit_area;
+        map.player_solid_collision = solid_collision;
+    }
+    Ok(hit_area.is_some())
+}
+
+pub fn resolve_robots_missile_database(
+    maps: &mut [ProcessedMap],
+    path_cache: &IntMap<Hashcode, String>,
+    platform: Platform,
+) -> anyhow::Result<usize> {
+    let Some(missile_path) = path_cache.get(&ROBOTS_MISSILE_DATABASE_FILE_UID) else {
+        return Ok(0);
+    };
+    let missile_file = std::fs::File::open(missile_path)?;
+    let mut missile_edb = EdbFile::new(Box::new(std::io::BufReader::new(missile_file)), platform)?;
+    let database = read_robots_missile_database(&mut missile_edb)?;
+    let count = database.rows.len();
+    for map in maps {
+        map.missile_database = Some(database.clone());
+    }
+    Ok(count)
+}
+
+pub fn resolve_robots_explosion_database(
+    maps: &mut [ProcessedMap],
+    path_cache: &IntMap<Hashcode, String>,
+    platform: Platform,
+) -> anyhow::Result<(usize, usize)> {
+    let Some(explosion_path) = path_cache.get(&ROBOTS_EXPLOSION_DATABASE_FILE_UID) else {
+        return Ok((0, 0));
+    };
+    let explosion_file = std::fs::File::open(explosion_path)?;
+    let mut explosion_edb =
+        EdbFile::new(Box::new(std::io::BufReader::new(explosion_file)), platform)?;
+    let database = read_robots_explosion_database(&mut explosion_edb)?;
+    let counts = (database.definitions.len(), database.fragments.len());
+    for map in maps {
+        map.explosion_database = Some(database.clone());
+    }
+    Ok(counts)
+}
+
+pub fn resolve_robots_shop_database(
+    maps: &mut [ProcessedMap],
+    path_cache: &IntMap<Hashcode, String>,
+    platform: Platform,
+) -> anyhow::Result<(usize, usize)> {
+    let Some(shop_path) = path_cache.get(&ROBOTS_SHOP_FILE_UID) else {
+        return Ok((0, 0));
+    };
+    let shop_file = std::fs::File::open(shop_path)?;
+    let mut shop_edb = EdbFile::new(Box::new(std::io::BufReader::new(shop_file)), platform)?;
+    let database = read_robots_shop_database(&mut shop_edb)?;
+    let counts = (database.groups.len(), database.items.len());
+    for map in maps {
+        map.shop_database = Some(database.clone());
+    }
+    Ok(counts)
+}
+
+pub fn resolve_robots_text_groups(
+    maps: &mut [ProcessedMap],
+    path_cache: &IntMap<Hashcode, String>,
+    platform: Platform,
+) -> anyhow::Result<usize> {
+    let Some(text_path) = path_cache.get(&ROBOTS_TEXT_FILE_UID) else {
+        return Ok(0);
+    };
+    let text_file = std::fs::File::open(text_path)?;
+    let mut text_edb = EdbFile::new(Box::new(std::io::BufReader::new(text_file)), platform)?;
+    let catalog = read_robots_text_groups(&mut text_edb)?;
+    let count = catalog.groups.len();
+    for map in maps {
+        map.text_groups = catalog.clone();
+    }
+    Ok(count)
+}
+
+fn robots_edb_has_pickup_generation_script_event(edb: &mut EdbFile) -> anyhow::Result<bool> {
+    let saved_internal_references = edb.internal_references.clone();
+    let saved_external_references = edb.external_references.clone();
+    let scripts = UXGeoScript::read_all(edb);
+    edb.internal_references = saved_internal_references;
+    edb.external_references = saved_external_references;
+    let scripts = scripts?;
+    Ok(scripts.iter().any(|script| {
+        script.commands.iter().any(|command| {
+            matches!(
+                command.data,
+                UXGeoScriptCommandData::Event {
+                    event_type: 0x1600_0020,
+                    ..
+                }
+            )
+        })
+    }))
+}
+
+pub fn resolve_robots_sweeper_boss_patterns(
+    source_edb: &mut EdbFile,
+    maps: &mut [ProcessedMap],
+    path_cache: &IntMap<Hashcode, String>,
+    platform: Platform,
+) -> anyhow::Result<usize> {
+    let controller_maps = maps
+        .iter()
+        .enumerate()
+        .filter(|(_, map)| {
+            map.triggers
+                .iter()
+                .any(|trigger| trigger.ttype == ROBOTS_SWEEPER_CONTROLLER_TYPE)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if controller_maps.is_empty() {
+        return Ok(0);
+    }
+    let source_scripts_have_pickup_event =
+        robots_edb_has_pickup_generation_script_event(source_edb)?;
+
+    let Some(path) = path_cache.get(&ROBOTS_SWEEPER_PATTERN_FILE) else {
+        return Ok(0);
+    };
+    let file = std::fs::File::open(path)?;
+    let mut edb = EdbFile::new(Box::new(std::io::BufReader::new(file)), platform)?;
+    let mut patterns = RobotsSweeperBossPatterns::read(&mut edb)?;
+    let eye_scripts = RobotsSweeperEyeScripts::read(&mut edb)?;
+    let pattern_scripts_have_pickup_event =
+        robots_edb_has_pickup_generation_script_event(&mut edb)?;
+    let ratchet_entity_header = edb
+        .header
+        .entity_list
+        .data()
+        .iter()
+        .find(|header| header.common.hashcode == ROBOTS_SWEEPER_RAT_ENTITY)
+        .cloned();
+    let ratchet_position_local = if let Some(header) = ratchet_entity_header {
+        let endian = edb.endian;
+        read_robots_v248_entity_anim_datums(&mut edb, endian, header.common.address as u64)?
+            .and_then(|directory| {
+                directory
+                    .records
+                    .into_iter()
+                    .find(|record| record.hashcode == ROBOTS_SWEEPER_RAT_POSITION_DATUM)
+                    .map(|record| record.local_center)
+            })
+    } else {
+        None
+    };
+    let (ratchet_missile_hand_local, ratchet_scripts, ratchet_scripts_have_pickup_event) =
+        if let Some(ratchet_path) = path_cache.get(&ROBOTS_SWEEPER_RAT_RESOURCE_FILE) {
+            let ratchet_file = std::fs::File::open(ratchet_path)?;
+            let mut ratchet_edb =
+                EdbFile::new(Box::new(std::io::BufReader::new(ratchet_file)), platform)?;
+            let ratchet_scripts = RobotsSweeperRatchetScripts::read(&mut ratchet_edb)?;
+            let catalog = crate::animations::read_from_file(&mut ratchet_edb)?;
+            let hand = crate::animations::sample_bound_animation_bone_position(
+                &catalog,
+                ROBOTS_SWEEPER_ATTACK_ANIMATION,
+                ROBOTS_SWEEPER_MISSILE_LAUNCH_BONE,
+                ROBOTS_SWEEPER_MISSILE_LIVE_BONE_FRAME,
+            )
+            .map(|position| position.to_array());
+            let has_pickup_event = robots_edb_has_pickup_generation_script_event(&mut ratchet_edb)?;
+            (hand, Some(ratchet_scripts), has_pickup_event)
+        } else {
+            (None, None, true)
+        };
+    let transporter_spawn_position_local =
+        if let Some(transporter_path) = path_cache.get(&ROBOTS_SWEEPER_TRANSPORTER_RESOURCE_FILE) {
+            let transporter_file = std::fs::File::open(transporter_path)?;
+            let mut transporter_edb = EdbFile::new(
+                Box::new(std::io::BufReader::new(transporter_file)),
+                platform,
+            )?;
+            let transporter_entity_header = transporter_edb
+                .header
+                .entity_list
+                .data()
+                .iter()
+                .find(|header| header.common.hashcode == ROBOTS_SWEEPER_TRANSPORTER_ENTITY)
+                .cloned();
+            if let Some(header) = transporter_entity_header {
+                let endian = transporter_edb.endian;
+                read_robots_v248_entity_anim_datums(
+                    &mut transporter_edb,
+                    endian,
+                    header.common.address as u64,
+                )?
+                .and_then(|directory| {
+                    directory
+                        .records
+                        .into_iter()
+                        .find(|record| record.hashcode == ROBOTS_SWEEPER_TRANSPORTER_SPAWN_DATUM)
+                        .map(|record| record.local_center)
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+    if let Some(database_path) = path_cache.get(&ROBOTS_MONSTER_DATABASE_FILE) {
+        let database_file = std::fs::File::open(database_path)?;
+        let mut database_edb =
+            EdbFile::new(Box::new(std::io::BufReader::new(database_file)), platform)?;
+        let database = RobotsCharacterDatabase::read(&mut database_edb)?;
+        for &selector in RobotsSweeperBossPatterns::monster_selectors() {
+            if let Some(file) = database
+                .file_for_runtime_selector(ROBOTS_SWEEPER_MONSTER_RUNTIME_TYPE, selector as usize)
+            {
+                patterns.set_monster_file(selector, file);
+            }
+            if let Some(drop_count) = database.pickup_drop_count_for_runtime_selector(
+                ROBOTS_SWEEPER_MONSTER_RUNTIME_TYPE,
+                selector as usize,
+            ) {
+                patterns.set_monster_pickup_drop_count(selector, drop_count);
+            }
+        }
+    }
+    let dynamic_visual_selectors = RobotsSweeperBossPatterns::monster_selectors()
+        .iter()
+        .map(|&selector| (ROBOTS_SWEEPER_MONSTER_RUNTIME_TYPE, selector as u32))
+        .collect::<Vec<_>>();
+    let dynamic_character_visuals = entities::resolve_robots_character_visual_catalog(
+        source_edb,
+        path_cache,
+        platform,
+        &dynamic_visual_selectors,
+    )?;
+    let shared_scripts_have_pickup_event = source_scripts_have_pickup_event
+        || pattern_scripts_have_pickup_event
+        || ratchet_scripts_have_pickup_event;
+    let count = patterns.rows.len();
+    for map_index in controller_maps {
+        let serialized_pickup_ingress_absent = maps[map_index].triggers.iter().all(|trigger| {
+            robots_pickup_visual(trigger.ttype, &trigger.data).is_none()
+                && !matches!(trigger.ttype, 68 | 69)
+        });
+        maps[map_index].sweeper_post_xitem_pickup_static_zero =
+            serialized_pickup_ingress_absent && !shared_scripts_have_pickup_event;
+        maps[map_index].runtime_character_visuals.extend(
+            dynamic_character_visuals
+                .iter()
+                .map(|(key, visual)| (*key, visual.clone())),
+        );
+        maps[map_index].sweeper_boss_patterns = Some(patterns.clone());
+        maps[map_index].sweeper_eye_scripts = Some(eye_scripts.clone());
+        maps[map_index].sweeper_ratchet_scripts = ratchet_scripts.clone();
+        maps[map_index].sweeper_ratchet_position_local = ratchet_position_local;
+        maps[map_index].sweeper_ratchet_missile_hand_local = ratchet_missile_hand_local;
+        maps[map_index].sweeper_transporter_spawn_position_local = transporter_spawn_position_local;
+    }
+    Ok(count)
+}
+
+fn validated_fluid_initial_shared_rng_draws(
+    edb: &mut EdbFile,
+    trigger: &ProcessedTrigger,
+) -> Option<u32> {
+    if trigger.ttype != ROBOTS_FLUID_TYPE {
+        return None;
+    }
+    let draws = robots_fluid_initial_shared_rng_draw_count(&trigger.data)?;
+    let width = trigger.data.first().copied().flatten()?;
+    let height = trigger.data.get(1).copied().flatten()?;
+    let expected_positions = usize::try_from(width.checked_mul(height)?).ok()?;
+    let visual = trigger.engine_options.visual_object?;
+    if !visual.is_local() {
+        return None;
+    }
+
+    let entity_record = edb
+        .header
+        .entity_list
+        .iter()
+        .find(|record| record.common.hashcode == visual)?;
+    let entity_address = entity_record.common.address as u64;
+    let endian = edb.endian;
+    let version = edb.header.version;
+    let platform = edb.platform;
+    edb.seek(std::io::SeekFrom::Start(entity_address)).ok()?;
+    let entity = edb
+        .read_type_args::<EXGeoEntity>(endian, (version, platform))
+        .ok()?;
+    let EXGeoEntity::Mesh(mesh) = entity else {
+        return None;
+    };
+    let unique_positions = mesh
+        .vertices
+        .iter()
+        .map(|vertex| {
+            (
+                vertex.pos[0].to_bits(),
+                vertex.pos[1].to_bits(),
+                vertex.pos[2].to_bits(),
+            )
+        })
+        .collect::<BTreeSet<_>>()
+        .len();
+    (unique_positions == expected_positions).then_some(draws)
 }
 
 pub fn read_from_file(edb: &mut EdbFile) -> Vec<ProcessedMap> {
@@ -1026,6 +1846,11 @@ pub fn read_from_file(edb: &mut EdbFile) -> Vec<ProcessedMap> {
                 })
                 .collect(),
             lighting_triangles: Vec::new(),
+            zone_surface_mask_counts: Vec::new(),
+            zone_surface_triangles: Vec::new(),
+            zone_raycast_triangles: Vec::new(),
+            zone_navmeshes: Vec::new(),
+            placement_raycast_triangles: Vec::new(),
             paths: xmap
                 .paths
                 .iter()
@@ -1054,7 +1879,27 @@ pub fn read_from_file(edb: &mut EdbFile) -> Vec<ProcessedMap> {
                 })
                 .collect(),
             triggers: vec![],
+            runtime_character_visuals: BTreeMap::new(),
+            fluid_initial_shared_rng_draws: vec![],
+            sweeper_post_xitem_pickup_static_zero: false,
             trigger_collisions: xmap.trigger_header.trigger_collisions.0.clone(),
+            pattern_groups: IntMap::default(),
+            ball_track_pairs: IntMap::default(),
+            ball_track_schedules: IntMap::default(),
+            mission_definitions: vec![],
+            inventory_definitions: vec![],
+            missile_database: None,
+            explosion_database: None,
+            player_hit_area: None,
+            player_solid_collision: None,
+            shop_database: None,
+            text_groups: RobotsTextGroupCatalog::default(),
+            sweeper_boss_patterns: None,
+            sweeper_eye_scripts: None,
+            sweeper_ratchet_scripts: None,
+            sweeper_ratchet_position_local: None,
+            sweeper_ratchet_missile_hand_local: None,
+            sweeper_transporter_spawn_position_local: None,
             skies: xmap.skies.iter().map(|s| s.hashcode).collect(),
             zones: vec![],
         };
@@ -1131,6 +1976,9 @@ pub fn read_from_file(edb: &mut EdbFile) -> Vec<ProcessedMap> {
                 incoming_links: vec![],
             };
 
+            let fluid_shared_rng_draws = validated_fluid_initial_shared_rng_draws(edb, &trigger);
+            map.fluid_initial_shared_rng_draws
+                .push(fluid_shared_rng_draws);
             map.triggers.push(trigger);
         }
 
@@ -1154,35 +2002,41 @@ pub fn read_from_file(edb: &mut EdbFile) -> Vec<ProcessedMap> {
 
 #[cfg(test)]
 mod tests {
+    use super::triggers::NativeSweeperRatchetScriptEventKind;
     use super::{
         map_editor_start_position, native_portal_clip, read_from_file,
-        robots_camera_controller_plan, robots_camera_flags, robots_camera_marker_scaled_data0,
-        robots_camera_mode, robots_camera_scaled_data4, robots_camera_scaled_data5,
-        robots_monster_data15_value, robots_monster_data4_value, robots_monster_flags,
-        robots_monster_is_family, robots_monster_proximity_radius, robots_monster_runtime_selector,
-        robots_monster_test_runtime_value, robots_monster_transporter_secondary_path_hash,
-        robots_native_light_colour, robots_native_light_type_description,
-        robots_npc_alternate_cutscenes, robots_npc_cutscene_is_null, robots_npc_flags,
-        robots_npc_runtime_selector, robots_npc_runtime_uid, robots_npc_text_group,
-        robots_portal_neighbor_zone, robots_trigger_path_data_slot, robots_trigger_path_hash,
-        robots_trigger_path_is_proven, robots_trigger_platform_angular_velocity,
-        robots_trigger_runtime_path_acceleration, robots_trigger_runtime_path_speed,
-        robots_watchbot_enter_distance, robots_watchbot_flags, robots_watchbot_leave_distance,
-        robots_watchbot_mode, NativePortalClip, ProcessedPortal,
+        resolve_robots_sweeper_boss_patterns, robots_camera_controller_plan, robots_camera_flags,
+        robots_camera_marker_scaled_data0, robots_camera_mode, robots_camera_scaled_data4,
+        robots_camera_scaled_data5, robots_monster_data15_value, robots_monster_data4_value,
+        robots_monster_flags, robots_monster_is_family, robots_monster_proximity_radius,
+        robots_monster_runtime_selector, robots_monster_test_runtime_value,
+        robots_monster_transporter_secondary_path_hash, robots_native_light_colour,
+        robots_native_light_type_description, robots_npc_alternate_cutscenes,
+        robots_npc_cutscene_is_null, robots_npc_flags, robots_npc_runtime_selector,
+        robots_npc_runtime_uid, robots_npc_text_group, robots_portal_neighbor_zone,
+        robots_trigger_path_data_slot, robots_trigger_path_hash, robots_trigger_path_is_proven,
+        robots_trigger_platform_angular_velocity, robots_trigger_runtime_path_acceleration,
+        robots_trigger_runtime_path_speed, robots_watchbot_enter_distance, robots_watchbot_flags,
+        robots_watchbot_leave_distance, robots_watchbot_mode, NativePortalClip, ProcessedPortal,
     };
     use eurochef_edb::{
+        anim::EXGeoBaseAnimSkin,
         binrw::BinReaderExt,
         edb::EdbFile,
-        entity::{EXGeoEntity, ROBOTS_ENTITY_FLAG_NO_FOG},
+        entity::{read_robots_v248_entity_anim_datums, EXGeoEntity, ROBOTS_ENTITY_FLAG_NO_FOG},
         script::EXGeoAnimScript,
+        texture::EXGeoTexture,
         versions::Platform,
         HashcodeUtils,
     };
-    use eurochef_shared::script::{UXGeoScript, UXGeoScriptCommandData};
+    use eurochef_shared::{
+        robots_runtime::ai_character::RobotsAiHandlerClass,
+        script::{UXGeoScript, UXGeoScriptCommandData},
+    };
     use glam::{Mat4, Vec3};
     use std::{
         fs::File,
-        io::{BufReader, Seek},
+        io::{BufReader, Seek, SeekFrom},
         path::{Path, PathBuf},
     };
 
@@ -1256,6 +2110,544 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn real_robots_v248_sweeper_projectile_attack_and_rodney_hit_shapes_match_native_query_data() {
+        let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
+            return;
+        };
+        let root =
+            Path::new(&game_root).join("_eurotools_out/extracted_main/robots/binary/_bin_pc");
+
+        let bo5_path = root.join("bo5_fin.edb");
+        let file = File::open(&bo5_path).expect("open bo5_fin.edb");
+        let mut bo5 =
+            EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc).expect("parse bo5_fin.edb");
+        let missile_header = bo5
+            .header
+            .entity_list
+            .data()
+            .iter()
+            .find(|header| header.common.hashcode == 0x0200_0195)
+            .cloned()
+            .expect("bo5_fin RatchetMissile entity 0x02000195");
+        let bo5_endian = bo5.endian;
+        let missile_datums = read_robots_v248_entity_anim_datums(
+            &mut bo5,
+            bo5_endian,
+            missile_header.common.address as u64,
+        )
+        .expect("read RatchetMissile Entity AnimDatum directory")
+        .expect("RatchetMissile Entity AnimDatum directory missing");
+        let attack = missile_datums
+            .records
+            .iter()
+            .find(|datum| datum.hashcode == 0x1000_0009)
+            .expect("RatchetMissile HT_AnimDatum_AttackPoint missing");
+        assert_eq!(attack.shape_mode, 1);
+        assert!((attack.shape_scalars[0] - 0.70).abs() <= 1.0e-6);
+        assert!(attack
+            .local_center
+            .iter()
+            .all(|value| value.abs() <= 1.0e-6));
+
+        let rodney_path = root.join("p01_rod.edb");
+        let file = File::open(&rodney_path).expect("open p01_rod.edb");
+        let mut rodney =
+            EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc).expect("parse p01_rod.edb");
+        let skin_header = rodney
+            .header
+            .animskin_list
+            .data()
+            .iter()
+            .find(|header| header.common.hashcode == 0x0D00_0001)
+            .cloned()
+            .expect("Rodney AnimSkin 0x0D000001");
+        rodney
+            .seek(SeekFrom::Start(skin_header.common.address as u64))
+            .expect("seek Rodney AnimSkin");
+        let skin = rodney
+            .read_type_args::<EXGeoBaseAnimSkin>(rodney.endian, (rodney.header.version,))
+            .expect("parse Rodney AnimSkin");
+        let hit_area = skin
+            .robots_animdatum_section
+            .as_ref()
+            .expect("Rodney AnimDatum section")
+            .find(0x1000_0010)
+            .expect("Rodney searchable HT_AnimDatum_HitArea missing");
+        assert_eq!(hit_area.header.shape_mode, 1);
+        assert!((hit_area.shape_scalars[0] - 0.35).abs() <= 1.0e-6);
+        assert!((hit_area.local_center[0] - 0.0).abs() <= 1.0e-6);
+        assert!((hit_area.local_center[1] - 0.35).abs() <= 1.0e-6);
+        assert!((hit_area.local_center[2] - 0.0).abs() <= 1.0e-6);
+        assert_eq!(hit_area.transform_selector, 0);
+        assert_eq!(hit_area.hierarchy_chain, [0]);
+
+        let solid_collision = skin
+            .robots_animdatum_section
+            .as_ref()
+            .expect("Rodney AnimDatum section")
+            .find(0x1000_0001)
+            .expect("Rodney HT_AnimDatum_SolidCollision missing");
+        assert_eq!(solid_collision.header.shape_mode, 1);
+        assert!((solid_collision.shape_scalars[0] - 0.325).abs() <= 1.0e-6);
+        assert!((solid_collision.local_center[0] - 0.0).abs() <= 1.0e-6);
+        assert!((solid_collision.local_center[1] - 0.35).abs() <= 1.0e-6);
+        assert!(solid_collision.local_center[2].abs() <= 1.0e-6);
+        assert_eq!(solid_collision.transform_selector, 0);
+        assert_eq!(solid_collision.hierarchy_chain, [0]);
+    }
+
+    #[test]
+    fn real_robots_v248_sweeper_boss_resolver_hydrates_native_missile_hand_when_game_root_is_configured(
+    ) {
+        let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
+            return;
+        };
+        let root =
+            Path::new(&game_root).join("_eurotools_out/extracted_main/robots/binary/_bin_pc");
+        let m10_path = root.join("m10_boss.edb");
+        let file = File::open(&m10_path).expect("open m10_boss.edb");
+        let mut edb =
+            EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc).expect("parse m10_boss.edb");
+        let mut maps = read_from_file(&mut edb);
+        assert!(maps.iter().any(|map| {
+            map.triggers
+                .iter()
+                .any(|trigger| trigger.ttype == super::ROBOTS_SWEEPER_CONTROLLER_TYPE)
+        }));
+
+        let mut path_cache = nohash_hasher::IntMap::<u32, String>::default();
+        for entry in std::fs::read_dir(&root).expect("scan Robots EDB folder") {
+            let path = entry.expect("bad Robots EDB directory entry").path();
+            if path.extension().and_then(|value| value.to_str()) != Some("edb") {
+                continue;
+            }
+            let file = File::open(&path).expect("open indexed Robots EDB");
+            let indexed_edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+                .expect("parse indexed Robots EDB header");
+            path_cache.insert(
+                indexed_edb.header.hashcode,
+                path.to_string_lossy().into_owned(),
+            );
+        }
+
+        let mut stage184_pickup_script_events = Vec::new();
+        for (label, path) in [
+            ("m10_boss", root.join("m10_boss.edb")),
+            ("bo5_fin", root.join("bo5_fin.edb")),
+            ("nb11_rat", root.join("nb11_rat.edb")),
+        ] {
+            let file = File::open(&path).unwrap_or_else(|error| panic!("open {label}: {error}"));
+            let mut script_edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+                .unwrap_or_else(|error| panic!("parse {label}: {error}"));
+            let scripts = UXGeoScript::read_all(&mut script_edb)
+                .unwrap_or_else(|error| panic!("read {label} scripts: {error}"));
+            for script in scripts {
+                for command in script.commands {
+                    let UXGeoScriptCommandData::Event { event_type, .. } = command.data else {
+                        continue;
+                    };
+                    if event_type == 0x1600_0020 {
+                        stage184_pickup_script_events.push((
+                            label,
+                            script.hashcode,
+                            command.start,
+                            command.length,
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            stage184_pickup_script_events.is_empty(),
+            "m10_boss/bo5_fin/nb11_rat unexpectedly contain HT_ScriptEvents pickup-generation event 0x16000020: {stage184_pickup_script_events:?}"
+        );
+
+        let rows =
+            resolve_robots_sweeper_boss_patterns(&mut edb, &mut maps, &path_cache, Platform::Pc)
+                .expect("hydrate Sweeper boss resources");
+        assert_eq!(rows, super::ROBOTS_SWEEPER_PATTERN_ROW_COUNT);
+        let map = maps
+            .iter()
+            .find(|map| {
+                map.triggers
+                    .iter()
+                    .any(|trigger| trigger.ttype == super::ROBOTS_SWEEPER_CONTROLLER_TYPE)
+            })
+            .expect("m10_boss Sweeper controller map");
+        for (selector, expected_class) in [
+            (0, RobotsAiHandlerClass::DogBot),
+            (7, RobotsAiHandlerClass::MalfBot),
+            (9, RobotsAiHandlerClass::Eb10RollerBot),
+            (13, RobotsAiHandlerClass::Ew10Minion),
+            (14, RobotsAiHandlerClass::Eb14Minion),
+            (20, RobotsAiHandlerClass::ShuntBotBoss),
+        ] {
+            let visual = map
+                .runtime_character_visuals
+                .get(&(super::ROBOTS_SWEEPER_MONSTER_RUNTIME_TYPE, selector))
+                .unwrap_or_else(|| panic!("dynamic selector {selector} visual missing"));
+            assert_eq!(visual.handler_class, expected_class);
+            assert_eq!(
+                visual.runtime_type,
+                super::ROBOTS_SWEEPER_MONSTER_RUNTIME_TYPE
+            );
+            assert_eq!(visual.config_index, selector);
+        }
+        let roller_visual = map
+            .runtime_character_visuals
+            .get(&(super::ROBOTS_SWEEPER_MONSTER_RUNTIME_TYPE, 9))
+            .expect("dynamic Sweeper selector9 RollerBot visual");
+        assert_eq!(roller_visual.file, 0x0100_0046);
+        assert!(roller_visual.collision.is_some());
+        assert!(roller_visual.hit_area.is_some());
+        assert!(!roller_visual.animation_modes.is_empty());
+        let eye_scripts = map
+            .sweeper_eye_scripts
+            .as_ref()
+            .expect("m10_boss Sweeper Eye Script catalog");
+        assert_eq!(eye_scripts.len(), 6);
+        for script in [
+            0x0400_0258_u32,
+            0x0400_0259,
+            0x0400_025A,
+            0x0400_025B,
+            0x0400_025C,
+            0x0400_025D,
+        ] {
+            let profile = eye_scripts.profile(script).expect("Eye Script profile");
+            eprintln!(
+                "eye-script {script:08X} rate={} len={} events={:?}",
+                profile.frame_rate, profile.length, profile.events
+            );
+        }
+        let stage174_character_triggers = map
+            .triggers
+            .iter()
+            .enumerate()
+            .filter(|(_, trigger)| matches!(trigger.ttype, 3 | 10 | 11 | 18 | 33 | 48 | 70 | 74))
+            .map(|(index, trigger)| (index, trigger.ttype, trigger.debug))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stage174_character_triggers,
+            vec![(8, 10, 9)],
+            "m10_boss serialized AI-character trigger census changed"
+        );
+        let stage175_serialized_ai = &map.triggers[8];
+        let stage175_player = &map.triggers[0];
+        assert_eq!(stage175_serialized_ai.trig_flags, 0x0000_0085);
+        assert_eq!(stage175_serialized_ai.game_flags, 0x0000_0001);
+        assert!(stage175_serialized_ai.links.iter().all(|link| *link == -1));
+        assert_eq!(stage175_serialized_ai.data[0], Some(7));
+        let serialized_ai_initial_distance_squared = stage175_serialized_ai
+            .position
+            .distance_squared(stage175_player.position);
+        assert!(
+            (serialized_ai_initial_distance_squared - 7_103.876).abs() < 0.01,
+            "serialized m10 type10 initial distance changed: {serialized_ai_initial_distance_squared}"
+        );
+        assert!(
+            serialized_ai_initial_distance_squared > 900.0,
+            "serialized m10 type10 must begin outside the native 30-unit far-band threshold"
+        );
+        let (controller_index, controller) = map
+            .triggers
+            .iter()
+            .enumerate()
+            .find(|(_, trigger)| trigger.ttype == super::ROBOTS_SWEEPER_CONTROLLER_TYPE)
+            .expect("m10_boss controller trigger");
+        assert_eq!((controller_index, controller.debug), (6, 7));
+        let stage180_controller_start_distance_squared = stage175_player
+            .position
+            .distance_squared(controller.position);
+        assert!(
+            (stage180_controller_start_distance_squared - 73.0112).abs() < 0.001,
+            "m10_boss Player0/controller start distance changed: {stage180_controller_start_distance_squared}"
+        );
+        assert!(
+            stage180_controller_start_distance_squared < 100.0,
+            "shipped m10_boss controller must begin inside the native 10-unit Event0 service band"
+        );
+        assert_eq!(
+            controller.links.iter().take(8).copied().collect::<Vec<_>>(),
+            vec![3, 2, 1, 4, 5, 7, 10, -1]
+        );
+        let linked_types = controller
+            .links
+            .iter()
+            .take(7)
+            .map(|link| {
+                usize::try_from(*link)
+                    .ok()
+                    .and_then(|index| map.triggers.get(index))
+                    .map(|trigger| trigger.ttype)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            linked_types,
+            vec![
+                Some(86),
+                Some(86),
+                Some(86),
+                Some(86),
+                Some(86),
+                Some(73),
+                Some(19)
+            ]
+        );
+        let stage181_m10_trigger_types = map
+            .triggers
+            .iter()
+            .map(|trigger| trigger.ttype)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stage181_m10_trigger_types,
+            vec![
+                0, 86, 86, 86, 86, 86, 87, 73, 10, 19, 19, 19, 19, 15, 50, 15, 13, 16, 16, 8, 8, 8
+            ]
+        );
+        let stage181_pickup_types = [
+            0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x29, 0x3E, 0x3F, 0x40, 0x41, 0x43, 0x47, 0x52,
+            0x53,
+        ];
+        assert!(
+            map.triggers
+                .iter()
+                .all(|trigger| !stage181_pickup_types.contains(&trigger.ttype)),
+            "m10_boss unexpectedly gained a serialized Pickup trigger that would consume shared RNG during XTrigger_Pickup::CreateItem"
+        );
+        let stage185_fluid = &map.triggers[14];
+        assert_eq!((stage185_fluid.ttype, stage185_fluid.debug), (50, 15));
+        assert_eq!(stage185_fluid.game_flags, 0x0000_8000);
+        assert_eq!(stage185_fluid.trig_flags, 0x0100_003F);
+        assert_eq!(
+            stage185_fluid.engine_options.visual_object,
+            Some(0x8200_0000)
+        );
+        assert_eq!(stage185_fluid.engine_options.visual_object_file, None);
+        let stage185_fluid_distance_squared = stage185_fluid
+            .position
+            .distance_squared(stage175_player.position);
+        assert!((stage185_fluid_distance_squared - 16.637_848).abs() < 0.001);
+        assert!(stage185_fluid_distance_squared < 100.0);
+        assert_eq!(
+            map.native_zone_index(controller.position),
+            map.native_zone_index(stage185_fluid.position),
+            "m10 Sweeper controller and Fluid must remain in the same native TriggerManager zone group"
+        );
+        let stage185_fluid_entity_record = edb
+            .header
+            .entity_list
+            .iter()
+            .next()
+            .expect("m10_boss local entity0 for Fluid");
+        let stage185_fluid_entity_address = stage185_fluid_entity_record.common.address as u64;
+        let stage185_fluid_entity_hash = stage185_fluid_entity_record.common.hashcode;
+        let stage185_fluid_entity_endian = edb.endian;
+        let stage185_fluid_entity_version = edb.header.version;
+        edb.seek(std::io::SeekFrom::Start(stage185_fluid_entity_address))
+            .expect("seek m10_boss Fluid local entity0");
+        let stage185_fluid_entity = edb
+            .read_type_args::<EXGeoEntity>(
+                stage185_fluid_entity_endian,
+                (stage185_fluid_entity_version, Platform::Pc),
+            )
+            .expect("parse m10_boss Fluid local entity0");
+        let EXGeoEntity::Mesh(stage185_fluid_mesh) = stage185_fluid_entity else {
+            panic!("m10_boss Fluid local entity0 is not a mesh");
+        };
+        assert_eq!(stage185_fluid_entity_hash, 0x8200_0000);
+        assert_eq!(stage185_fluid_mesh.vertices.len(), 741);
+        let stage185_unique_grid_positions = stage185_fluid_mesh
+            .vertices
+            .iter()
+            .map(|vertex| {
+                (
+                    vertex.pos[0].to_bits(),
+                    vertex.pos[1].to_bits(),
+                    vertex.pos[2].to_bits(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(stage185_unique_grid_positions.len(), 247);
+        assert_eq!(stage185_fluid.data[0], Some(13));
+        assert_eq!(stage185_fluid.data[1], Some(19));
+        assert_eq!(stage185_fluid.data[5], Some(5));
+        assert_eq!(stage185_fluid.data[6], None);
+        assert_eq!(stage185_fluid.data[7], None);
+        assert_eq!(map.fluid_initial_shared_rng_draws.get(14), Some(&Some(4)));
+        assert!(
+            map.sweeper_post_xitem_pickup_static_zero,
+            "m10 Sweeper static post-XItem Pickup ingress proof changed"
+        );
+        assert!(
+            map.triggers
+                .iter()
+                .all(|trigger| !matches!(trigger.ttype, 68 | 69)),
+            "m10_boss unexpectedly gained serialized BossExecutive/BossExecController triggers"
+        );
+        let stage179_transporter = &map.triggers[7];
+        assert_eq!(stage179_transporter.ttype, 73);
+        assert_eq!(stage179_transporter.game_flags, 0x0000_e001);
+        assert_ne!(stage179_transporter.game_flags & 1, 0);
+        assert_eq!(stage179_transporter.data[3], Some(100));
+        assert_eq!(stage179_transporter.data[5], Some(6));
+        assert_eq!(stage179_transporter.data[6], Some(1));
+        let stage182_patterns = map
+            .sweeper_boss_patterns
+            .as_ref()
+            .expect("hydrated Sweeper boss patterns");
+        assert_eq!(stage182_patterns.monster_pickup_drop_count(7), Some(0));
+        assert_eq!(stage182_patterns.monster_pickup_drop_count(9), Some(0));
+        let stage182_row28 =
+            stage182_patterns.rows[28].map(|cell| (cell.monster_id, cell.spawn_count));
+        assert_eq!(
+            stage182_row28,
+            [(0, 0), (5, 1), (3, 1), (5, 1), (0, 0)],
+            "fresh-process first RNG draw selects difficulty-5 row28; shipped pattern changed"
+        );
+        assert!(map.sweeper_ratchet_position_local.is_some());
+        let transporter_spawn = map
+            .sweeper_transporter_spawn_position_local
+            .expect("resolver did not hydrate MonsterTransporter spawn datum");
+        assert!((transporter_spawn[0] - 0.009_995_218).abs() <= 1.0e-6);
+        assert!((transporter_spawn[1] + 1.028_803_945).abs() <= 1.0e-6);
+        assert!((transporter_spawn[2] - 0.067_002_304).abs() <= 1.0e-6);
+        let ratchet_scripts = map
+            .sweeper_ratchet_scripts
+            .as_ref()
+            .expect("resolver did not hydrate native Ratchet Script profiles");
+        assert_eq!(ratchet_scripts.len(), 13);
+        let appear = ratchet_scripts
+            .profile_for_anim_mode(super::ROBOTS_SWEEPER_APPEAR_ANIM_MODE)
+            .expect("Appear Script profile");
+        assert_eq!(appear.script_frame_rate, 30.0);
+        assert_eq!(appear.animation_frame_rate, 30.0);
+        assert_eq!(appear.length, 19);
+        assert_eq!(
+            appear
+                .events
+                .iter()
+                .map(|event| event.start_frame)
+                .collect::<Vec<_>>(),
+            vec![3, 18]
+        );
+        let attack2 = ratchet_scripts
+            .profile_for_anim_mode(super::triggers::ROBOTS_SWEEPER_ATTACK2_ANIM_MODE)
+            .expect("Attack2 Script profile");
+        assert_eq!(
+            attack2
+                .events
+                .iter()
+                .map(|event| event.start_frame)
+                .collect::<Vec<_>>(),
+            vec![10, 145]
+        );
+        let attack = ratchet_scripts
+            .profile_for_anim_mode(super::ROBOTS_SWEEPER_ATTACK_ANIM_MODE)
+            .expect("Attack Script profile");
+        assert_eq!(
+            attack
+                .events
+                .iter()
+                .map(|event| event.start_frame)
+                .collect::<Vec<_>>(),
+            vec![17, 35]
+        );
+        let stage217_disappear = ratchet_scripts
+            .profile(0x8400_0008)
+            .expect("Disappear Script profile");
+        assert_eq!(stage217_disappear.length, 19);
+        assert_eq!(stage217_disappear.animation, 0x8300_0013);
+        assert_eq!(stage217_disappear.animation_frame_count, 19);
+        assert_eq!(stage217_disappear.animation_frame_rate, 30.0);
+        assert_eq!(
+            stage217_disappear
+                .events
+                .iter()
+                .map(|event| (event.start_frame, event.length, event.kind))
+                .collect::<Vec<_>>(),
+            vec![(18, 1, NativeSweeperRatchetScriptEventKind::ScriptValue(1.0),)]
+        );
+        let stage217_idle_combat2 = ratchet_scripts
+            .profile(0x8400_0010)
+            .expect("IdleCombat2 Script profile");
+        assert_eq!(stage217_idle_combat2.length, 76);
+        assert_eq!(stage217_idle_combat2.animation, 0x8300_0010);
+        assert_eq!(stage217_idle_combat2.animation_frame_count, 76);
+        assert_eq!(stage217_idle_combat2.animation_frame_rate, 30.0);
+        assert_eq!(
+            stage217_idle_combat2
+                .events
+                .iter()
+                .map(|event| (event.start_frame, event.length, event.kind))
+                .collect::<Vec<_>>(),
+            vec![(75, 1, NativeSweeperRatchetScriptEventKind::ScriptValue(1.0),)]
+        );
+        let stage250_idle_combat3 = ratchet_scripts
+            .profile(0x8400_0011)
+            .expect("IdleCombat3 Script profile");
+        assert_eq!(stage250_idle_combat3.script_frame_rate, 30.0);
+        assert_eq!(stage250_idle_combat3.length, 91);
+        assert_eq!(stage250_idle_combat3.animation, 0x8300_0011);
+        assert_eq!(stage250_idle_combat3.animation_frame_count, 91);
+        assert_eq!(stage250_idle_combat3.animation_frame_rate, 30.0);
+        assert_eq!(
+            stage250_idle_combat3
+                .events
+                .iter()
+                .map(|event| (event.start_frame, event.length, event.kind))
+                .collect::<Vec<_>>(),
+            vec![(90, 1, NativeSweeperRatchetScriptEventKind::ScriptValue(1.0),)]
+        );
+        let player = map.triggers.first().expect("m10_boss Player trigger #0");
+        assert_eq!(player.ttype, 0);
+        assert_eq!(player.debug, 1);
+        assert_eq!(player.links.first().copied(), Some(11));
+        let player_death_target = &map.triggers[11];
+        assert_eq!(player_death_target.ttype, 19);
+        assert_eq!(player_death_target.debug, 12);
+
+        let (controller_index, controller) = map
+            .triggers
+            .iter()
+            .enumerate()
+            .find(|(_, trigger)| trigger.ttype == super::ROBOTS_SWEEPER_CONTROLLER_TYPE)
+            .expect("m10_boss Sweeper controller trigger");
+        assert_eq!(controller_index, 6);
+        assert_eq!(controller.links.get(6).copied(), Some(10));
+        let controller_phase_target = &map.triggers[10];
+        assert_eq!(controller_phase_target.ttype, 19);
+        assert_eq!(controller_phase_target.debug, 11);
+        assert_eq!(controller_phase_target.data[2], Some(272));
+        assert_eq!(controller_phase_target.data[3], Some(1));
+        assert_eq!(
+            super::robots_sweeper_boss_trigger_event_target(
+                map,
+                controller_index,
+                super::NativeSweeperBossTriggerEvent::ControllerLink6CommonMask1,
+            ),
+            Some(10),
+        );
+        assert_eq!(
+            super::robots_sweeper_boss_trigger_event_target(
+                map,
+                controller_index,
+                super::NativeSweeperBossTriggerEvent::PlayerLink0CommonMask1,
+            ),
+            Some(11),
+        );
+        let hand = Vec3::from(
+            map.sweeper_ratchet_missile_hand_local
+                .expect("resolver did not hydrate native firing R_Hand"),
+        );
+        let expected = Vec3::new(-0.101_767_67, 0.788_267_73, 0.772_494_4);
+        assert!(
+            hand.distance(expected) < 1.0e-6,
+            "resolved firing R_Hand mismatch: {hand:?} != {expected:?}"
+        );
     }
 
     #[test]
@@ -2478,6 +3870,35 @@ mod tests {
     }
 
     #[test]
+    fn real_m02_city_router_triggers_preserve_serialized_type_codes_when_requested() {
+        let Ok(path) = std::env::var("EUROCHEF_REAL_M02_CITY_EDB") else {
+            return;
+        };
+        let file = File::open(&path).expect("m02_city fixture is missing");
+        let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+            .expect("m02_city fixture is not a valid PC EDB");
+        let maps = read_from_file(&mut edb);
+        let map = maps.first().expect("m02_city map is missing");
+        for (trigger_index, expected_type) in [
+            (148usize, 5u32),
+            (202, 43),
+            (347, 5),
+            (581, 14),
+            (655, 14),
+            (669, 13),
+        ] {
+            let trigger = map
+                .triggers
+                .get(trigger_index)
+                .unwrap_or_else(|| panic!("m02_city trigger {trigger_index} is missing"));
+            assert_eq!(
+                trigger.ttype, expected_type,
+                "ProcessedMap must preserve serialized trigger type at index {trigger_index}"
+            );
+        }
+    }
+
+    #[test]
     fn real_m02_city_map_runtime_sections_when_requested() {
         let Ok(path) = std::env::var("EUROCHEF_REAL_M02_CITY_EDB") else {
             return;
@@ -2573,6 +3994,41 @@ mod tests {
         }
         assert_eq!(missing_trigger_type_definitions, 0);
         assert_eq!(non_null_trigger_values, 1821);
+        let dynamic_los_scripts = map
+            .triggers
+            .iter()
+            .enumerate()
+            .filter(|(_, trigger)| {
+                trigger.ttype == 4
+                    && trigger.data.first().and_then(|value| *value).unwrap_or(0) & 0x100 != 0
+            })
+            .map(|(index, trigger)| {
+                (
+                    index,
+                    trigger.debug,
+                    trigger.data.first().and_then(|value| *value).unwrap_or(0),
+                    trigger.game_flags,
+                    trigger.engine_options.visual_object,
+                    trigger.engine_options.visual_object_file,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(dynamic_los_scripts.len(), 63);
+        assert!(dynamic_los_scripts
+            .iter()
+            .all(|(_, _, _, game_flags, _, _)| {
+                matches!(*game_flags, 0 | 0x2000 | 0x4000 | 0x8000)
+                    && game_flags & 0x0008_0000 == 0
+                    && game_flags & 0x0800_0000 == 0
+            }));
+        assert!(map
+            .triggers
+            .iter()
+            .filter(|trigger| {
+                trigger.ttype == 4
+                    && trigger.data.first().and_then(|value| *value).unwrap_or(0) & 0x100 != 0
+            })
+            .all(|trigger| map.native_zone_index(trigger.position).is_some()));
         let raw_only_trigger_values = non_null_trigger_values - named_trigger_values;
 
         let pickup_types = [
@@ -4146,6 +5602,42 @@ mod tests {
     }
 
     #[test]
+    fn real_m03_hub1_ball_track_paths_are_already_in_the_map_path_catalog_when_requested() {
+        let Ok(path) = std::env::var("EUROCHEF_REAL_M03_HUB1_EDB") else {
+            return;
+        };
+        let file = File::open(&path).expect("m03_hub1 fixture is missing");
+        let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+            .expect("m03_hub1 fixture is not a valid PC EDB");
+        let maps = read_from_file(&mut edb);
+        let map = maps.first().expect("m03_hub1 map is missing");
+
+        for path_hash in [
+            0x0B00_0008,
+            0x0B00_000B,
+            0x0B00_000C,
+            0x0B00_000D,
+            0x0B00_000E,
+            0x0B00_0010,
+            0x0B00_0011,
+            0x0B00_0012,
+            0x0B00_0013,
+        ] {
+            let path = map
+                .paths
+                .iter()
+                .find(|path| path.hashcode == path_hash)
+                .unwrap_or_else(|| {
+                    panic!("BallTrack path {path_hash:#010X} is missing from m03_hub1")
+                });
+            assert!(
+                !path.nodes.is_empty(),
+                "BallTrack path {path_hash:#010X} has no nodes"
+            );
+        }
+    }
+
+    #[test]
     fn real_m04_cour_platform_paths_start_at_serialized_trigger_positions_when_requested() {
         let Ok(path) = std::env::var("EUROCHEF_REAL_M04_COUR_EDB") else {
             return;
@@ -4189,5 +5681,549 @@ mod tests {
             path_platform_count >= 7,
             "m04_cour path-driven Platform corpus unexpectedly shrank"
         );
+    }
+
+    #[test]
+    fn real_robots_v248_m10_rollerbot_behavior_path_when_game_root_is_configured() {
+        let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
+            return;
+        };
+        let root =
+            Path::new(&game_root).join("_eurotools_out/extracted_main/robots/binary/_bin_pc");
+        let m10_path = root.join("m10_boss.edb");
+        let texture_file = File::open(&m10_path).expect("open m10_boss.edb for texture scan");
+        let mut texture_edb = EdbFile::new(Box::new(BufReader::new(texture_file)), Platform::Pc)
+            .expect("parse m10_boss.edb for texture scan");
+        let texture_headers = texture_edb.header.texture_list.data().clone();
+        let mut scrolling_textures = Vec::new();
+        for (texture_index, header) in texture_headers.into_iter().enumerate() {
+            texture_edb
+                .seek(SeekFrom::Start(header.common.address as u64))
+                .expect("seek m10 texture");
+            let texture = texture_edb
+                .read_type_args::<EXGeoTexture>(texture_edb.endian, (248, Platform::Pc))
+                .expect("parse m10 texture");
+            if texture.scroll_u != 0 || texture.scroll_v != 0 {
+                scrolling_textures.push((
+                    texture_index,
+                    header.common.hashcode,
+                    texture.scroll_u,
+                    texture.scroll_v,
+                ));
+            }
+        }
+        assert_eq!(
+            scrolling_textures,
+            vec![(8, 0x8600_0008, 25, 0), (9, 0x8600_0009, 0, 33)],
+            "m10_boss scrolling texture corpus changed"
+        );
+
+        let file = File::open(&m10_path).expect("open m10_boss.edb");
+        let mut edb =
+            EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc).expect("parse m10_boss.edb");
+        let maps = read_from_file(&mut edb);
+
+        fn collect_scrolling_texture_meshes(
+            entity: &EXGeoEntity,
+            meshes: &mut Vec<(u16, u16, Vec<u16>, usize)>,
+        ) {
+            match entity {
+                EXGeoEntity::Mesh(mesh) => {
+                    if mesh
+                        .texture_list
+                        .iter()
+                        .any(|index| matches!(*index, 8 | 9))
+                    {
+                        meshes.push((
+                            mesh.data.base.gdi_index,
+                            mesh.data.base.gdi_count,
+                            mesh.texture_list.clone(),
+                            mesh.robots_face_info
+                                .as_ref()
+                                .map(|info| info.groups.iter().map(|group| group.faces.len()).sum())
+                                .unwrap_or_default(),
+                        ));
+                    }
+                }
+                EXGeoEntity::Split(split) => {
+                    for child in &split.entities {
+                        collect_scrolling_texture_meshes(child, meshes);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let entity_headers = edb.header.entity_list.data().clone();
+        let mut scrolling_entity_users = Vec::new();
+        for header in entity_headers {
+            edb.seek(SeekFrom::Start(header.common.address as u64))
+                .expect("seek m10 entity for scrolling-texture census");
+            let entity = edb
+                .read_type_args::<EXGeoEntity>(edb.endian, (edb.header.version, Platform::Pc))
+                .expect("parse m10 entity for scrolling-texture census");
+            let mut meshes = Vec::new();
+            collect_scrolling_texture_meshes(&entity, &mut meshes);
+            if !meshes.is_empty() {
+                scrolling_entity_users.push((header.common.hashcode, meshes));
+            }
+        }
+        assert_eq!(
+            scrolling_entity_users,
+            vec![(0x8200_0000, vec![(0, 0, vec![8, 49, 9], 0)])],
+            "m10_boss scrolling texture users changed"
+        );
+
+        let map = maps
+            .iter()
+            .find(|map| {
+                map.paths.iter().any(|path| path.hashcode == 0x0B00_0049)
+                    && map
+                        .triggers
+                        .iter()
+                        .any(|trigger| trigger.ttype == super::ROBOTS_SWEEPER_CONTROLLER_TYPE)
+            })
+            .expect("m10 RollerBot path/controller map");
+        let (_, _, stage226_ref_entities) = crate::entities::read_from_file(&mut edb, None)
+            .expect("decode m10 entities for RollerBot collision corridor");
+        assert_eq!(
+            maps.iter()
+                .flat_map(|map| map.paths.iter())
+                .filter(|path| path.hashcode == 0x0B00_0049)
+                .count(),
+            1,
+            "RollerBot path 0x0B000049 ownership changed"
+        );
+        let path = map
+            .paths
+            .iter()
+            .find(|path| path.hashcode == 0x0B00_0049)
+            .expect("m10 RollerBot path 0x0B000049");
+        assert_eq!(path.nodes.len(), 11);
+        assert_eq!(path.links.len(), 20);
+        assert_eq!(
+            path.nodes
+                .iter()
+                .map(|node| node.num_links)
+                .collect::<Vec<_>>(),
+            vec![2, 2, 2, 2, 2, 8, 8, 4, 4, 3, 3]
+        );
+        assert!(path.nodes.iter().all(|node| {
+            node.size.x == 4.0 && node.size.y == 0.0 && node.value == [0; 4] && node.flags == 0
+        }));
+        assert_eq!(
+            path.links,
+            vec![
+                (0, 6),
+                (1, 6),
+                (2, 6),
+                (3, 6),
+                (4, 5),
+                (3, 5),
+                (2, 5),
+                (1, 5),
+                (5, 8),
+                (6, 7),
+                (5, 9),
+                (6, 10),
+                (8, 10),
+                (7, 9),
+                (9, 8),
+                (10, 7),
+                (0, 5),
+                (5, 7),
+                (4, 6),
+                (6, 8),
+            ]
+        );
+        let stage227_node2 = path.nodes[2].position;
+        let stage227_node6 = path.nodes[6].position;
+        let stage293_node4 = path.nodes[4].position;
+        let stage331_node5 = path.nodes[5].position;
+        let stage368_node9 = path.nodes[9].position;
+        let stage391_node8 = path.nodes[8].position;
+        let stage_new_node7 = path.nodes[7].position;
+        let stage_new_node10 = path.nodes[10].position;
+        let stage252_node1 = path.nodes[1].position;
+        let stage252_node6_neighbors = path
+            .links
+            .iter()
+            .filter_map(|&(a, b)| {
+                if a == 6 {
+                    Some(b)
+                } else if b == 6 {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let stage267_node1_neighbors = path
+            .links
+            .iter()
+            .filter_map(|&(a, b)| {
+                if a == 1 {
+                    Some(b)
+                } else if b == 1 {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let stage307_node4_neighbors = path
+            .links
+            .iter()
+            .filter_map(|&(a, b)| {
+                if a == 4 {
+                    Some(b)
+                } else if b == 4 {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let stage_latest_node3_neighbors = path
+            .links
+            .iter()
+            .filter_map(|&(a, b)| {
+                if a == 3 {
+                    Some(b)
+                } else if b == 3 {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let stage367_node5_neighbors = path
+            .links
+            .iter()
+            .filter_map(|&(a, b)| {
+                if a == 5 {
+                    Some(b)
+                } else if b == 5 {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let stage390_node9_neighbors = path
+            .links
+            .iter()
+            .filter_map(|&(a, b)| {
+                if a == 9 {
+                    Some(b)
+                } else if b == 9 {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!((stage252_node1.x - -14.779_201_5).abs() <= 1.0e-5);
+        assert!((stage252_node1.y - 0.0).abs() <= 1.0e-6);
+        assert!((stage252_node1.z - 20.417_852).abs() <= 1.0e-5);
+        assert_eq!(stage252_node6_neighbors, vec![0, 1, 2, 3, 7, 10, 4, 8]);
+        assert_eq!(stage267_node1_neighbors, vec![6, 5]);
+        assert_eq!(stage307_node4_neighbors, vec![5, 6]);
+        assert_eq!(stage_latest_node3_neighbors, vec![6, 5]);
+        assert_eq!(stage367_node5_neighbors, vec![4, 3, 2, 1, 8, 9, 0, 7]);
+        let stage402_node8_neighbors = path
+            .links
+            .iter()
+            .filter_map(|&(a, b)| {
+                if a == 8 {
+                    Some(b)
+                } else if b == 8 {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stage390_node9_neighbors, vec![5, 7, 8]);
+        assert_eq!(stage402_node8_neighbors, vec![5, 10, 9, 6]);
+        assert!((stage227_node2.x - 0.0).abs() <= 1.0e-5);
+        assert!((stage227_node2.y - 0.0).abs() <= 1.0e-6);
+        assert!((stage227_node2.z - 20.477_207).abs() <= 1.0e-5);
+        assert!((stage227_node6.x - 21.130_104).abs() <= 1.0e-5);
+        assert!((stage227_node6.y - 0.0).abs() <= 1.0e-6);
+        assert!((stage227_node6.z - 15.847_578).abs() <= 1.0e-5);
+        assert!((stage293_node4.x - 27.837_132).abs() <= 1.0e-5);
+        assert!((stage293_node4.y - 0.0).abs() <= 1.0e-6);
+        assert!((stage293_node4.z - 20.714_624).abs() <= 1.0e-5);
+        assert!((stage331_node5.x - -22.020_416).abs() <= 1.0e-5);
+        assert!((stage331_node5.y - 0.0).abs() <= 1.0e-6);
+        assert!((stage331_node5.z - 15.906_932).abs() <= 1.0e-5);
+        assert!((stage368_node9.x - -8.547_008_5).abs() <= 1.0e-5);
+        assert!((stage368_node9.y - 0.0).abs() <= 1.0e-6);
+        assert!((stage368_node9.z - 16.025_64).abs() <= 1.0e-5);
+        assert!((stage391_node8.x - 16.381_765).abs() <= 1.0e-5);
+        assert!((stage391_node8.y - 0.0).abs() <= 1.0e-6);
+        assert!((stage391_node8.z - 10.802_468).abs() <= 1.0e-5);
+        assert!((stage_new_node7.x - -18.162_392).abs() <= 1.0e-5);
+        assert!((stage_new_node7.y - 0.0).abs() <= 1.0e-6);
+        assert!((stage_new_node7.z - 10.565_052).abs() <= 1.0e-5);
+        assert_eq!(stage_new_node10.x.to_bits(), 0x411F_8B4E);
+        assert_eq!(stage_new_node10.y.to_bits(), 0x0000_0000);
+        assert_eq!(stage_new_node10.z.to_bits(), 0x4183_0DDB);
+        let stage227_delta = stage227_node6 - stage227_node2;
+        assert!((stage227_delta.length() - 21.631_338).abs() <= 1.0e-5);
+        assert!((stage227_delta.x.atan2(stage227_delta.z) - 1.786_489_1).abs() <= 1.0e-6);
+
+        // Eye2 row28 spawns one RollerBot at [eye_x, 2.4, 35]. Resolve the actual shipped
+        // Eye2 through the controller's third Eye link rather than borrowing the synthetic
+        // production-test anchor. Native 0x00420990 uses a 1-unit arrival radius and one first
+        // update can move at most 10/60 before damping.
+        let controller = map
+            .triggers
+            .iter()
+            .find(|trigger| trigger.ttype == super::ROBOTS_SWEEPER_CONTROLLER_TYPE)
+            .expect("m10 Sweeper controller");
+        let eye2_index = usize::try_from(controller.links[2]).expect("m10 Eye2 trigger link");
+        let eye2 = map
+            .triggers
+            .get(eye2_index)
+            .expect("m10 Eye2 trigger by controller link");
+        assert_eq!(eye2.ttype, super::ROBOTS_SWEEPER_EYE_TYPE);
+        let spawn_plan =
+            super::robots_sweeper_boss_spawn_transform(eye2.position.x, 1.0, eye2.rotation.y, 0);
+        let spawn = Vec3::new(
+            spawn_plan.position[0],
+            spawn_plan.position[1],
+            spawn_plan.position[2],
+        );
+        let (nearest_index, nearest_squared) = path
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (index, node.position.distance_squared(spawn)))
+            .min_by(|left, right| left.1.total_cmp(&right.1))
+            .expect("RollerBot path has no nodes");
+        assert_eq!(nearest_index, 2);
+        let nearest_distance = nearest_squared.sqrt();
+        let nearest_node = &path.nodes[nearest_index];
+        let horizontal_dx = nearest_node.position.x - spawn.x;
+        let horizontal_dz = nearest_node.position.z - spawn.z;
+        let horizontal_distance =
+            (horizontal_dx * horizontal_dx + horizontal_dz * horizontal_dz).sqrt();
+        assert!((horizontal_distance - 14.523_612).abs() < 0.001);
+        assert!((nearest_distance - 14.719_766).abs() < 0.001);
+        assert_eq!(map.mapzone_entities.len(), 1);
+        let zone_entity = &map.mapzone_entities[0];
+        assert_eq!(zone_entity.entity_refptr, 0);
+        let zone_mesh = stage226_ref_entities
+            .iter()
+            .find(|entry| entry.hashcode == zone_entity.entity_refptr)
+            .and_then(|entry| entry.data.as_ref().ok())
+            .map(|(_, mesh)| mesh)
+            .expect("m10 arena refpointer #0 mesh");
+        assert_eq!(zone_mesh.robots_raycast_triangles.len(), 18_275);
+        assert!(map
+            .placements
+            .iter()
+            .all(|placement| placement.engine_flags & 0x08 == 0));
+
+        let corridor_min = Vec3::new(
+            spawn.x.min(nearest_node.position.x) - 0.4,
+            0.0,
+            spawn.z.min(nearest_node.position.z) - 0.4,
+        );
+        let corridor_max = Vec3::new(
+            spawn.x.max(nearest_node.position.x) + 0.4,
+            spawn.y + 0.922_545_8 + 0.524_026_6 + 0.4,
+            spawn.z.max(nearest_node.position.z) + 0.4,
+        );
+        let mut corridor_triangles = 0usize;
+        let mut min_abs_normal_y = 1.0_f32;
+        let mut candidate_y_min = f32::INFINITY;
+        let mut candidate_y_max = f32::NEG_INFINITY;
+        for triangle in &zone_mesh.robots_raycast_triangles {
+            let [a, b, c] = triangle.positions;
+            let tri_min = Vec3::new(
+                a.x.min(b.x).min(c.x),
+                a.y.min(b.y).min(c.y),
+                a.z.min(b.z).min(c.z),
+            );
+            let tri_max = Vec3::new(
+                a.x.max(b.x).max(c.x),
+                a.y.max(b.y).max(c.y),
+                a.z.max(b.z).max(c.z),
+            );
+            if tri_max.x < corridor_min.x
+                || tri_min.x > corridor_max.x
+                || tri_max.y < corridor_min.y
+                || tri_min.y > corridor_max.y
+                || tri_max.z < corridor_min.z
+                || tri_min.z > corridor_max.z
+            {
+                continue;
+            }
+            corridor_triangles += 1;
+            let normal = (b - a).cross(c - a).normalize_or_zero();
+            min_abs_normal_y = min_abs_normal_y.min(normal.y.abs());
+            candidate_y_min = candidate_y_min.min(tri_min.y);
+            candidate_y_max = candidate_y_max.max(tri_max.y);
+        }
+        assert_eq!(corridor_triangles, 21);
+        assert!(min_abs_normal_y > 0.999_999_9);
+        assert!(candidate_y_min.abs() <= 1.0e-6);
+        assert!(candidate_y_max.abs() <= 1.0e-6);
+
+        // Stage253: after tick454 selects node1, prove the full retained Roller capsule
+        // corridor from the exact arrival pose to node1 has no non-floor static contact.
+        let stage253_start = Vec3::new(21.346_087, 0.001_480_8, 16.794_098);
+        let stage253_corridor_min = Vec3::new(
+            stage253_start.x.min(stage252_node1.x) - 0.4,
+            0.0,
+            stage253_start.z.min(stage252_node1.z) - 0.4,
+        );
+        let stage253_corridor_max = Vec3::new(
+            stage253_start.x.max(stage252_node1.x) + 0.4,
+            stage253_start.y + 0.922_545_8 + 0.524_026_6 + 0.4,
+            stage253_start.z.max(stage252_node1.z) + 0.4,
+        );
+        let mut stage253_corridor_triangles = 0usize;
+        let mut stage253_min_abs_normal_y = 1.0_f32;
+        let mut stage253_candidate_y_min = f32::INFINITY;
+        let mut stage253_candidate_y_max = f32::NEG_INFINITY;
+        for triangle in &zone_mesh.robots_raycast_triangles {
+            let [a, b, c] = triangle.positions;
+            let tri_min = Vec3::new(
+                a.x.min(b.x).min(c.x),
+                a.y.min(b.y).min(c.y),
+                a.z.min(b.z).min(c.z),
+            );
+            let tri_max = Vec3::new(
+                a.x.max(b.x).max(c.x),
+                a.y.max(b.y).max(c.y),
+                a.z.max(b.z).max(c.z),
+            );
+            if tri_max.x < stage253_corridor_min.x
+                || tri_min.x > stage253_corridor_max.x
+                || tri_max.y < stage253_corridor_min.y
+                || tri_min.y > stage253_corridor_max.y
+                || tri_max.z < stage253_corridor_min.z
+                || tri_min.z > stage253_corridor_max.z
+            {
+                continue;
+            }
+            stage253_corridor_triangles += 1;
+            let normal = (b - a).cross(c - a).normalize_or_zero();
+            stage253_min_abs_normal_y = stage253_min_abs_normal_y.min(normal.y.abs());
+            stage253_candidate_y_min = stage253_candidate_y_min.min(tri_min.y);
+            stage253_candidate_y_max = stage253_candidate_y_max.max(tri_max.y);
+        }
+        assert_eq!(stage253_corridor_triangles, 85);
+        assert!(stage253_min_abs_normal_y > 0.999_999_9);
+        assert!(stage253_candidate_y_min.abs() <= 1.0e-6);
+        assert!(stage253_candidate_y_max.abs() <= 1.0e-6);
+        assert!(nearest_distance > 1.0 + 10.0 / 60.0);
+
+        // Stage236 broad node2->node6 swept-capsule census. This deliberately covers the
+        // exact curved Roller trajectory plus the node6 endpoint rather than only the chord.
+        let node6_corridor_min = Vec3::new(-0.4, 0.0, 11.7);
+        let node6_corridor_max = Vec3::new(21.8, 1.9, 21.9);
+        let mut node6_corridor_triangles = 0usize;
+        let mut node6_min_abs_normal_y = 1.0_f32;
+        let mut node6_candidate_y_min = f32::INFINITY;
+        let mut node6_candidate_y_max = f32::NEG_INFINITY;
+        for triangle in &zone_mesh.robots_raycast_triangles {
+            let [a, b, c] = triangle.positions;
+            let tri_min = Vec3::new(
+                a.x.min(b.x).min(c.x),
+                a.y.min(b.y).min(c.y),
+                a.z.min(b.z).min(c.z),
+            );
+            let tri_max = Vec3::new(
+                a.x.max(b.x).max(c.x),
+                a.y.max(b.y).max(c.y),
+                a.z.max(b.z).max(c.z),
+            );
+            if tri_max.x < node6_corridor_min.x
+                || tri_min.x > node6_corridor_max.x
+                || tri_max.y < node6_corridor_min.y
+                || tri_min.y > node6_corridor_max.y
+                || tri_max.z < node6_corridor_min.z
+                || tri_min.z > node6_corridor_max.z
+            {
+                continue;
+            }
+            node6_corridor_triangles += 1;
+            let normal = (b - a).cross(c - a).normalize_or_zero();
+            node6_min_abs_normal_y = node6_min_abs_normal_y.min(normal.y.abs());
+            node6_candidate_y_min = node6_candidate_y_min.min(tri_min.y);
+            node6_candidate_y_max = node6_candidate_y_max.max(tri_max.y);
+        }
+        assert_eq!(node6_corridor_triangles, 95);
+        assert!(node6_min_abs_normal_y > 0.999_999_9);
+        assert!(node6_candidate_y_min.abs() <= 1.0e-6);
+        assert!(node6_candidate_y_max.abs() <= 1.0e-6);
+
+        // Stage245 MalfBot state0 floor proof. Eye1/Eye3 MalfBots have no target/movement
+        // command in the retained corridor; their only unconstrained body input is gravity.
+        // Census a deliberately generous 4-unit XZ column around each shipped spawn, larger
+        // than the 3.5299912 HitArea owner enclosure used by projectile queries. If every
+        // arena face reachable in that column is the horizontal Y=0 floor, contact cannot
+        // inject lateral owner motion and gravity cannot make the owner diverge indefinitely.
+        for eye_ordinal in [1_usize, 3_usize] {
+            let eye_index = usize::try_from(controller.links[eye_ordinal])
+                .expect("m10 MalfBot Eye trigger link");
+            let eye = map
+                .triggers
+                .get(eye_index)
+                .expect("m10 MalfBot Eye trigger by controller link");
+            assert_eq!(eye.ttype, super::ROBOTS_SWEEPER_EYE_TYPE);
+            let malf_spawn_plan =
+                super::robots_sweeper_boss_spawn_transform(eye.position.x, 1.0, eye.rotation.y, 0);
+            let malf_spawn = Vec3::new(
+                malf_spawn_plan.position[0],
+                malf_spawn_plan.position[1],
+                malf_spawn_plan.position[2],
+            );
+            let column_min = Vec3::new(malf_spawn.x - 4.0, -0.5, malf_spawn.z - 4.0);
+            let column_max = Vec3::new(malf_spawn.x + 4.0, malf_spawn.y + 4.0, malf_spawn.z + 4.0);
+            let mut column_triangles = 0usize;
+            let mut column_min_abs_normal_y = 1.0_f32;
+            let mut column_candidate_y_min = f32::INFINITY;
+            let mut column_candidate_y_max = f32::NEG_INFINITY;
+            for triangle in &zone_mesh.robots_raycast_triangles {
+                let [a, b, c] = triangle.positions;
+                let tri_min = Vec3::new(
+                    a.x.min(b.x).min(c.x),
+                    a.y.min(b.y).min(c.y),
+                    a.z.min(b.z).min(c.z),
+                );
+                let tri_max = Vec3::new(
+                    a.x.max(b.x).max(c.x),
+                    a.y.max(b.y).max(c.y),
+                    a.z.max(b.z).max(c.z),
+                );
+                if tri_max.x < column_min.x
+                    || tri_min.x > column_max.x
+                    || tri_max.y < column_min.y
+                    || tri_min.y > column_max.y
+                    || tri_max.z < column_min.z
+                    || tri_min.z > column_max.z
+                {
+                    continue;
+                }
+                column_triangles += 1;
+                let normal = (b - a).cross(c - a).normalize_or_zero();
+                column_min_abs_normal_y = column_min_abs_normal_y.min(normal.y.abs());
+                column_candidate_y_min = column_candidate_y_min.min(tri_min.y);
+                column_candidate_y_max = column_candidate_y_max.max(tri_max.y);
+            }
+            assert!(
+                column_triangles > 0
+                    && column_min_abs_normal_y > 0.999_999_9
+                    && column_candidate_y_min.abs() <= 1.0e-6
+                    && column_candidate_y_max.abs() <= 1.0e-6,
+                "m10 Eye{eye_ordinal} MalfBot gravity column changed: triangles={column_triangles} min_abs_normal_y={column_min_abs_normal_y} y=[{column_candidate_y_min},{column_candidate_y_max}] spawn={malf_spawn:?}"
+            );
+        }
     }
 }

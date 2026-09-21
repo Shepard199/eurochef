@@ -207,6 +207,7 @@ pub struct ScriptListPanel {
     hashcodes: Arc<IntMap<Hashcode, String>>,
     render_store: Arc<RwLock<RenderStore>>,
     sound_preview: SharedSoundPreview,
+    script_filter: String,
 
     current_time: f32,
     playback_speed: f32,
@@ -258,6 +259,7 @@ impl ScriptListPanel {
             render_store,
             hashcodes,
             sound_preview,
+            script_filter: String::new(),
             current_time,
             playback_speed: 1.0,
             is_playing: false,
@@ -346,6 +348,136 @@ impl ScriptListPanel {
         summary
     }
 
+    fn script_matches_filter(&self, index: usize, script: &UXGeoScript) -> bool {
+        let filter = self.script_filter.trim().to_ascii_lowercase();
+        filter.is_empty()
+            || semantic_script_label(&self.hashcodes, index, script)
+                .to_ascii_lowercase()
+                .contains(&filter)
+            || format!("{:08x}", script.hashcode).contains(&filter)
+            || script.commands.iter().any(|command| {
+                format!("{:?}", command.data)
+                    .to_ascii_lowercase()
+                    .contains(&filter)
+            })
+    }
+
+    /// Master column: filters by semantic label, hash, or command kind without
+    /// touching script playback state until a script is actually selected.
+    fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.set_width(250.0);
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(20, 23, 40))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(67, 71, 104)))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.strong(format!("{} Scripts", font_awesome::LIST));
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.script_filter)
+                        .hint_text("Search name, ID, Particle, Sound…")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("script_scroll_area")
+                    .show(ui, |ui| {
+                        for i in 0..self.scripts.len() {
+                            let Some((hc, (_, script))) =
+                                self.scripts.iter().find(|(_, (idx, _))| *idx == i)
+                            else {
+                                continue;
+                            };
+                            if !self.script_matches_filter(i, script) {
+                                continue;
+                            }
+                            let counts = script.command_type_counts();
+                            let label = semantic_script_label(&self.hashcodes, i, script);
+                            let selected =
+                                ui.selectable_value(&mut self.selected_script, *hc, label);
+                            if selected.clicked() {
+                                self.current_time = first_resolved_visual_time(
+                                    self.file,
+                                    script.hashcode,
+                                    &self.render_store.read(),
+                                )
+                                .or_else(|| {
+                                    script
+                                        .first_visual_frame()
+                                        .map(|frame| script.time_at_frame(frame.max(0) as f32))
+                                })
+                                .unwrap_or(0.0);
+                                self.is_playing = false;
+                                self.fan_runtime_angle = 0.0;
+                            }
+                            ui.small(format!(
+                                "{} E  {} A  {} P  {} S",
+                                counts.entities, counts.animations, counts.particles, counts.sounds
+                            ));
+                        }
+                    });
+            });
+    }
+
+    fn draw_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(20, 23, 40))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(8, 5))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    self.viewer.lock().show_toolbar(ui);
+                    ui.separator();
+                    ui.label("Speed");
+                    ui.add(
+                        egui::DragValue::new(&mut self.playback_speed)
+                            .range(0.05..=3.0)
+                            .speed(0.01),
+                    );
+                    ui.checkbox(&mut self.show_full_assembly, "Full assembly");
+                    ui.checkbox(&mut self.particle_settings.enabled, "Native Particles");
+                });
+            });
+    }
+
+    fn draw_telemetry_banner(
+        &self,
+        ui: &mut egui::Ui,
+        summary: AnimationRuntimeSummary,
+        is_fan: bool,
+    ) {
+        let (colour, message) = if summary.active == 0 {
+            (egui::Color32::GRAY, "No active skeletal animation")
+        } else if summary.rendered == summary.active {
+            (
+                egui::Color32::from_rgb(78, 196, 132),
+                "Native skeletal sampling ready",
+            )
+        } else {
+            (
+                egui::Color32::YELLOW,
+                "Skeletal sampling has unresolved inputs",
+            )
+        };
+        egui::Frame::new()
+            .fill(colour.gamma_multiply(0.16))
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(colour, format!("{} {message}", font_awesome::INFO_CIRCLE));
+                    ui.label(format!("{}/{} rendered", summary.rendered, summary.active));
+                    if is_fan {
+                        ui.label("• FanHorizontal runtime active");
+                    }
+                    if summary.active > summary.rendered {
+                        ui.label(summary.failure_description());
+                    }
+                });
+            });
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let delta_time = self.last_frame.elapsed().as_secs_f32();
         self.last_frame = Instant::now();
@@ -364,65 +496,32 @@ impl ScriptListPanel {
             );
         }
 
-        egui::CollapsingHeader::new("EuroSound preview")
+        egui::CollapsingHeader::new(format!("{} EuroSound preview", font_awesome::VOLUME_UP))
             .default_open(false)
             .show(ui, |ui| self.sound_preview.lock().draw_settings(ui));
 
         ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("script_scroll_area")
-                    .show(ui, |ui| {
-                        for i in 0..self.scripts.len() {
-                            if let Some((hc, (_, script))) =
-                                self.scripts.iter().find(|(_, (idx, _))| *idx == i)
-                            {
-                                let label = semantic_script_label(&self.hashcodes, i, script);
-                                if ui
-                                    .selectable_value(
-                                        &mut self.selected_script,
-                                        *hc,
-                                        label,
-                                    )
-                                    .clicked()
-                                {
-                                    self.current_time = first_resolved_visual_time(
-                                        self.file,
-                                        script.hashcode,
-                                        &self.render_store.read(),
-                                    )
-                                    .or_else(|| {
-                                        script.first_visual_frame().map(|frame| {
-                                            script.time_at_frame(frame.max(0) as f32)
-                                        })
-                                    })
-                                    .unwrap_or(0.0);
-                                    self.is_playing = false;
-                                    self.fan_runtime_angle = 0.0;
-                                }
-                            }
-                        }
-                    });
-            });
+            let sidebar_size = egui::vec2(266.0, ui.available_height());
+            // `set_width` alone only changes a child Ui's preferred size; this
+            // allocation is the actual fixed master-column slot.
+            ui.allocate_ui_with_layout(
+                sidebar_size,
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| self.draw_sidebar(ui),
+            );
+            ui.add_space(8.0);
 
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    self.viewer.lock().show_toolbar(ui);
-                    ui.add(
-                        egui::DragValue::new(&mut self.playback_speed)
-                            .range(0.05..=3.0)
-                            .speed(0.01),
-                    );
-                    ui.label("Speed");
-                    ui.separator();
-                    ui.checkbox(&mut self.show_full_assembly, "Full assembly");
-                    ui.checkbox(&mut self.particle_settings.enabled, "Native Particles")
-                        .on_hover_text("Uses EXParticleSys rate, pool, lifetime, emitter bounds, velocity, acceleration, damping, resource selection and appended colour/scale/rotation curves.");
-                });
+            let detail_size = ui.available_size_before_wrap();
+            ui.allocate_ui_with_layout(
+                detail_size,
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                self.draw_viewport_toolbar(ui);
 
                 egui::Frame::canvas(ui.style()).show(ui, |ui| self.show_canvas(ui));
 
                 let animation_runtime_summary = self.animation_runtime_summary();
+                self.draw_telemetry_banner(ui, animation_runtime_summary, native_fan_script);
                 if native_fan_script {
                     ui.horizontal(|ui| {
                         ui.strong("Fan XItem runtime +0x6C:");
@@ -442,7 +541,11 @@ impl ScriptListPanel {
                     });
                 }
 
-                ui.horizontal_wrapped(|ui| {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(20, 23, 40))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| ui.horizontal_wrapped(|ui| {
                     if let Some(script) = self.current_script() {
                         ui.strong("Frame:");
                         ui.label(format!("{}", script.frame_at_time(self.current_time) as isize));
@@ -511,7 +614,7 @@ impl ScriptListPanel {
                             }
                         }
                     }
-                });
+                    }));
 
                 self.show_controls(ui);
                 ui.add_space(4.0);
@@ -519,9 +622,10 @@ impl ScriptListPanel {
                 if let Some(script) = self.current_script() {
                     egui::ScrollArea::vertical()
                         .id_salt("script_graph_scroll_area")
-                        .show(ui, |ui| self.draw_script_graph(script, ui));
+                    .show(ui, |ui| self.draw_timeline(script, ui));
                 }
-            });
+                },
+            );
         });
 
         if self.is_playing {
@@ -542,16 +646,16 @@ impl ScriptListPanel {
     }
 
     fn show_canvas(&mut self, ui: &mut egui::Ui) {
-        let (rect, response) = ui.allocate_exact_size(
-            (ui.available_size()
-                - egui::vec2(0., 96.)
-                - egui::vec2(0., self.thread_count() as f32 * 17.0))
-            .clamp(
-                egui::vec2(f32::MIN, ui.available_height() / 2.0),
-                egui::vec2(f32::MAX, f32::MAX),
-            ),
-            egui::Sense::click_and_drag(),
+        // The canvas consumes only the remaining detail column. The old
+        // f32::MIN clamp could produce a negative size after the sidebar,
+        // making the viewport overlap the timeline on narrow windows.
+        let available = ui.available_size_before_wrap();
+        let timeline_height = 96.0 + self.thread_count() as f32 * 19.0;
+        let canvas_size = egui::vec2(
+            available.x.max(1.0),
+            (available.y - timeline_height).max(220.0),
         );
+        let (rect, response) = ui.allocate_exact_size(canvas_size, egui::Sense::click_and_drag());
 
         let time: f64 = ui.input(|t| t.time);
         let render_store = self.render_store.clone();
@@ -772,6 +876,11 @@ impl ScriptListPanel {
     const COMMAND_COLOR_EVENT: egui::Color32 = egui::Color32::WHITE;
     const COMMAND_COLOR_UNKNOWN: egui::Color32 = egui::Color32::WHITE;
 
+    /// Timeline entry point: keeps command semantics separate from its editor UI.
+    fn draw_timeline(&self, script: &UXGeoScript, ui: &mut egui::Ui) {
+        self.draw_script_graph(script, ui);
+    }
+
     fn draw_script_graph(&self, script: &UXGeoScript, ui: &mut egui::Ui) {
         let num_threads = script
             .commands
@@ -785,12 +894,41 @@ impl ScriptListPanel {
 
         let current_frame = script.frame_at_time(self.current_time);
         let width = ui.available_width();
-        let single_frame_width = width / script.length as f32;
+        let single_frame_width = width / script.length.max(1) as f32;
 
         let (rect, _response) = ui.allocate_exact_size(
             egui::vec2(width, num_threads as f32 * 17.0),
             egui::Sense::click(),
         );
+        let timeline_painter = ui.painter_at(rect);
+        timeline_painter.rect_filled(
+            rect,
+            egui::CornerRadius::same(6),
+            egui::Color32::from_rgb(18, 21, 37),
+        );
+        let frame_step = (script.length as f32 / 12.0).max(1.0).ceil() as usize;
+        for frame in (0..=script.length.max(0) as usize).step_by(frame_step) {
+            let x = rect.min.x + frame as f32 * single_frame_width;
+            timeline_painter.vline(
+                x,
+                rect.y_range(),
+                egui::Stroke::new(1.0, egui::Color32::from_gray(48)),
+            );
+            timeline_painter.text(
+                egui::pos2(x + 3.0, rect.min.y + 2.0),
+                egui::Align2::LEFT_TOP,
+                frame.to_string(),
+                egui::FontId::proportional(9.0),
+                egui::Color32::GRAY,
+            );
+        }
+        for row in 0..num_threads {
+            timeline_painter.hline(
+                rect.x_range(),
+                rect.min.y + row as f32 * 19.0,
+                egui::Stroke::new(1.0, egui::Color32::from_gray(40)),
+            );
+        }
 
         let render_store = self.render_store.read();
         for c in &script.commands {
@@ -1036,14 +1174,18 @@ impl ScriptListPanel {
                 keyframes.dedup();
 
                 for keyframe in keyframes {
-                    graph_paint_clipped.text(
-                        rect.min
-                            + egui::vec2(keyframe * single_frame_width, record_row * 19.0 + 18.5),
-                        egui::Align2::CENTER_BOTTOM,
-                        "🔺",
-                        egui::FontId::proportional(6.0),
-                        egui::Color32::BLACK,
-                    );
+                    let center = rect.min
+                        + egui::vec2(keyframe * single_frame_width, record_row * 19.0 + 14.0);
+                    graph_paint_clipped.add(egui::Shape::convex_polygon(
+                        vec![
+                            center + egui::vec2(0.0, -3.0),
+                            center + egui::vec2(3.0, 0.0),
+                            center + egui::vec2(0.0, 3.0),
+                            center + egui::vec2(-3.0, 0.0),
+                        ],
+                        egui::Color32::from_rgb(18, 21, 37),
+                        egui::Stroke::new(1.0, egui::Color32::WHITE),
+                    ));
                 }
             }
 
@@ -1061,11 +1203,21 @@ impl ScriptListPanel {
         }
 
         // Render playhead
+        let playhead_x = rect.min.x + current_frame * single_frame_width;
         ui.painter_at(rect).vline(
-            rect.min.x + current_frame * single_frame_width,
+            playhead_x,
             rect.min.y..=(rect.min.y + num_threads as f32 * 19.0),
-            egui::Stroke::new(1.0_f32, egui::Color32::RED),
+            egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(255, 105, 120)),
         );
+        ui.painter_at(rect).add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(playhead_x - 5.0, rect.min.y),
+                egui::pos2(playhead_x + 5.0, rect.min.y),
+                egui::pos2(playhead_x, rect.min.y + 7.0),
+            ],
+            egui::Color32::from_rgb(255, 105, 120),
+            egui::Stroke::NONE,
+        ));
     }
 }
 

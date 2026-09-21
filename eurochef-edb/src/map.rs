@@ -60,7 +60,7 @@ pub struct EXGeoMapZone {
     #[br(if(version.ne(&205)))]
     pub unk18: Option<EXRelArray<EXGeoPortalInfo>>, // native 0x004ED920: 8-byte portal groups
     #[br(if(version.ne(&205)))]
-    pub unk20: Option<EXRelPtr<EXRelArray<u16>>>, // native 0x00553527: relptr to per-zone render-object index array
+    pub unk20: Option<EXRelPtr<RobotsZonePlacementInfo>>, // native zone placement-index list + spatial tree
     #[br(if(version.ne(&205)))]
     pub unk24: Option<u32>, // serialized +0x24 dword; semantics not proven yet
     #[br(if(version.ne(&205)))]
@@ -116,6 +116,158 @@ pub struct EXGeoIdentifier {
     /// `flags & 1` is set and uses it as the fixed Y component of the
     /// native sky-root translation. X/Z come from the per-frame root input.
     pub sky_anchor_y: f32,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct RobotsPlacementSpatialLeaf {
+    pub placement_index: u16,
+    /// Exact byte tested with `& 0x08` by Robots.exe `0x00553006` before a
+    /// placement is appended to the Map raycast candidate list.
+    pub flags: u8,
+    pub trailing_raw: u8,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct RobotsPlacementSpatialChild {
+    /// Serialized child AABB payload following the self-relative child pointer.
+    pub bounds_raw: [f32; 6],
+    pub node: Option<Box<RobotsPlacementSpatialNode>>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub enum RobotsPlacementSpatialNode {
+    Leaf {
+        flags: u8,
+        items: Vec<RobotsPlacementSpatialLeaf>,
+    },
+    Branch {
+        flags: u8,
+        header_raw: u16,
+        children: Vec<RobotsPlacementSpatialChild>,
+    },
+}
+
+impl RobotsPlacementSpatialNode {
+    pub fn collect_flagged_placement_indices(&self, mask: u8, out: &mut Vec<u16>) {
+        match self {
+            Self::Leaf { flags, items } => {
+                if flags & mask == 0 {
+                    return;
+                }
+                out.extend(
+                    items.iter().filter_map(|item| {
+                        (item.flags & mask != 0).then_some(item.placement_index)
+                    }),
+                );
+            }
+            Self::Branch {
+                flags, children, ..
+            } => {
+                if flags & mask == 0 {
+                    return;
+                }
+                for child in children {
+                    if let Some(node) = child.node.as_deref() {
+                        node.collect_flagged_placement_indices(mask, out);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl BinRead for RobotsPlacementSpatialNode {
+    type Args<'a> = ();
+
+    fn read_options<R: std::io::Read + std::io::Seek>(
+        reader: &mut R,
+        endian: binrw::Endian,
+        _args: Self::Args<'_>,
+    ) -> BinResult<Self> {
+        let child_count = reader.read_type::<u8>(endian)? as usize;
+        let flags = reader.read_type::<u8>(endian)?;
+        let header_word = reader.read_type::<u16>(endian)?;
+        if child_count == 0 {
+            let mut items = Vec::with_capacity(header_word as usize);
+            for _ in 0..header_word {
+                items.push(RobotsPlacementSpatialLeaf {
+                    placement_index: reader.read_type::<u16>(endian)?,
+                    flags: reader.read_type::<u8>(endian)?,
+                    trailing_raw: reader.read_type::<u8>(endian)?,
+                });
+            }
+            return Ok(Self::Leaf { flags, items });
+        }
+
+        let mut children = Vec::with_capacity(child_count);
+        for _ in 0..child_count {
+            let relptr_address = reader.stream_position()?;
+            let relative = reader.read_type::<i32>(endian)?;
+            let bounds_raw = [
+                reader.read_type::<f32>(endian)?,
+                reader.read_type::<f32>(endian)?,
+                reader.read_type::<f32>(endian)?,
+                reader.read_type::<f32>(endian)?,
+                reader.read_type::<f32>(endian)?,
+                reader.read_type::<f32>(endian)?,
+            ];
+            let return_position = reader.stream_position()?;
+            let node = if relative == 0 {
+                None
+            } else {
+                reader.seek(std::io::SeekFrom::Start(
+                    (relptr_address as i64 + i64::from(relative)) as u64,
+                ))?;
+                let node = Self::read_options(reader, endian, ())?;
+                reader.seek(std::io::SeekFrom::Start(return_position))?;
+                Some(Box::new(node))
+            };
+            children.push(RobotsPlacementSpatialChild { bounds_raw, node });
+        }
+        Ok(Self::Branch {
+            flags,
+            header_raw: header_word,
+            children,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct RobotsZonePlacementInfo {
+    /// Exact u16 placement-index list used by Robots.exe `0x0053B4C4`.
+    pub placement_indices: EXRelArray<u16>,
+    /// Nested tree consumed by `0x0055317F` for bounds and `0x00553006` for
+    /// Map raycast candidate collection.
+    pub spatial_tree: Option<RobotsPlacementSpatialNode>,
+}
+
+impl BinRead for RobotsZonePlacementInfo {
+    type Args<'a> = ();
+
+    fn read_options<R: std::io::Read + std::io::Seek>(
+        reader: &mut R,
+        endian: binrw::Endian,
+        _args: Self::Args<'_>,
+    ) -> BinResult<Self> {
+        let placement_indices = reader.read_type::<EXRelArray<u16>>(endian)?;
+        let relptr_address = reader.stream_position()?;
+        let relative = reader.read_type::<i32>(endian)?;
+        let return_position = reader.stream_position()?;
+        let spatial_tree = if relative == 0 {
+            None
+        } else {
+            reader.seek(std::io::SeekFrom::Start(
+                (relptr_address as i64 + i64::from(relative)) as u64,
+            ))?;
+            let node = RobotsPlacementSpatialNode::read_options(reader, endian, ())?;
+            reader.seek(std::io::SeekFrom::Start(return_position))?;
+            Some(node)
+        };
+        Ok(Self {
+            placement_indices,
+            spatial_tree,
+        })
+    }
 }
 
 // TODO(cohae): A lot of these structures might need to be split up into separate files

@@ -15,6 +15,7 @@ use egui::{
 use eurochef_edb::{
     anim::EXGeoBaseAnimSkin,
     binrw::BinReaderExt,
+    common::EXGeoAnimHeader,
     edb::EdbFile,
     entity::{read_robots_v248_morph_shape_deltas, EXGeoEntity},
     header::EXGeoHeader,
@@ -59,6 +60,12 @@ const POSE_CACHE_VALUES_PER_BONE: usize = 7;
 const POSE_CACHE_BYTES_PER_BONE: usize = POSE_CACHE_VALUES_PER_BONE * size_of::<f32>();
 const MAX_POSE_CACHE_BYTES: usize = 512 * 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationPoseSource {
+    Rapc,
+    EmbeddedEdb,
+}
+
 #[derive(Debug, Clone)]
 pub struct AnimationMotionData {
     pub expected_size: usize,
@@ -70,6 +77,7 @@ pub struct AnimationMotionData {
 
 #[derive(Debug, Clone)]
 pub struct AnimationPoseCache {
+    pub source: AnimationPoseSource,
     pub source_path: PathBuf,
     pub frame_count: usize,
     pub bone_count: usize,
@@ -271,6 +279,36 @@ impl AnimationCatalog {
     }
 }
 
+/// Samples one native bound AnimBone in animation-local space at an exact raw
+/// asset frame. This deliberately bypasses UI phase normalization: gameplay
+/// callers such as the Sweeper Ratchet missile event require the native 16.5
+/// frame sample rather than `phase * (frame_count - 1)`.
+pub(crate) fn sample_bound_animation_bone_position(
+    catalog: &AnimationCatalog,
+    animation_hashcode: Hashcode,
+    bone_hashcode: Hashcode,
+    raw_frame: f32,
+) -> Option<Vec3> {
+    let clip_index = resolve_clip_index(&catalog.clips, animation_hashcode)?;
+    let clip = catalog.clips.get(clip_index)?;
+    let cache = clip.pose_cache.as_ref()?;
+    let skin_index = clip.skin_index?;
+    let skin_record = catalog.skins.get(skin_index)?;
+    let skin = skin_record.parsed.as_ref()?;
+    if cache.bone_count != skin.bone_count as usize {
+        return None;
+    }
+    let bone_selector = skin_record
+        .bone_hashcodes
+        .iter()
+        .position(|hashcode| *hashcode == Some(bone_hashcode))?;
+    let poses = cache.sample_frame(raw_frame)?;
+    let globals = build_global_bone_matrices(skin, &poses)?;
+    globals
+        .get(bone_selector)
+        .map(|matrix| matrix.transform_point3(Vec3::ZERO))
+}
+
 fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, String> {
     let value = bytes
         .get(offset..offset + size_of::<u32>())
@@ -465,11 +503,149 @@ fn parse_pose_cache(
     }
 
     Ok(AnimationPoseCache {
+        source: AnimationPoseSource::Rapc,
         source_path: source_path.to_path_buf(),
         frame_count,
         bone_count,
         scalar_count,
         motion_checksum,
+        poses,
+        scalars,
+    })
+}
+
+fn build_embedded_edb_pose_cache(
+    edb: &mut EdbFile,
+    edb_uid: Hashcode,
+    animation_index: usize,
+    animation: &EXGeoAnimHeader,
+    skin: &EXGeoBaseAnimSkin,
+    motion: &AnimationMotionData,
+) -> Result<AnimationPoseCache, String> {
+    if edb.platform != Platform::Pc || edb.header.version != 248 {
+        return Err("embedded native pose decoder is only proven for Robots PC v248".to_string());
+    }
+    if motion.truncated || motion.bytes.len() != motion.expected_size {
+        return Err(format!(
+            "compressed motion stream is incomplete: captured={} expected={}",
+            motion.bytes.len(),
+            motion.expected_size
+        ));
+    }
+    if let Some(error) = motion.read_error.as_deref() {
+        return Err(format!("compressed motion stream read failed: {error}"));
+    }
+
+    let endian = edb.endian;
+    let serialized = animation
+        .read_robots_v248_exgeoanim(edb, endian)
+        .map_err(|error| format!("read serialized EXGeoAnim: {error}"))?;
+    let block_table = animation
+        .read_robots_v248_motion_block_table(edb, endian)
+        .map_err(|error| format!("read native motion block table: {error}"))?;
+    let root_correction = animation
+        .read_robots_v248_root_correction_transform(edb, endian)
+        .map_err(|error| format!("read native root correction transform: {error}"))?;
+    let frame_count = usize::from(serialized.frame_count);
+    let bone_count = usize::from(serialized.bone_count);
+    if frame_count == 0 || bone_count == 0 {
+        return Err(format!(
+            "invalid embedded pose dimensions frames={frame_count} bones={bone_count}"
+        ));
+    }
+    if bone_count != skin.bone_count as usize {
+        return Err(format!(
+            "EXGeoAnim/AnimSkin bone mismatch {bone_count} != {}",
+            skin.bone_count
+        ));
+    }
+
+    let pose_count = frame_count
+        .checked_mul(bone_count)
+        .ok_or_else(|| "embedded pose dimensions overflow".to_string())?;
+    let mut poses = Vec::with_capacity(pose_count);
+    for frame_index in 0..frame_count {
+        let raw = match block_table.as_ref() {
+            Some(block_table) => serialized.decode_skeletal_frame_with_block_table(
+                &motion.bytes,
+                frame_index as u16,
+                block_table,
+            ),
+            None => serialized.decode_skeletal_frame(&motion.bytes, frame_index as u16),
+        }
+        .map_err(|error| format!("decode frame {frame_index}: {error}"))?;
+        let assembled = serialized
+            .assemble_same_skin_pose_with_root_correction(
+                &raw,
+                &skin.relative_bind_positions,
+                root_correction.as_ref(),
+            )
+            .map_err(|error| format!("assemble frame {frame_index}: {error}"))?;
+        for (bone_index, bone) in assembled.bones.into_iter().enumerate() {
+            let position = Vec3::new(bone.position[0], bone.position[1], bone.position[2]);
+            let rotation = Quat::from_xyzw(
+                bone.rotation[0],
+                bone.rotation[1],
+                bone.rotation[2],
+                bone.rotation[3],
+            );
+            if !position.is_finite() || !rotation.is_finite() {
+                return Err(format!(
+                    "non-finite embedded pose at frame {frame_index} bone {bone_index}"
+                ));
+            }
+            let length = rotation.length();
+            if (length - 1.0).abs() > 2.0e-3 {
+                return Err(format!(
+                    "non-unit embedded quaternion at frame {frame_index} bone {bone_index}: {length}"
+                ));
+            }
+            poses.push(AnimationBonePose {
+                position,
+                rotation: rotation.normalize(),
+            });
+        }
+    }
+
+    let source = AnimationPoseSource::EmbeddedEdb;
+    let source_path = PathBuf::from(format!(
+        "EDB 0x{edb_uid:08X} animation {animation_index} @ 0x{:08X}",
+        animation.common.address
+    ));
+    let scalar_count = usize::from(serialized.scalar_channel_count);
+    let mut scalars = Vec::with_capacity(frame_count.saturating_mul(scalar_count));
+    if scalar_count != 0 {
+        let scalar_stream = animation
+            .read_robots_v248_scalar_stream(edb, endian)
+            .map_err(|error| format!("read native scalar stream: {error}"))?;
+        for frame_index in 0..frame_count {
+            let frame_scalars = serialized
+                .decode_scalar_frame(&scalar_stream, frame_index as u16)
+                .map_err(|error| format!("decode scalar frame {frame_index}: {error}"))?;
+            if frame_scalars.len() != scalar_count {
+                return Err(format!(
+                    "scalar frame {frame_index} has {} channels, expected {scalar_count}",
+                    frame_scalars.len()
+                ));
+            }
+            for (scalar_index, value) in frame_scalars.into_iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(format!(
+                        "non-finite embedded morph scalar at frame {frame_index} index {scalar_index}"
+                    ));
+                }
+                scalars.push(value);
+            }
+        }
+    }
+
+    Ok(AnimationPoseCache {
+        source,
+        source_path,
+        frame_count,
+        bone_count,
+        scalar_count,
+        motion_checksum: motion.checksum,
         poses,
         scalars,
     })
@@ -620,18 +796,47 @@ pub fn read_from_file(edb: &mut EdbFile) -> anyhow::Result<AnimationCatalog> {
             animation.motiondata_info_addr,
             animation.datasize,
         );
-        let (pose_cache, pose_cache_error) = skin_index
-            .and_then(|skin_index| skins.get(skin_index))
-            .map(|skin| {
-                load_pose_cache(
-                    header.hashcode,
-                    index,
-                    animation.common.hashcode,
-                    skin.hashcode,
-                    motion.checksum,
-                )
-            })
-            .unwrap_or((None, None));
+        let (pose_cache, pose_cache_error) = if let Some(skin_index) = skin_index {
+            let skin = &skins[skin_index];
+            let (rapc_cache, rapc_error) = load_pose_cache(
+                header.hashcode,
+                index,
+                animation.common.hashcode,
+                skin.hashcode,
+                motion.checksum,
+            );
+            if header.version == 248 && edb.platform == Platform::Pc {
+                if let Some(parsed_skin) = skin.parsed.as_ref() {
+                    match build_embedded_edb_pose_cache(
+                        edb,
+                        header.hashcode,
+                        index,
+                        animation,
+                        parsed_skin,
+                        &motion,
+                    ) {
+                        Ok(cache) => (Some(cache), None),
+                        Err(embedded_error) => {
+                            let error = rapc_error.map_or_else(
+                                || format!("embedded EDB pose decode failed: {embedded_error}"),
+                                |rapc_error| {
+                                    format!(
+                                        "embedded EDB pose decode failed: {embedded_error}; RAPCV003: {rapc_error}"
+                                    )
+                                },
+                            );
+                            (rapc_cache, Some(error))
+                        }
+                    }
+                } else {
+                    (rapc_cache, rapc_error)
+                }
+            } else {
+                (rapc_cache, rapc_error)
+            }
+        } else {
+            (None, None)
+        };
 
         clips.push(AnimationClipRecord {
             index,
@@ -2019,15 +2224,19 @@ impl AnimationListPanel {
         });
 
         if let Some(cache) = &clip.pose_cache {
-            ui.colored_label(
-                egui::Color32::LIGHT_GREEN,
-                format!(
-                    "Native RAPCV003 cache active: {} frames, {} bones, {} morph scalars. CPU skinning, native morph timing and frame interpolation are enabled.",
+            let source_summary = match cache.source {
+                AnimationPoseSource::Rapc => format!(
+                    "Native RAPCV003 compatibility cache active: {} frames, {} bones, {} morph scalars.",
                     cache.frame_count, cache.bone_count, cache.scalar_count
                 ),
-            );
+                AnimationPoseSource::EmbeddedEdb => format!(
+                    "Native EDB decoder active: {} frames, {} bones, {} morph scalars. Skeletal and scalar playback are decoded directly from PC-v248 EDB data; RAPCV003 is not required.",
+                    cache.frame_count, cache.bone_count, cache.scalar_count
+                ),
+            };
+            ui.colored_label(egui::Color32::LIGHT_GREEN, source_summary);
             ui.monospace(format!(
-                "cache={} motion_fnv=0x{:016X}",
+                "source={} motion_fnv=0x{:016X}",
                 cache.source_path.display(),
                 cache.motion_checksum
             ));
@@ -2331,52 +2540,52 @@ impl AnimationListPanel {
                 });
             }
 
-            if let Some(auxiliary) = skin
+            if let Some(animdatums) = skin
                 .parsed
                 .as_ref()
-                .and_then(|parsed| parsed.robots_auxiliary_section.as_ref())
-                .filter(|auxiliary| auxiliary.serialized_len() != 0)
+                .and_then(|parsed| parsed.robots_animdatum_section.as_ref())
+                .filter(|animdatums| animdatums.serialized_len() != 0)
             {
                 egui::CollapsingHeader::new(format!(
-                    "AnimBone auxiliary descriptors ({})",
-                    auxiliary.serialized_len()
+                    "AnimDatum collision/query records ({})",
+                    animdatums.serialized_len()
                 ))
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.colored_label(
                         egui::Color32::GRAY,
-                        "Descriptor identity/layout and payload pointers are corpus-proven; payload contents remain semantically unnamed.",
+                        "Native AnimSkin +0x60/+0x64 channel used by 0x00500569. Search heads follow skip_count; continuation records remain visible for provenance.",
                     );
-                    if let Some(header) = auxiliary.header.as_ref() {
+                    if let Some(header) = animdatums.header.as_ref() {
                         ui.monospace(format!(
-                            "First detailed payload: 0x{:08X}",
-                            header.first_payload_offset_absolute()
+                            "Index: 0x{:08X}  First datum: 0x{:08X}",
+                            header.index_offset_absolute(),
+                            header.first_datum_offset_absolute()
                         ));
                     }
-                    egui::Grid::new("animation_animbone_auxiliary_grid")
+                    egui::Grid::new("animation_animdatum_grid")
                         .striped(true)
                         .show(ui, |ui| {
                             ui.strong("#");
-                            ui.strong("AnimBone");
-                            ui.strong("Flags");
-                            ui.strong("Variant");
-                            ui.strong("Payload +04");
-                            ui.strong("Payload +06");
-                            ui.strong("Hierarchy");
-                            ui.strong("Payload");
+                            ui.strong("Search");
+                            ui.strong("AnimDatum");
+                            ui.strong("Skip");
+                            ui.strong("Mode");
+                            ui.strong("Shape / scalars");
+                            ui.strong("Transform");
+                            ui.strong("Datum");
                             ui.end_row();
-                            for (entry_index, entry) in auxiliary.entries.iter().enumerate() {
-                                let payload = entry.payload();
-                                let payload_header = &payload.header;
-                                let hierarchy_chain = payload
+                            for (entry_index, entry) in animdatums.entries.iter().enumerate() {
+                                let datum = entry.datum();
+                                let hierarchy_chain = datum
                                     .hierarchy_chain
                                     .iter()
                                     .map(|selector| selector.to_string())
                                     .collect::<Vec<_>>()
                                     .join("→");
-                                let hierarchy_leaf = skin
+                                let transform_bone = skin
                                     .bone_hashcodes
-                                    .get(payload.hierarchy_leaf_selector as usize)
+                                    .get(datum.transform_selector as usize)
                                     .and_then(|hashcode| *hashcode)
                                     .map(|hashcode| {
                                         format_typed_hashcode_with_id(
@@ -2385,41 +2594,48 @@ impl AnimationListPanel {
                                             hashcode,
                                         )
                                     })
-                                    .unwrap_or_else(|| {
-                                        format!("bone_{:03}", payload.hierarchy_leaf_selector)
-                                    });
+                                    .unwrap_or_else(|| format!("bone_{:03}", datum.transform_selector));
+                                let shape = if entry.hashcode == 0x1000_0004 {
+                                    if datum.header.shape_mode == 3 {
+                                        format!(
+                                            "capsule half={:.4} r={:.4}",
+                                            datum.map_collision_half_segment().unwrap_or_default(),
+                                            datum.map_collision_radius().unwrap_or_default()
+                                        )
+                                    } else {
+                                        format!(
+                                            "sphere r={:.4}",
+                                            datum.map_collision_radius().unwrap_or_default()
+                                        )
+                                    }
+                                } else {
+                                    format!(
+                                        "[{:.4}, {:.4}, {:.4}]",
+                                        datum.shape_scalars[0],
+                                        datum.shape_scalars[1],
+                                        datum.shape_scalars[2]
+                                    )
+                                };
                                 ui.monospace(entry_index.to_string());
-                                ui.monospace(
-                                    entry
-                                        .animbone_hashcode()
-                                        .map(|hashcode| {
-                                            format_typed_hashcode_with_id(
-                                                &self.hashcodes,
-                                                "AnimBone",
-                                                hashcode,
-                                            )
-                                        })
-                                        .unwrap_or_else(|| "sentinel [0xFFFF]".to_string()),
-                                );
-                                ui.monospace(format!("0x{:04X}", entry.raw_flags));
-                                ui.monospace(entry.raw_variant.to_string());
-                                ui.monospace(format!("0x{:04X}", payload_header.raw_04));
-                                ui.monospace(payload_header.raw_06.to_string());
-                                ui.monospace(format!("{} [{}]", hierarchy_leaf, hierarchy_chain));
-                                ui.monospace(format!("0x{:08X}", entry.payload_offset_absolute()))
+                                ui.monospace(if entry.searchable_head { "head" } else { "cont" });
+                                ui.monospace(format_hashcode_with_id(&self.hashcodes, entry.hashcode));
+                                ui.monospace(entry.skip_count.to_string());
+                                ui.monospace(format!("0x{:02X}", datum.header.shape_mode));
+                                ui.monospace(shape);
+                                ui.monospace(format!("{} [{}]", transform_bone, hierarchy_chain));
+                                ui.monospace(format!("0x{:08X}", entry.datum_offset_absolute()))
                                     .on_hover_text(format!(
-                                        "raw_vector_a = [{:.6}, {:.6}, {:.6}]\nraw_vector_b = [{:.6}, {:.6}, {:.6}]\nunit_quaternion = [{:.6}, {:.6}, {:.6}, {:.6}]\nserialized_size = {} bytes",
-                                        payload.raw_vector_a[0],
-                                        payload.raw_vector_a[1],
-                                        payload.raw_vector_a[2],
-                                        payload.raw_vector_b[0],
-                                        payload.raw_vector_b[1],
-                                        payload.raw_vector_b[2],
-                                        payload.unit_quaternion[0],
-                                        payload.unit_quaternion[1],
-                                        payload.unit_quaternion[2],
-                                        payload.unit_quaternion[3],
-                                        payload.serialized_size(),
+                                        "raw +04 = 0x{:04X}\nraw +07 = 0x{:02X}\ncenter = [{:.6}, {:.6}, {:.6}]\nquaternion = [{:.6}, {:.6}, {:.6}, {:.6}]\nserialized_size = {} bytes",
+                                        datum.header.raw_word_04,
+                                        datum.header.raw_byte_07,
+                                        datum.local_center[0],
+                                        datum.local_center[1],
+                                        datum.local_center[2],
+                                        datum.local_orientation[0],
+                                        datum.local_orientation[1],
+                                        datum.local_orientation[2],
+                                        datum.local_orientation[3],
+                                        datum.serialized_size(),
                                     ));
                                 ui.end_row();
                             }
@@ -2742,6 +2958,246 @@ mod tests {
     }
 
     #[test]
+    fn real_robots_v248_sweeper_attack_r_hand_frame_16_5_when_game_root_is_configured() {
+        let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
+            return;
+        };
+        let path = Path::new(&game_root)
+            .join("_eurotools_out/extracted_main/robots/binary/_bin_pc/nb11_rat.edb");
+        let file = std::fs::File::open(&path).expect("open nb11_rat.edb");
+        let mut edb = EdbFile::new(
+            Box::new(std::io::BufReader::new(file)),
+            eurochef_edb::versions::Platform::Pc,
+        )
+        .expect("parse nb11_rat.edb");
+        assert_eq!(edb.header.hashcode, 0x0100_0051);
+        let catalog = read_from_file(&mut edb).expect("decode nb11_rat animation catalog");
+        assert_eq!(catalog.bound_skin_hashcode(0x8300_0009), Some(0x0D00_0001));
+        let hand = sample_bound_animation_bone_position(&catalog, 0x8300_0009, 0x0E00_0015, 16.5)
+            .expect("sample Attack R_Hand at native missile callback frame");
+        let expected = Vec3::new(-0.101_767_67, 0.788_267_73, 0.772_494_4);
+        assert!(
+            hand.distance(expected) < 1.0e-6,
+            "native R_Hand frame16.5 mismatch: {hand:?} != {expected:?}"
+        );
+    }
+
+    #[test]
+    fn real_robots_v248_embedded_pose_corpus_when_binding_report_is_configured() {
+        let Ok(report_path) = std::env::var("ROBOTS_ANIMATION_BINDING_CORPUS") else {
+            return;
+        };
+        let report = std::fs::read_to_string(&report_path).expect("read animation binding corpus");
+        let mut lines = report.lines();
+        let header = lines.next().expect("animation binding corpus header");
+        let columns = header.split('\t').collect::<Vec<_>>();
+        let path_column = columns
+            .iter()
+            .position(|column| *column == "edb_path")
+            .expect("edb_path column");
+        let status_column = columns
+            .iter()
+            .position(|column| *column == "skin_binding_status")
+            .expect("skin_binding_status column");
+        let mut expected_bound_clips = 0usize;
+        let mut paths = std::collections::BTreeSet::new();
+        for line in lines {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.get(status_column) != Some(&"resolved_by_base_skin_num") {
+                continue;
+            }
+            expected_bound_clips += 1;
+            let raw_path = fields.get(path_column).expect("binding EDB path");
+            paths.insert(raw_path.replace("\\\\", "\\"));
+        }
+        assert!(
+            !paths.is_empty(),
+            "binding corpus has no resolved EDB paths"
+        );
+
+        let mut decoded_bound_clips = 0usize;
+        let mut oracle_compared_clips = 0usize;
+        let mut oracle_missing_clips = 0usize;
+        let mut max_position_error = 0.0f32;
+        let mut max_quaternion_component_error = 0.0f32;
+        let mut max_scalar_error = 0.0f32;
+        let mut worst_position = None;
+        let mut worst_quaternion = None;
+        let mut worst_scalar = None;
+        let mut failures = Vec::new();
+        for path in &paths {
+            let platform = eurochef_edb::versions::Platform::from_path(path)
+                .unwrap_or(eurochef_edb::versions::Platform::Pc);
+            let file = match std::fs::File::open(path) {
+                Ok(file) => file,
+                Err(error) => {
+                    failures.push(format!("open {path}: {error}"));
+                    continue;
+                }
+            };
+            let reader = std::io::BufReader::new(file);
+            let mut edb = match EdbFile::new(Box::new(reader), platform) {
+                Ok(edb) => edb,
+                Err(error) => {
+                    failures.push(format!("parse {path}: {error}"));
+                    continue;
+                }
+            };
+            let catalog = match read_from_file(&mut edb) {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    failures.push(format!("catalog {path}: {error}"));
+                    continue;
+                }
+            };
+            for clip in catalog
+                .clips
+                .iter()
+                .filter(|clip| clip.skin_index.is_some())
+            {
+                decoded_bound_clips += 1;
+                let Some(embedded) = clip.pose_cache.as_ref() else {
+                    failures.push(format!(
+                        "{path} clip {} 0x{:08X}: {:?}",
+                        clip.index, clip.hashcode, clip.pose_cache_error
+                    ));
+                    continue;
+                };
+                if embedded.source == AnimationPoseSource::Rapc {
+                    failures.push(format!(
+                        "{path} clip {} 0x{:08X}: RAPC fallback {:?}",
+                        clip.index, clip.hashcode, clip.pose_cache_error
+                    ));
+                    continue;
+                }
+
+                let skin = &catalog.skins[clip.skin_index.expect("bound skin index")];
+                let (oracle, oracle_error) = load_pose_cache(
+                    edb.header.hashcode,
+                    clip.index,
+                    clip.hashcode,
+                    skin.hashcode,
+                    clip.motion.checksum,
+                );
+                let Some(oracle) = oracle else {
+                    oracle_missing_clips += 1;
+                    if let Some(error) = oracle_error {
+                        eprintln!(
+                            "RAPCV003 oracle missing for {path} clip {}: {error}",
+                            clip.index
+                        );
+                    }
+                    continue;
+                };
+                oracle_compared_clips += 1;
+                if embedded.frame_count != oracle.frame_count
+                    || embedded.bone_count != oracle.bone_count
+                    || embedded.scalar_count != oracle.scalar_count
+                    || embedded.poses.len() != oracle.poses.len()
+                    || embedded.scalars.len() != oracle.scalars.len()
+                {
+                    failures.push(format!(
+                        "{path} clip {} cache dimensions embedded={}/{}/{}/{}/{} oracle={}/{}/{}/{}/{}",
+                        clip.index,
+                        embedded.frame_count,
+                        embedded.bone_count,
+                        embedded.scalar_count,
+                        embedded.poses.len(),
+                        embedded.scalars.len(),
+                        oracle.frame_count,
+                        oracle.bone_count,
+                        oracle.scalar_count,
+                        oracle.poses.len(),
+                        oracle.scalars.len()
+                    ));
+                    continue;
+                }
+                for (pose_index, (actual, expected)) in
+                    embedded.poses.iter().zip(&oracle.poses).enumerate()
+                {
+                    let position_error = (actual.position.x - expected.position.x)
+                        .abs()
+                        .max((actual.position.y - expected.position.y).abs())
+                        .max((actual.position.z - expected.position.z).abs());
+                    if position_error > max_position_error {
+                        max_position_error = position_error;
+                        worst_position = Some((
+                            path.clone(),
+                            clip.index,
+                            pose_index / embedded.bone_count,
+                            pose_index % embedded.bone_count,
+                        ));
+                    }
+                    let direct = (actual.rotation.x - expected.rotation.x)
+                        .abs()
+                        .max((actual.rotation.y - expected.rotation.y).abs())
+                        .max((actual.rotation.z - expected.rotation.z).abs())
+                        .max((actual.rotation.w - expected.rotation.w).abs());
+                    let negated = (actual.rotation.x + expected.rotation.x)
+                        .abs()
+                        .max((actual.rotation.y + expected.rotation.y).abs())
+                        .max((actual.rotation.z + expected.rotation.z).abs())
+                        .max((actual.rotation.w + expected.rotation.w).abs());
+                    let quaternion_error = direct.min(negated);
+                    if quaternion_error > max_quaternion_component_error {
+                        max_quaternion_component_error = quaternion_error;
+                        worst_quaternion = Some((
+                            path.clone(),
+                            clip.index,
+                            pose_index / embedded.bone_count,
+                            pose_index % embedded.bone_count,
+                        ));
+                    }
+                }
+                for (scalar_index, (actual, expected)) in
+                    embedded.scalars.iter().zip(&oracle.scalars).enumerate()
+                {
+                    let scalar_error = (actual - expected).abs();
+                    if scalar_error > max_scalar_error {
+                        max_scalar_error = scalar_error;
+                        worst_scalar = Some((
+                            path.clone(),
+                            clip.index,
+                            scalar_index / embedded.scalar_count.max(1),
+                            scalar_index % embedded.scalar_count.max(1),
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            decoded_bound_clips, expected_bound_clips,
+            "binding corpus/catalog bound-clip count mismatch"
+        );
+        assert!(
+            failures.is_empty(),
+            "embedded EDB animation decoder failed corpus entries:\n{}",
+            failures.join("\n")
+        );
+        assert_eq!(
+            oracle_missing_clips, 0,
+            "RAPCV003 oracle coverage is incomplete for the bound corpus"
+        );
+        assert!(
+            max_position_error < 1.0e-3,
+            "embedded/native position mismatch max={max_position_error} worst={worst_position:?}"
+        );
+        assert!(
+            max_quaternion_component_error < 1.0e-3,
+            "embedded/native quaternion mismatch max={max_quaternion_component_error} worst={worst_quaternion:?}"
+        );
+        assert!(
+            max_scalar_error < 1.0e-3,
+            "embedded/native scalar mismatch max={max_scalar_error} worst={worst_scalar:?}"
+        );
+        eprintln!(
+            "Robots embedded EDB animation corpus: files={} bound_clips={decoded_bound_clips} oracle_clips={oracle_compared_clips} max_position_error={max_position_error:.9} max_quaternion_component_error={max_quaternion_component_error:.9} max_scalar_error={max_scalar_error:.9}",
+            paths.len()
+        );
+    }
+
+    #[test]
     fn real_animation_catalog_when_fixture_is_requested() {
         let Ok(path) = std::env::var("ROBOTS_ANIMATION_FIXTURE") else {
             return;
@@ -2765,6 +3221,23 @@ mod tests {
                 .all(|clip| clip.motion.read_error.is_none()),
             "fixture contains an unreadable motion payload"
         );
+        if edb.header.version == 248 && platform == Platform::Pc {
+            let rapc_only = catalog
+                .clips
+                .iter()
+                .filter(|clip| clip.skin_index.is_some())
+                .filter(|clip| {
+                    clip.pose_cache
+                        .as_ref()
+                        .is_none_or(|cache| cache.source == AnimationPoseSource::Rapc)
+                })
+                .map(|clip| (clip.index, clip.pose_cache_error.clone()))
+                .collect::<Vec<_>>();
+            assert!(
+                rapc_only.is_empty(),
+                "Robots PC v248 bound clips must use the embedded EDB skeletal decoder; RAPC-only/missing={rapc_only:#?}"
+            );
+        }
         if std::env::var_os("ROBOTS_ANIMATION_POSE_CACHE").is_some() {
             let missing_caches = catalog
                 .clips
@@ -2856,7 +3329,7 @@ mod tests {
         let mut clips = 0usize;
         let mut skins = 0usize;
         let mut rigid_bone_attachments = 0usize;
-        let mut animbone_auxiliary_descriptors = 0usize;
+        let mut animdatum_records = 0usize;
         let mut native_bound_clips = 0usize;
         let mut native_pose_caches_loaded = 0usize;
         let mut native_pose_cache_errors = Vec::new();
@@ -2879,11 +3352,11 @@ mod tests {
                 .iter()
                 .map(|skin| skin.bone_attachments.len())
                 .sum::<usize>();
-            animbone_auxiliary_descriptors += catalog
+            animdatum_records += catalog
                 .skins
                 .iter()
                 .filter_map(|skin| skin.parsed.as_ref())
-                .filter_map(|skin| skin.robots_auxiliary_section.as_ref())
+                .filter_map(|skin| skin.robots_animdatum_section.as_ref())
                 .map(|auxiliary| auxiliary.entries.len())
                 .sum::<usize>();
             for clip in &catalog.clips {
@@ -3206,7 +3679,7 @@ mod tests {
         assert_eq!(clips, 1744);
         assert_eq!(skins, 234);
         assert_eq!(rigid_bone_attachments, 41);
-        assert_eq!(animbone_auxiliary_descriptors, 669);
+        assert_eq!(animdatum_records, 669);
         assert_eq!(native_bound_clips, 1390);
         if std::env::var_os("ROBOTS_ANIMATION_POSE_CACHE").is_some() {
             eprintln!(

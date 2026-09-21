@@ -5,7 +5,10 @@ use eurochef_shared::entities::{TriStrip, UXVertex};
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use glow::HasContext;
 
-use crate::{entities::ProcessedEntityMesh, map_zone::robots_map_zone_index_by_bounds};
+use crate::{
+    entities::{ProcessedEntityMesh, RobotsRaycastTriangle},
+    map_zone::robots_map_zone_index_by_bounds,
+};
 
 use super::{
     blend::{set_blending_mode, BlendMode},
@@ -293,6 +296,7 @@ pub struct EntityRenderer {
     pub native_light_sample_position: Option<Vec3>,
     local_bound_center: Vec3,
     local_bound_radius: f32,
+    robots_raycast_triangles: Vec<RobotsRaycastTriangle>,
 }
 
 impl EntityRenderer {
@@ -312,6 +316,7 @@ impl EntityRenderer {
             native_light_sample_position: None,
             local_bound_center: Vec3::ZERO,
             local_bound_radius: 0.0,
+            robots_raycast_triangles: Vec::new(),
             file_hashcode,
         }
     }
@@ -322,9 +327,21 @@ impl EntityRenderer {
             .unwrap_or(true)
     }
 
+    pub fn robots_raycast_triangles(&self) -> &[RobotsRaycastTriangle] {
+        &self.robots_raycast_triangles
+    }
+
     #[cfg(test)]
     pub(crate) fn set_serialized_vertex_count_for_test(&mut self, vertex_count: usize) {
         self.serialized_vertex_count = Some(vertex_count);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_robots_raycast_triangles_for_test(
+        &mut self,
+        triangles: Vec<RobotsRaycastTriangle>,
+    ) {
+        self.robots_raycast_triangles = triangles;
     }
 
     /// Returns the center of the model (average of all points)
@@ -339,6 +356,7 @@ impl EntityRenderer {
         } = mesh;
 
         self.serialized_vertex_count = Some(vertex_data.len());
+        self.robots_raycast_triangles = mesh.robots_raycast_triangles.clone();
         let bounding_box = mesh.bounding_box();
         let center = (bounding_box.0 + bounding_box.1) / 2.0;
         self.local_bound_center = center;

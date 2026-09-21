@@ -7,7 +7,14 @@ use std::{
 
 use anyhow::{Context, Result};
 use eurochef_edb::{
-    binrw::BinReaderExt, edb::EdbFile, entity::EXGeoEntity, robots_hashdb, versions::Platform,
+    binrw::BinReaderExt,
+    edb::EdbFile,
+    entity::{
+        read_robots_v248_entity_anim_datums, robots_v248_isolated_surface_category, EXGeoEntity,
+        RobotsEntityAnimDatumRecord,
+    },
+    robots_hashdb,
+    versions::Platform,
     HashcodeUtils,
 };
 use serde::Serialize;
@@ -34,6 +41,17 @@ struct EntityCorpusSummary {
     type_counts: BTreeMap<String, usize>,
     name_counts: BTreeMap<String, usize>,
     runtime_coverage_counts: BTreeMap<String, usize>,
+    robots_face_info_meshes: usize,
+    robots_face_info_groups: usize,
+    robots_face_info_faces: usize,
+    robots_face_info_surface_mask_counts: BTreeMap<String, usize>,
+    robots_animdatum_directories: usize,
+    robots_animdatum_records: usize,
+    robots_animdatum_hash_counts: BTreeMap<String, usize>,
+    robots_map_collision_records: usize,
+    robots_map_collision_spheres: usize,
+    robots_map_collision_capsules: usize,
+    robots_map_collision_mode_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,6 +59,43 @@ struct EntityFileError {
     declared_uid: Option<u32>,
     source_path: String,
     error: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EntitySurfaceFaceRow {
+    edb_uid: u32,
+    edb_path: String,
+    entity_index: usize,
+    entity_hashcode: u32,
+    entity_name: String,
+    group_index: usize,
+    face_index: usize,
+    vertex_indices: [u16; 3],
+    surface_metadata: u16,
+    surface_mask: u16,
+    isolated_runtime_category: u16,
+    isolated_runtime_role: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EntityAnimDatumRow {
+    edb_uid: u32,
+    edb_path: String,
+    entity_index: usize,
+    entity_hashcode: u32,
+    entity_name: String,
+    datum_index: usize,
+    datum_hashcode: u32,
+    datum_name: String,
+    raw_word_04: u16,
+    shape_mode: u8,
+    raw_byte_07: u8,
+    shape_scalars: [f32; 3],
+    local_center: [f32; 3],
+    local_orientation: [f32; 4],
+    map_collision_shape: String,
+    map_collision_radius: Option<f32>,
+    map_collision_half_segment: Option<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +130,9 @@ struct EntityReportRow {
     face_info_next_known_offset: Option<u64>,
     face_collision_to_next_known_span: Option<u64>,
     face_info_to_next_known_span: Option<u64>,
+    robots_face_info_groups: Option<usize>,
+    robots_face_info_faces: Option<usize>,
+    robots_face_info_surface_masks: Option<BTreeMap<String, usize>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,6 +141,8 @@ struct EntityCorpusReport {
     summary: EntityCorpusSummary,
     file_errors: Vec<EntityFileError>,
     rows: Vec<EntityReportRow>,
+    surface_faces: Vec<EntitySurfaceFaceRow>,
+    anim_datums: Vec<EntityAnimDatumRow>,
 }
 
 pub fn execute_command(manifest_path: String, output_folder: Option<String>) -> Result<()> {
@@ -101,6 +161,8 @@ pub fn execute_command(manifest_path: String, output_folder: Option<String>) -> 
         },
         file_errors: Vec::new(),
         rows: Vec::new(),
+        surface_faces: Vec::new(),
+        anim_datums: Vec::new(),
     };
 
     for entry in &entries {
@@ -113,7 +175,14 @@ pub fn execute_command(manifest_path: String, output_folder: Option<String>) -> 
             report.summary.files_failed += 1;
             continue;
         };
-        match scan_file(entry, platform, &mut report.summary, &mut report.rows) {
+        match scan_file(
+            entry,
+            platform,
+            &mut report.summary,
+            &mut report.rows,
+            &mut report.surface_faces,
+            &mut report.anim_datums,
+        ) {
             Ok(()) => report.summary.files_scanned += 1,
             Err(error) => {
                 report.file_errors.push(EntityFileError {
@@ -131,6 +200,14 @@ pub fn execute_command(manifest_path: String, output_folder: Option<String>) -> 
         serde_json::to_string_pretty(&report)?,
     )?;
     write_rows_tsv(&output_folder.join("ht_entity_rows.tsv"), &report.rows)?;
+    write_surface_faces_tsv(
+        &output_folder.join("ht_entity_surface_faces.tsv"),
+        &report.surface_faces,
+    )?;
+    write_anim_datums_tsv(
+        &output_folder.join("ht_entity_anim_datums.tsv"),
+        &report.anim_datums,
+    )?;
     write_summary_tsv(
         &output_folder.join("ht_entity_type_summary.tsv"),
         "object_kind",
@@ -140,6 +217,21 @@ pub fn execute_command(manifest_path: String, output_folder: Option<String>) -> 
         &output_folder.join("ht_entity_name_summary.tsv"),
         "entity_name",
         &report.summary.name_counts,
+    )?;
+    write_summary_tsv(
+        &output_folder.join("ht_entity_surface_summary.tsv"),
+        "surface_metadata_mask",
+        &report.summary.robots_face_info_surface_mask_counts,
+    )?;
+    write_summary_tsv(
+        &output_folder.join("ht_entity_animdatum_summary.tsv"),
+        "animdatum_hash",
+        &report.summary.robots_animdatum_hash_counts,
+    )?;
+    write_summary_tsv(
+        &output_folder.join("ht_entity_map_collision_modes.tsv"),
+        "shape_mode",
+        &report.summary.robots_map_collision_mode_counts,
     )?;
 
     info!(
@@ -156,6 +248,8 @@ fn scan_file(
     platform: Platform,
     summary: &mut EntityCorpusSummary,
     rows: &mut Vec<EntityReportRow>,
+    surface_faces: &mut Vec<EntitySurfaceFaceRow>,
+    anim_datums: &mut Vec<EntityAnimDatumRow>,
 ) -> Result<()> {
     let file = File::open(&entry.source_path)
         .with_context(|| format!("open {}", entry.source_path.display()))?;
@@ -170,22 +264,54 @@ fn scan_file(
             classify_entity_hash(hashcode, entity_index);
         let runtime_coverage = entity_runtime_coverage(hashcode, &hash_scope);
         let file_offset = entity_header.common.address;
+        if header.version == 248 && platform == Platform::Pc {
+            let endian = edb.endian;
+            if let Some(directory) =
+                read_robots_v248_entity_anim_datums(&mut edb, endian, file_offset as u64)?
+            {
+                summary.robots_animdatum_directories += 1;
+                for (datum_index, record) in directory.records.iter().enumerate() {
+                    append_anim_datum_row(
+                        anim_datums,
+                        summary,
+                        header.hashcode,
+                        &entry.source_path,
+                        entity_index,
+                        hashcode,
+                        &entity_name,
+                        datum_index,
+                        record,
+                    );
+                }
+            }
+        }
         edb.seek(std::io::SeekFrom::Start(file_offset as u64))?;
 
         let row = match edb.read_type_args::<EXGeoEntity>(edb.endian, (header.version, platform)) {
-            Ok(entity) => row_from_entity(
-                header.hashcode,
-                &entry.source_path,
-                entity_index,
-                hashcode,
-                entity_name.clone(),
-                hash_scope.clone(),
-                local_index,
-                local_index_matches,
-                runtime_coverage.clone(),
-                file_offset,
-                entity,
-            ),
+            Ok(entity) => {
+                append_surface_face_rows(
+                    surface_faces,
+                    header.hashcode,
+                    &entry.source_path,
+                    entity_index,
+                    hashcode,
+                    &entity_name,
+                    &entity,
+                );
+                row_from_entity(
+                    header.hashcode,
+                    &entry.source_path,
+                    entity_index,
+                    hashcode,
+                    entity_name.clone(),
+                    hash_scope.clone(),
+                    local_index,
+                    local_index_matches,
+                    runtime_coverage.clone(),
+                    file_offset,
+                    entity,
+                )
+            }
             Err(error) => {
                 summary.parse_failures += 1;
                 EntityReportRow {
@@ -219,6 +345,9 @@ fn scan_file(
                     face_info_next_known_offset: None,
                     face_collision_to_next_known_span: None,
                     face_info_to_next_known_span: None,
+                    robots_face_info_groups: None,
+                    robots_face_info_faces: None,
+                    robots_face_info_surface_masks: None,
                 }
             }
         };
@@ -238,10 +367,129 @@ fn scan_file(
         if row.local_index_matches == Some(false) {
             summary.local_index_mismatches += 1;
         }
+        if let Some(groups) = row.robots_face_info_groups {
+            summary.robots_face_info_meshes += 1;
+            summary.robots_face_info_groups += groups;
+        }
+        if let Some(faces) = row.robots_face_info_faces {
+            summary.robots_face_info_faces += faces;
+        }
+        if let Some(surface_masks) = &row.robots_face_info_surface_masks {
+            for (mask, count) in surface_masks {
+                *summary
+                    .robots_face_info_surface_mask_counts
+                    .entry(mask.clone())
+                    .or_default() += count;
+            }
+        }
         summary.entities += 1;
         rows.push(row);
     }
     Ok(())
+}
+
+fn append_anim_datum_row(
+    rows: &mut Vec<EntityAnimDatumRow>,
+    summary: &mut EntityCorpusSummary,
+    edb_uid: u32,
+    path: &Path,
+    entity_index: usize,
+    entity_hashcode: u32,
+    entity_name: &str,
+    datum_index: usize,
+    record: &RobotsEntityAnimDatumRecord,
+) {
+    summary.robots_animdatum_records += 1;
+    let datum_name = robots_hashdb::resolve(record.hashcode)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("HT_Invalid_{:08x}", record.hashcode));
+    *summary
+        .robots_animdatum_hash_counts
+        .entry(format!("0x{:08X} {}", record.hashcode, datum_name))
+        .or_default() += 1;
+
+    let (map_collision_shape, map_collision_radius, map_collision_half_segment) =
+        if record.hashcode == 0x1000_0004 {
+            summary.robots_map_collision_records += 1;
+            *summary
+                .robots_map_collision_mode_counts
+                .entry(format!("0x{:02X}", record.shape_mode))
+                .or_default() += 1;
+            if record.shape_mode == 3 {
+                summary.robots_map_collision_capsules += 1;
+                (
+                    "capsule".to_string(),
+                    Some(record.shape_scalars[1]),
+                    Some(record.shape_scalars[0]),
+                )
+            } else {
+                summary.robots_map_collision_spheres += 1;
+                ("sphere".to_string(), Some(record.shape_scalars[0]), None)
+            }
+        } else {
+            (String::new(), None, None)
+        };
+
+    rows.push(EntityAnimDatumRow {
+        edb_uid,
+        edb_path: path.to_string_lossy().into_owned(),
+        entity_index,
+        entity_hashcode,
+        entity_name: entity_name.to_string(),
+        datum_index,
+        datum_hashcode: record.hashcode,
+        datum_name,
+        raw_word_04: record.raw_word_04,
+        shape_mode: record.shape_mode,
+        raw_byte_07: record.raw_byte_07,
+        shape_scalars: record.shape_scalars,
+        local_center: record.local_center,
+        local_orientation: record.local_orientation,
+        map_collision_shape,
+        map_collision_radius,
+        map_collision_half_segment,
+    });
+}
+
+fn append_surface_face_rows(
+    rows: &mut Vec<EntitySurfaceFaceRow>,
+    edb_uid: u32,
+    path: &Path,
+    entity_index: usize,
+    entity_hashcode: u32,
+    entity_name: &str,
+    entity: &EXGeoEntity,
+) {
+    let EXGeoEntity::Mesh(mesh) = entity else {
+        return;
+    };
+    let Some(face_info) = &mesh.robots_face_info else {
+        return;
+    };
+    for (group_index, group) in face_info.groups.iter().enumerate() {
+        for (face_index, face) in group.faces.iter().enumerate() {
+            let surface_mask = face.surface_metadata & 0x78;
+            if surface_mask == 0 {
+                continue;
+            }
+            let (isolated_runtime_category, isolated_runtime_role) =
+                robots_v248_isolated_surface_category(surface_mask);
+            rows.push(EntitySurfaceFaceRow {
+                edb_uid,
+                edb_path: path.to_string_lossy().into_owned(),
+                entity_index,
+                entity_hashcode,
+                entity_name: entity_name.to_string(),
+                group_index,
+                face_index,
+                vertex_indices: face.vertex_indices,
+                surface_metadata: face.surface_metadata,
+                surface_mask,
+                isolated_runtime_category,
+                isolated_runtime_role: isolated_runtime_role.to_string(),
+            });
+        }
+    }
 }
 
 fn row_from_entity(
@@ -369,6 +617,28 @@ fn row_from_entity(
         _ => (None, None, None, None, None, None, None),
     };
 
+    let (robots_face_info_groups, robots_face_info_faces, robots_face_info_surface_masks) =
+        match &entity {
+            EXGeoEntity::Mesh(mesh) => mesh
+                .robots_face_info
+                .as_ref()
+                .map(|face_info| {
+                    let groups = face_info.groups.len();
+                    let mut faces = 0usize;
+                    let mut surface_masks = BTreeMap::<String, usize>::new();
+                    for group in &face_info.groups {
+                        faces += group.faces.len();
+                        for face in &group.faces {
+                            let key = format!("0x{:02X}", face.surface_metadata & 0x78);
+                            *surface_masks.entry(key).or_default() += 1;
+                        }
+                    }
+                    (Some(groups), Some(faces), Some(surface_masks))
+                })
+                .unwrap_or((None, None, None)),
+            _ => (None, None, None),
+        };
+
     let (flags, sort_value, render_order, bounds_min, bounds_max) = base
         .map(|base| {
             (
@@ -420,6 +690,9 @@ fn row_from_entity(
         face_info_next_known_offset,
         face_collision_to_next_known_span,
         face_info_to_next_known_span,
+        robots_face_info_groups,
+        robots_face_info_faces,
+        robots_face_info_surface_masks,
     }
 }
 
@@ -536,10 +809,28 @@ fn format_offset(value: Option<u64>) -> String {
         .unwrap_or_default()
 }
 
+fn format_surface_masks(value: Option<&BTreeMap<String, usize>>) -> String {
+    value
+        .map(|counts| {
+            counts
+                .iter()
+                .map(|(mask, count)| format!("{mask}:{count}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default()
+}
+
 fn write_rows_tsv(path: &Path, rows: &[EntityReportRow]) -> Result<()> {
     let mut output = String::from(
         "edb_uid	edb_path	entity_index	entity_hashcode	entity_name	hash_scope	local_index	local_index_matches	runtime_coverage	file_offset	object_type	object_kind	parse_status	flags	sort_value	render_order	bounds_min	bounds_max	vertices	indices	strips	triangles	child_entities	face_collision_offset	face_info_offset	index_data_offset	face_collision_next_known_offset	face_info_next_known_offset	face_collision_to_next_known_span	face_info_to_next_known_span
 ",
+    );
+    if output.ends_with('\n') {
+        output.pop();
+    }
+    output.push_str(
+        "\trobots_face_info_groups\trobots_face_info_faces\trobots_face_info_surface_masks\n",
     );
     for row in rows {
         output.push_str(&format!(
@@ -602,6 +893,87 @@ fn write_rows_tsv(path: &Path, rows: &[EntityReportRow]) -> Result<()> {
             row.face_info_to_next_known_span
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
+        ));
+        if output.ends_with('\n') {
+            output.pop();
+        }
+        output.push_str(&format!(
+            "\t{}\t{}\t{}\n",
+            row.robots_face_info_groups
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            row.robots_face_info_faces
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            format_surface_masks(row.robots_face_info_surface_masks.as_ref()),
+        ));
+    }
+    std::fs::write(path, output)?;
+    Ok(())
+}
+
+fn write_anim_datums_tsv(path: &Path, rows: &[EntityAnimDatumRow]) -> Result<()> {
+    let mut output = String::from(
+        "edb_uid\tedb_path\tentity_index\tentity_hashcode\tentity_name\tdatum_index\tdatum_hashcode\tdatum_name\traw_word_04\tshape_mode\traw_byte_07\tshape_scalars\tlocal_center\tlocal_orientation\tmap_collision_shape\tmap_collision_radius\tmap_collision_half_segment\n",
+    );
+    for row in rows {
+        output.push_str(&format!(
+            "0x{:08X}\t{}\t{}\t0x{:08X}\t{}\t{}\t0x{:08X}\t{}\t0x{:04X}\t0x{:02X}\t0x{:02X}\t{:.9},{:.9},{:.9}\t{:.9},{:.9},{:.9}\t{:.9},{:.9},{:.9},{:.9}\t{}\t{}\t{}\n",
+            row.edb_uid,
+            row.edb_path,
+            row.entity_index,
+            row.entity_hashcode,
+            row.entity_name,
+            row.datum_index,
+            row.datum_hashcode,
+            row.datum_name,
+            row.raw_word_04,
+            row.shape_mode,
+            row.raw_byte_07,
+            row.shape_scalars[0],
+            row.shape_scalars[1],
+            row.shape_scalars[2],
+            row.local_center[0],
+            row.local_center[1],
+            row.local_center[2],
+            row.local_orientation[0],
+            row.local_orientation[1],
+            row.local_orientation[2],
+            row.local_orientation[3],
+            row.map_collision_shape,
+            row.map_collision_radius
+                .map(|value| format!("{value:.9}"))
+                .unwrap_or_default(),
+            row.map_collision_half_segment
+                .map(|value| format!("{value:.9}"))
+                .unwrap_or_default(),
+        ));
+    }
+    std::fs::write(path, output)?;
+    Ok(())
+}
+
+fn write_surface_faces_tsv(path: &Path, rows: &[EntitySurfaceFaceRow]) -> Result<()> {
+    let mut output = String::from(
+        "edb_uid\tedb_path\tentity_index\tentity_hashcode\tentity_name\tgroup_index\tface_index\tvertex_indices\tsurface_metadata\tsurface_mask\tisolated_runtime_category\tisolated_runtime_role\n",
+    );
+    for row in rows {
+        output.push_str(&format!(
+            "0x{:08X}\t{}\t{}\t0x{:08X}\t{}\t{}\t{}\t{},{},{}\t0x{:04X}\t0x{:02X}\t0x{:04X}\t{}\n",
+            row.edb_uid,
+            row.edb_path,
+            row.entity_index,
+            row.entity_hashcode,
+            row.entity_name,
+            row.group_index,
+            row.face_index,
+            row.vertex_indices[0],
+            row.vertex_indices[1],
+            row.vertex_indices[2],
+            row.surface_metadata,
+            row.surface_mask,
+            row.isolated_runtime_category,
+            row.isolated_runtime_role,
         ));
     }
     std::fs::write(path, output)?;

@@ -38,7 +38,10 @@ pub struct UXGeoTextItem {
     pub hashcode: u32,
     pub text: String,
     pub sound_hashcode: u32,
-    // pub userdata: EXRelPtr,
+    /// First two native dwords behind `EXGeoTextItem::userdata`. Robots'
+    /// message queue copies these exact words into record slots +0x18/+0x1C.
+    /// `None` means the serialized relative pointer is null.
+    pub userdata_words: Option<[u32; 2]>,
 }
 
 impl UXGeoSpreadsheet {
@@ -72,10 +75,23 @@ impl UXGeoSpreadsheet {
                             let item = edb
                                 .read_type::<EXGeoTextItem>(edb.endian)
                                 .context("Failed to read textitem")?;
+                            let userdata_words = if item.userdata.offset_relative() == 0 {
+                                None
+                            } else {
+                                let saved = edb.stream_position()?;
+                                edb.seek(SeekFrom::Start(item.userdata.offset_absolute()))?;
+                                let words = [
+                                    edb.read_type::<u32>(edb.endian)?,
+                                    edb.read_type::<u32>(edb.endian)?,
+                                ];
+                                edb.seek(SeekFrom::Start(saved))?;
+                                Some(words)
+                            };
                             section.entries.push(UXGeoTextItem {
                                 hashcode: item.hashcode,
                                 text: item.string.to_string(),
                                 sound_hashcode: item.sound_hashcode,
+                                userdata_words,
                             });
                         }
 

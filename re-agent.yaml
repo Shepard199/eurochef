@@ -55,10 +55,10 @@ validation:
   copy_project: true
   project_root: .
   build_commands:
-  - cargo check --workspace
+  - [cmd.exe, /d, /c, CARGO.cmd, check, --workspace]
   test_commands:
-  - cargo test -p eurochef-edb
-  - cargo test -p eurochef-gui
+  - [cmd.exe, /d, /c, CARGO.cmd, test, -p, eurochef-edb]
+  - [cmd.exe, /d, /c, CARGO.cmd, test, -p, eurochef-gui]
   runtime_commands: []
   require_build: true
   require_tests: true

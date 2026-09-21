@@ -97,6 +97,16 @@ impl Default for NativeSoundProfile {
     }
 }
 
+/// PC Robots host bridge from serialized `SoundDetails` UID to the playable SFX
+/// bank namespace. Native SoundDetails lookup already keys by the low 20 bits;
+/// the shipped TextGroup corpus confirms the corresponding `0x1AF0....` bank
+/// entry for every referenced voiced message. Keep this conversion at the audio
+/// adapter boundary rather than mutating gameplay/message UIDs.
+pub(crate) fn robots_sound_details_bank_uid(sound_details_uid: u32) -> Option<u32> {
+    (sound_details_uid & 0x7F00_0000 == 0x1A00_0000)
+        .then_some(0x1AF0_0000 | (sound_details_uid & 0x000F_FFFF))
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct NativeSoundProfileCatalog {
     profiles: HashMap<u32, NativeSoundProfile>,
@@ -677,6 +687,226 @@ mod tests {
         assert_eq!(flag_counts[7], 86, "Polyphonic profile count changed");
         assert_eq!(delayed, 60);
         assert_eq!(doppler_nonzero, 0);
+    }
+
+    #[test]
+    fn real_robots_text_group_voice_uids_resolve_to_sound_details_when_requested() {
+        use eurochef_edb::{edb::EdbFile, versions::Platform};
+        use eurochef_shared::robots_runtime::npc_text::read_robots_text_groups;
+        use std::{fs::File, io::BufReader};
+
+        let (Ok(sound_root), Ok(game_root)) = (
+            std::env::var("ROBOTS_SOUND_PROFILE_ROOT"),
+            std::env::var("EUROCHEF_ROBOTS_GAME_ROOT"),
+        ) else {
+            return;
+        };
+        let profiles = NativeSoundProfileCatalog::load_pc_robots(Path::new(&sound_root))
+            .expect("load Robots native sound profiles");
+        let sounds = NativeSoundCatalog::load_pc_robots(Path::new(&sound_root))
+            .expect("load Robots native sound sources");
+        let text_path = Path::new(&game_root)
+            .join("_eurotools_out/extracted_main/robots/binary/_bin_pc/d01_text.edb");
+        let file = File::open(text_path).expect("open real D01 text EDB");
+        let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+            .expect("parse real D01 text EDB");
+        let text = read_robots_text_groups(&mut edb).expect("read real TextGroups");
+        let voiced = text
+            .groups
+            .values()
+            .flatten()
+            .filter_map(|uid| text.message_definition(*uid))
+            .filter(|message| message.sound_uid & 0x7F00_0000 == 0x1A00_0000)
+            .collect::<Vec<_>>();
+        assert_eq!(voiced.len(), 229);
+        let missing = voiced
+            .iter()
+            .filter_map(|message| {
+                profiles
+                    .profile(message.sound_uid)
+                    .is_none()
+                    .then_some(message.sound_uid)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "TextGroup SoundDetails missing: {missing:08X?}"
+        );
+        assert!(voiced.iter().all(|message| {
+            profiles.profile(message.sound_uid).is_some_and(|profile| {
+                profile.duration_seconds.is_finite() && profile.duration_seconds >= 0.0
+            })
+        }));
+        assert!(voiced.iter().all(|message| {
+            robots_sound_details_bank_uid(message.sound_uid)
+                .is_some_and(|bank_uid| sounds.sounds.contains_key(&bank_uid))
+        }));
+    }
+
+    #[test]
+    fn real_m10_cutscene_audio_latches_match_sounddetails_when_requested() {
+        use std::{fs::File, io::BufReader};
+
+        use eurochef_edb::{edb::EdbFile, versions::Platform};
+        use eurochef_shared::{
+            robots_runtime::{
+                cutscene::scan_cutscene_script_audio,
+                events::{event_type, RobotsScriptEventView},
+            },
+            script::{UXGeoScript, UXGeoScriptCommandData},
+        };
+
+        let (Ok(sound_root), Ok(game_root)) = (
+            std::env::var("ROBOTS_SOUND_PROFILE_ROOT"),
+            std::env::var("EUROCHEF_ROBOTS_GAME_ROOT"),
+        ) else {
+            return;
+        };
+        let profiles = NativeSoundProfileCatalog::load_pc_robots(Path::new(&sound_root))
+            .expect("load Robots native SoundDetails");
+        let path = Path::new(&game_root)
+            .join("_eurotools_out/extracted_main/robots/binary/_bin_pc/m10_c01.edb");
+        let file = File::open(path).expect("open real M10_C01 EDB");
+        let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+            .expect("parse real M10_C01 EDB");
+        let scripts = UXGeoScript::read_all(&mut edb).expect("read real M10_C01 Scripts");
+        let mut scans = scripts
+            .iter()
+            .filter(|script| (0x0400_028E..=0x0400_0291).contains(&script.hashcode))
+            .map(|script| {
+                let scan = scan_cutscene_script_audio(script, |sound_uid| {
+                    if sound_uid & 0x7F00_0000 != 0x1A00_0000 {
+                        return None;
+                    }
+                    let details_uid = 0x1A00_0000 | (sound_uid & 0x000F_FFFF);
+                    profiles
+                        .profile(details_uid)
+                        .map(|profile| profile.sample_streamed)
+                });
+                (script.hashcode, scan)
+            })
+            .collect::<Vec<_>>();
+        scans.sort_by_key(|(uid, _)| *uid);
+        assert_eq!(
+            scans,
+            vec![
+                (
+                    0x0400_028E,
+                    eurochef_shared::robots_runtime::cutscene::RobotsCutsceneAudioScan {
+                        streamed_sfx_present_16c3: false,
+                        music_present_16c4: true,
+                    },
+                ),
+                (
+                    0x0400_028F,
+                    eurochef_shared::robots_runtime::cutscene::RobotsCutsceneAudioScan {
+                        streamed_sfx_present_16c3: false,
+                        music_present_16c4: true,
+                    },
+                ),
+                (
+                    0x0400_0290,
+                    eurochef_shared::robots_runtime::cutscene::RobotsCutsceneAudioScan {
+                        streamed_sfx_present_16c3: false,
+                        music_present_16c4: true,
+                    },
+                ),
+                (
+                    0x0400_0291,
+                    eurochef_shared::robots_runtime::cutscene::RobotsCutsceneAudioScan {
+                        streamed_sfx_present_16c3: false,
+                        music_present_16c4: true,
+                    },
+                ),
+            ]
+        );
+        let cutscene_commands = scripts
+            .iter()
+            .filter(|script| (0x0400_028E..=0x0400_0291).contains(&script.hashcode))
+            .flat_map(|script| script.commands.iter())
+            .collect::<Vec<_>>();
+        let swap_character_commands = cutscene_commands
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command.data,
+                    UXGeoScriptCommandData::Event {
+                        event_type: event_type::SWAP_CHARACTER,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(swap_character_commands, 0);
+        let mut event_census = std::collections::BTreeMap::<u32, usize>::new();
+        let mut event_rows = Vec::<(u32, i16, u16, [Option<u32>; 8])>::new();
+        for command in cutscene_commands {
+            if let Some(event) = RobotsScriptEventView::from_command(command) {
+                *event_census.entry(event.event_type).or_default() += 1;
+                event_rows.push((
+                    event.event_type,
+                    command.start,
+                    command.length,
+                    event.native_args(),
+                ));
+            }
+        }
+        assert_eq!(
+            event_census,
+            std::collections::BTreeMap::from([
+                (event_type::STATE_MARKER, 1),
+                (event_type::SET_ALTERNATE_STATE, 3),
+                (event_type::MESSAGE_RELAY_SPECIFIC, 2),
+                (event_type::SHOW_MESSAGE, 2),
+                (event_type::INVENTORY_ADD, 1),
+                (event_type::SHAKE_CAMERA, 1),
+                (event_type::PERFORM_ACTION_CUTSCENE, 4),
+            ])
+        );
+        assert!(event_rows.iter().any(|(event, start, length, args)| {
+            *event == event_type::SHAKE_CAMERA
+                && *start == 34
+                && *length == 43
+                && args[0] == Some(10.0f32.to_bits())
+                && args[1] == Some(20.0f32.to_bits())
+                && args[2] == Some(1)
+        }));
+        assert!(event_rows.iter().any(|(event, start, length, args)| {
+            *event == event_type::SHOW_MESSAGE
+                && *start == 200
+                && *length == 152
+                && args[0] == Some(0x4500_034E)
+                && args[1] == Some(0)
+                && args[4] == Some(u32::MAX)
+                && args[5] == Some(u32::MAX)
+        }));
+        assert!(event_rows.iter().any(|(event, start, length, args)| {
+            *event == event_type::SHOW_MESSAGE
+                && *start == 92
+                && *length == 84
+                && args[0] == Some(0x4500_034F)
+                && args[1] == Some(0)
+                && args[4] == Some(u32::MAX)
+                && args[5] == Some(u32::MAX)
+        }));
+        assert_eq!(
+            event_rows
+                .iter()
+                .filter(|(event, _, _, args)| {
+                    *event == event_type::PERFORM_ACTION_CUTSCENE && args[0] == Some(3)
+                })
+                .count(),
+            3
+        );
+        assert_eq!(
+            event_rows
+                .iter()
+                .filter(|(event, _, _, args)| {
+                    *event == event_type::PERFORM_ACTION_CUTSCENE && args[0] == Some(0)
+                })
+                .count(),
+            1
+        );
     }
 
     #[test]

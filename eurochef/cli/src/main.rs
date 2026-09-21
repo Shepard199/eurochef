@@ -106,6 +106,10 @@ enum EdbCommand {
         /// File with trigger definitions (assets/triggers_*.yml)
         #[arg(short, long)]
         trigger_defs: Option<String>,
+
+        /// Pipeline manifest.tsv used to resolve cross-EDB visual Scripts
+        #[arg(long)]
+        script_manifest: Option<String>,
     },
     /// Build a shipped-corpus EXGeoParticle structural report from a pipeline manifest
     ParticleReport {
@@ -214,6 +218,14 @@ enum EdbCommand {
         /// Override for platform detection
         #[arg(value_enum, short, long, ignore_case = true)]
         platform: Option<PlatformArg>,
+    },
+    /// Build an owner-scoped Robots Script library from a corpus manifest
+    ScriptLibrary {
+        /// Pipeline manifest.tsv containing the shipped EDB corpus
+        manifest: String,
+
+        /// Output folder (default: "./scripts/library/")
+        output_folder: Option<String>,
     },
     /// Extract textures
     Textures {
@@ -334,7 +346,14 @@ fn handle_edb(cmd: EdbCommand) -> anyhow::Result<()> {
             platform,
             output_folder,
             trigger_defs,
-        } => edb::maps::execute_command(filename, platform, output_folder, trigger_defs),
+            script_manifest,
+        } => edb::maps::execute_command(
+            filename,
+            platform,
+            output_folder,
+            trigger_defs,
+            script_manifest,
+        ),
         EdbCommand::ParticleReport {
             manifest,
             output_folder,
@@ -394,6 +413,10 @@ fn handle_edb(cmd: EdbCommand) -> anyhow::Result<()> {
             platform,
             output_folder,
         } => edb::scripts::execute_command(filename, platform, output_folder),
+        EdbCommand::ScriptLibrary {
+            manifest,
+            output_folder,
+        } => edb::scripts::execute_library_command(manifest, output_folder),
         EdbCommand::Textures {
             filename,
             platform,

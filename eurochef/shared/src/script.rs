@@ -111,20 +111,33 @@ pub enum RobotsScriptPayloadDiagnostic {
         object_11c: f32,
     },
     /// Opcode 13 reaches subtype 8, creator 0x004FA1B6 and
-    /// EXItemAnimator_Collision initializer 0x005677EC.
+    /// EXItemAnimator_Collision initializer 0x005677EC. Its 0x30-byte datum is
+    /// returned for HT_AnimDatum_MapCollisionCapsule (0x10000004) queries.
     Collision {
-        /// Payload +0x00 -> EXItemAnimator_Collision +0x140.
+        /// Payload +0x00 -> EXItemAnimator_Collision +0x140. Preserved raw.
         object_140: u32,
-        /// Payload +0x04 low byte -> EXItemAnimator_Collision +0x13F.
-        object_13f_mode: u8,
+        /// Payload +0x04 low byte -> collision datum +0x2F (object +0x13F).
+        /// Native 0x004D64C0 treats mode 3 as a capsule segment; every other
+        /// mode takes the compact sphere path. The shipped script corpus uses 1.
+        datum_shape_mode: u8,
         /// Payload +0x05..+0x07. Preserved; 0x005677EC does not read it.
         raw_mode_tail: [u8; 3],
-        /// Payload +0x08 -> EXItemAnimator_Collision +0x130.
-        object_130: f32,
-        /// Payload +0x0C -> EXItemAnimator_Collision +0x134.
-        object_134: f32,
-        /// Payload +0x10 -> EXItemAnimator_Collision +0x138.
-        object_138: f32,
+        /// Payload +0x08 -> collision datum +0x20 (object +0x130).
+        /// This is only the serialized seed. Collision slot8 0x005678FA later
+        /// refreshes datum +0x20..+0x28 from animator scale XYZ.
+        serialized_shape_scalar_0: f32,
+        /// Payload +0x0C -> collision datum +0x24 (object +0x134).
+        serialized_shape_scalar_1: f32,
+        /// Payload +0x10 -> collision datum +0x28 (object +0x138).
+        serialized_shape_scalar_2: f32,
+    },
+    HandlerNoOpCallback {
+        raw_value: u32,
+    },
+    Loop {
+        mode: u32,
+        repeat_count: i32,
+        target_frame: u32,
     },
 }
 
@@ -159,16 +172,33 @@ impl RobotsScriptPayloadDiagnostic {
             ),
             Self::Collision {
                 object_140,
-                object_13f_mode,
+                datum_shape_mode,
                 raw_mode_tail,
-                object_130,
-                object_134,
-                object_138,
+                serialized_shape_scalar_0,
+                serialized_shape_scalar_1,
+                serialized_shape_scalar_2,
+            } => {
+                let shape = if *datum_shape_mode == 3 {
+                    "capsule"
+                } else {
+                    "sphere"
+                };
+                format!(
+                    "native Collision -> HT_AnimDatum_MapCollisionCapsule: raw+00=0x{object_140:08X}, datum_mode=0x{datum_shape_mode:02X} ({shape}), raw+05={:02X}{:02X}{:02X}, serialized_shape_seed=[{serialized_shape_scalar_0:.9}, {serialized_shape_scalar_1:.9}, {serialized_shape_scalar_2:.9}]; runtime slot8 refreshes datum+0x20/+0x24/+0x28 from animator scale XYZ; native cache uses sphere radius +0x20 unless mode=3, where +0x20=half-segment and +0x24=radius",
+                    raw_mode_tail[0],
+                    raw_mode_tail[1],
+                    raw_mode_tail[2],
+                )
+            }
+            Self::HandlerNoOpCallback { raw_value } => format!(
+                "native Handler no-op callback: raw_value=0x{raw_value:08X}"
+            ),
+            Self::Loop {
+                mode,
+                repeat_count,
+                target_frame,
             } => format!(
-                "native 0x004FA1B6 -> EXItemAnimator_Collision: object+0x140=0x{object_140:08X}, +0x13F=0x{object_13f_mode:02X}, raw+05={:02X}{:02X}{:02X}, +0x130={object_130:.9}, +0x134={object_134:.9}, +0x138={object_138:.9}",
-                raw_mode_tail[0],
-                raw_mode_tail[1],
-                raw_mode_tail[2],
+                "native Loop control: mode={mode}, repeat_count={repeat_count}, target_frame={target_frame}"
             ),
         }
     }
@@ -219,7 +249,7 @@ pub fn robots_script_command_role(opcode: u8, payload_size: usize) -> RobotsScri
         9 => ("Reserved Animator 9", "control", Some(7), true),
         10 => ("Camera", "geometry", Some(1), true),
         11 => ("Event", "event", None, true),
-        12 => ("External Callback", "control", None, true),
+        12 => ("Handler No-op Callback", "control", None, true),
         13 => ("Collision", "geometry", Some(8), true),
         14 => ("Force Feedback", "effect", Some(10), true),
         15 => ("Resource-backed Animator 15", "geometry", Some(9), true),
@@ -271,13 +301,21 @@ pub fn robots_script_payload_diagnostic(
             object_110: float(16)?,
             object_11c: float(20)?,
         }),
+        12 if data.len() >= 4 => Some(RobotsScriptPayloadDiagnostic::HandlerNoOpCallback {
+            raw_value: word(0)?,
+        }),
         13 if data.len() >= 20 => Some(RobotsScriptPayloadDiagnostic::Collision {
             object_140: word(0)?,
-            object_13f_mode: *data.get(4)?,
+            datum_shape_mode: *data.get(4)?,
             raw_mode_tail: data.get(5..8)?.try_into().ok()?,
-            object_130: float(8)?,
-            object_134: float(12)?,
-            object_138: float(16)?,
+            serialized_shape_scalar_0: float(8)?,
+            serialized_shape_scalar_1: float(12)?,
+            serialized_shape_scalar_2: float(16)?,
+        }),
+        16 if data.len() >= 12 => Some(RobotsScriptPayloadDiagnostic::Loop {
+            mode: word(0)?,
+            repeat_count: word(4)? as i32,
+            target_frame: word(8)?,
         }),
         _ => None,
     }
@@ -681,6 +719,9 @@ fn u32_from_index(data: &[u8], endian: Endian, index: usize) -> anyhow::Result<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs::File, io::BufReader, path::Path};
+
+    use eurochef_edb::versions::Platform;
 
     fn command(start: i16, data: UXGeoScriptCommandData) -> UXGeoScriptCommand {
         UXGeoScriptCommand {
@@ -869,13 +910,52 @@ mod tests {
             robots_script_payload_diagnostic(13, &payload),
             Some(RobotsScriptPayloadDiagnostic::Collision {
                 object_140: 0xFFFF_FFFF,
-                object_13f_mode: 1,
+                datum_shape_mode: 1,
                 raw_mode_tail: [0, 0, 0],
-                object_130: 0.5,
-                object_134: 0.0,
-                object_138: 0.0,
+                serialized_shape_scalar_0: 0.5,
+                serialized_shape_scalar_1: 0.0,
+                serialized_shape_scalar_2: 0.0,
             })
         );
+    }
+
+    #[test]
+    fn real_robots_v248_dog_move_animscript_when_game_root_is_configured() {
+        let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
+            return;
+        };
+        let path = Path::new(&game_root)
+            .join("_eurotools_out")
+            .join("extracted_main")
+            .join("robots")
+            .join("binary")
+            .join("_bin_pc")
+            .join("eq01_dog.edb");
+        let file = File::open(&path).expect("open eq01_dog.edb");
+        let mut edb =
+            EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc).expect("parse eq01_dog.edb");
+        let header = edb
+            .header
+            .animscript_list
+            .iter()
+            .find(|header| header.hashcode == 0x8400_0016)
+            .cloned()
+            .expect("DogBot Move AnimScript 0x84000016");
+        let script = UXGeoScript::read(&header, &mut edb).expect("read DogBot Move AnimScript");
+        let animation = script
+            .commands
+            .iter()
+            .find_map(|command| match command.data {
+                UXGeoScriptCommandData::Animation {
+                    skin_file,
+                    skin_hashcode,
+                    anim_file,
+                    anim_hashcode,
+                } => Some((skin_file, skin_hashcode, anim_file, anim_hashcode)),
+                _ => None,
+            })
+            .expect("DogBot Move Animation command");
+        assert_eq!(animation, (u32::MAX, u32::MAX, u32::MAX, 0x8300_0016));
     }
 
     #[test]

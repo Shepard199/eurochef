@@ -9,7 +9,10 @@ use eurochef_edb::{
     binrw::BinReaderExt,
     edb::EdbFile,
     entity::{EXGeoEntity, EXGeoMapZoneEntity},
-    map::{EXGeoLight, EXGeoMap, EXGeoPath, EXGeoPlacement, EXGeoSound, EXGeoTriggerEngineOptions},
+    map::{
+        EXGeoLight, EXGeoMap, EXGeoMapZone, EXGeoPath, EXGeoPlacement, EXGeoSound,
+        EXGeoTriggerEngineOptions,
+    },
     robots_provenance::{
         decode_script_create_flags, RobotsScriptCreateFlags, RobotsScriptCreatorProvenance,
         RobotsScriptSpawnFunctionProvenance, ROBOTS_PC_EXE_SHA256,
@@ -21,7 +24,7 @@ use eurochef_edb::{
 };
 
 use eurochef_shared::{
-    maps::{TriggerInformation, UXGeoTrigger},
+    maps::{DefinitionDataType, TriggerInformation, UXGeoTrigger},
     script::{UXGeoScript, UXGeoScriptCommand, UXGeoScriptCommandData},
 };
 use glam::{Quat, Vec3};
@@ -29,11 +32,14 @@ use serde::Serialize;
 
 use crate::PlatformArg;
 
+use super::resource_file_stem;
+
 pub fn execute_command(
     filename: String,
     platform_arg: Option<PlatformArg>,
     output_folder: Option<String>,
     trigger_defs_file: Option<String>,
+    script_manifest: Option<String>,
 ) -> anyhow::Result<()> {
     let output_folder = output_folder.unwrap_or(format!(
         "./maps/{}/",
@@ -106,6 +112,12 @@ pub fn execute_command(
         false,
     )?;
 
+    let script_catalog = build_cross_edb_script_catalog(
+        header.hashcode,
+        &scripts,
+        script_manifest.as_deref().map(Path::new),
+    )?;
+
     for m in &header.map_list {
         edb.seek(std::io::SeekFrom::Start(m.address as u64))?;
 
@@ -119,6 +131,7 @@ pub fn execute_command(
             lights: map.lights.data().clone(),
             sounds: map.sounds.data().clone(),
             skies: map.skies.iter().map(|sky| sky.hashcode).collect(),
+            zones: map.zones.clone(),
             mapzone_entities: vec![],
             triggers: vec![],
             scripts: scripts.clone(),
@@ -203,6 +216,12 @@ pub fn execute_command(
                     trig_type: ttype,
                     trig_subtype: tsubtype,
                     engine_options: trig.engine_options.clone(),
+                    resolved_parameters: resolved_trigger_parameters(
+                        trigger_typemap.as_ref(),
+                        ttype,
+                        tsubtype,
+                        &trig.data,
+                    ),
                     script_create_flags: if ttype == 4 {
                         trig.data[0].map(decode_script_create_flags)
                     } else {
@@ -232,10 +251,21 @@ pub fn execute_command(
 
         outfile.write_all(json_string.as_bytes())?;
 
-        let gui_scene = build_gui_scene_export(&export, header.hashcode);
+        let gui_scene = build_gui_scene_export(&export, header.hashcode, &script_catalog);
+        let runtime_scene = build_robots_runtime_scene_manifest(
+            &export,
+            &gui_scene,
+            output_folder,
+            header.hashcode,
+            m.hashcode,
+        );
         std::fs::write(
             output_folder.join(format!("{:x}.gui_scene.json", m.hashcode)),
             serde_json::to_string_pretty(&gui_scene)?,
+        )?;
+        std::fs::write(
+            output_folder.join(format!("{:x}.robots_scene.json", m.hashcode)),
+            serde_json::to_string_pretty(&runtime_scene)?,
         )?;
     }
 
@@ -270,27 +300,206 @@ pub struct GuiSceneMissing {
     pub reason: &'static str,
 }
 
-fn build_gui_scene_export(export: &EurochefMapExport, current_file: Hashcode) -> GuiSceneExport {
+#[derive(Serialize)]
+pub struct RobotsRuntimeCoordinateContract {
+    pub source_units: &'static str,
+    pub native_transform_storage: &'static str,
+    pub canonical_fbx_target_axis: &'static str,
+    pub canonical_fbx_transform: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct RobotsRuntimeAssetRef {
+    pub resource_kind: &'static str,
+    pub owner_file: u32,
+    pub uid: u32,
+    pub canonical_stem: String,
+    pub canonical_import_file: Option<String>,
+    pub sources: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct RobotsRuntimeZoneCollisionRef {
+    pub zone_index: usize,
+    pub entity_refptr: u32,
+    pub collision_file: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RobotsRuntimeScriptLibraryContract {
+    pub schema: &'static str,
+    pub identity: &'static str,
+    pub owner_index_pattern: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct RobotsRuntimeSceneManifest<'a> {
+    pub schema: &'static str,
+    pub source_file: u32,
+    pub map_hash: u32,
+    pub coordinate_contract: RobotsRuntimeCoordinateContract,
+    pub script_library: RobotsRuntimeScriptLibraryContract,
+    pub assets: Vec<RobotsRuntimeAssetRef>,
+    pub zone_collisions: Vec<RobotsRuntimeZoneCollisionRef>,
+    pub scene: &'a GuiSceneExport,
+    pub paths: &'a [EXGeoPath],
+    pub placements: &'a [EXGeoPlacement],
+    pub lights: &'a [EXGeoLight],
+    pub sounds: &'a [EXGeoSound],
+    pub skies: &'a [u32],
+    pub zones: &'a [EXGeoMapZone],
+    pub mapzone_entities: &'a [EXGeoMapZoneEntity],
+    pub triggers: &'a [UXGeoTrigger],
+    pub trigger_forensics: &'a [EurochefTriggerForensicExport],
+    pub trigger_scripts: &'a [EurochefTriggerScriptExport],
+    pub decoded_scripts_file: String,
+}
+
+fn build_robots_runtime_asset_refs(scene: &GuiSceneExport) -> Vec<RobotsRuntimeAssetRef> {
+    let mut assets =
+        std::collections::BTreeMap::<(&'static str, u32, u32), RobotsRuntimeAssetRef>::new();
+
+    for item in &scene.items {
+        let (resource_kind, canonical_stem, canonical_import_file) = match item.kind {
+            "placement" | "sky" | "trigger_visual" | "script_entity" => {
+                let stem = resource_file_stem("Entity", item.object_hash);
+                ("Entity", stem.clone(), Some(format!("{stem}.gltf")))
+            }
+            "script_animation_target_resource" => {
+                let base = resource_file_stem("AnimSkin", item.object_hash);
+                let stem = format!("{base}_SK");
+                ("AnimSkin", stem.clone(), Some(format!("{stem}.fbx")))
+            }
+            "script_sound" => {
+                let stem = resource_file_stem("Sound", item.object_hash);
+                ("Sound", stem, None)
+            }
+            _ => continue,
+        };
+        let key = (resource_kind, item.file_hash, item.object_hash);
+        let asset = assets.entry(key).or_insert_with(|| RobotsRuntimeAssetRef {
+            resource_kind,
+            owner_file: item.file_hash,
+            uid: item.object_hash,
+            canonical_stem,
+            canonical_import_file,
+            sources: Vec::new(),
+        });
+        if !asset.sources.contains(&item.source) {
+            asset.sources.push(item.source.clone());
+        }
+    }
+
+    assets.into_values().collect()
+}
+
+fn build_robots_runtime_scene_manifest<'a>(
+    export: &'a EurochefMapExport,
+    scene: &'a GuiSceneExport,
+    output_folder: &Path,
+    source_file: Hashcode,
+    map_hash: Hashcode,
+) -> RobotsRuntimeSceneManifest<'a> {
+    let zone_collisions = export
+        .mapzone_entities
+        .iter()
+        .enumerate()
+        .map(|(zone_index, zone)| {
+            let filename = format!("ref_{}.robots_collision.json", zone.entity_refptr);
+            RobotsRuntimeZoneCollisionRef {
+                zone_index,
+                entity_refptr: zone.entity_refptr,
+                collision_file: output_folder.join(&filename).is_file().then_some(filename),
+            }
+        })
+        .collect();
+
+    RobotsRuntimeSceneManifest {
+        schema: "robots-runtime-scene-v1",
+        source_file,
+        map_hash,
+        coordinate_contract: RobotsRuntimeCoordinateContract {
+            source_units: "EuroChef world units (meters in existing glTF path)",
+            native_transform_storage: "manifest transforms remain in native EuroChef space",
+            canonical_fbx_target_axis: "MayaZUp (+Z up, -Y front, right-handed)",
+            canonical_fbx_transform: "(-x, -z, y) * 100",
+        },
+        script_library: RobotsRuntimeScriptLibraryContract {
+            schema: "robots-script-library-v1",
+            identity: "(owner_file, script_uid)",
+            owner_index_pattern: "{owner_file:08X}/SCRIPTS_INDEX.json",
+        },
+        assets: build_robots_runtime_asset_refs(scene),
+        zone_collisions,
+        scene,
+        paths: &export.paths,
+        placements: &export.placements,
+        lights: &export.lights,
+        sounds: &export.sounds,
+        skies: &export.skies,
+        zones: &export.zones,
+        mapzone_entities: &export.mapzone_entities,
+        triggers: &export.triggers,
+        trigger_forensics: &export.trigger_forensics,
+        trigger_scripts: &export.trigger_scripts,
+        decoded_scripts_file: format!("{source_file:08X}.scripts.json"),
+    }
+}
+
+type CrossEdbScriptCatalog = std::collections::BTreeMap<(Hashcode, Hashcode), UXGeoScript>;
+
+fn build_cross_edb_script_catalog(
+    current_file: Hashcode,
+    current_scripts: &[UXGeoScript],
+    manifest_path: Option<&Path>,
+) -> anyhow::Result<CrossEdbScriptCatalog> {
+    let mut scripts = current_scripts
+        .iter()
+        .cloned()
+        .map(|script| ((current_file, script.hashcode), script))
+        .collect::<CrossEdbScriptCatalog>();
+    let Some(manifest_path) = manifest_path else {
+        return Ok(scripts);
+    };
+
+    let paths = super::read_corpus_manifest_paths(manifest_path)?;
+    let mut files_scanned = 0usize;
+    for source_path in paths {
+        let platform = Platform::from_path(&source_path)
+            .with_context(|| format!("failed to detect platform for {}", source_path.display()))?;
+        if platform != Platform::Pc {
+            continue;
+        }
+        let file = File::open(&source_path)
+            .with_context(|| format!("failed to open corpus EDB {}", source_path.display()))?;
+        let mut edb = EdbFile::new(Box::new(BufReader::new(file)), platform)
+            .with_context(|| format!("failed to parse corpus EDB {}", source_path.display()))?;
+        let owner_file = edb.header.hashcode;
+        files_scanned += 1;
+        for script in UXGeoScript::read_all(&mut edb)
+            .with_context(|| format!("failed to read Scripts from {}", source_path.display()))?
+        {
+            scripts
+                .entry((owner_file, script.hashcode))
+                .or_insert(script);
+        }
+    }
+    info!(
+        manifest = %manifest_path.display(),
+        files = files_scanned,
+        scripts = scripts.len(),
+        "built owner-scoped cross-EDB Script catalog for map scene export"
+    );
+    Ok(scripts)
+}
+
+fn build_gui_scene_export(
+    export: &EurochefMapExport,
+    current_file: Hashcode,
+    scripts: &CrossEdbScriptCatalog,
+) -> GuiSceneExport {
     let mut items = Vec::new();
     let mut missing = Vec::new();
-    let scripts = export
-        .scripts
-        .iter()
-        .map(|script| (script.hashcode, script))
-        .collect::<std::collections::BTreeMap<_, _>>();
-
-    for (index, zone) in export.mapzone_entities.iter().enumerate() {
-        push_item(
-            &mut items,
-            "mapzone",
-            format!("mapzone[{index}]"),
-            current_file,
-            zone.entity_refptr,
-            Vec3::ZERO,
-            Quat::IDENTITY,
-            Vec3::ONE,
-        );
-    }
 
     for (index, placement) in export.placements.iter().enumerate() {
         let position = Vec3::from(placement.position);
@@ -381,7 +590,7 @@ fn build_gui_scene_export(export: &EurochefMapExport, current_file: Hashcode) ->
 fn queue_object(
     items: &mut Vec<GuiSceneItem>,
     missing: &mut Vec<GuiSceneMissing>,
-    scripts: &std::collections::BTreeMap<Hashcode, &UXGeoScript>,
+    scripts: &CrossEdbScriptCatalog,
     file_hash: Hashcode,
     object_hash: Hashcode,
     position: Vec3,
@@ -403,7 +612,7 @@ fn queue_object(
             scale,
         ),
         0x0400_0000 | 0x8400_0000 => {
-            if scripts.contains_key(&object_hash) {
+            if scripts.contains_key(&(file_hash, object_hash)) {
                 render_script_scene(
                     items,
                     missing,
@@ -440,7 +649,7 @@ fn queue_object(
 fn render_script_scene(
     items: &mut Vec<GuiSceneItem>,
     missing: &mut Vec<GuiSceneMissing>,
-    scripts: &std::collections::BTreeMap<Hashcode, &UXGeoScript>,
+    scripts: &CrossEdbScriptCatalog,
     current_file: Hashcode,
     script_hashcode: Hashcode,
     current_time: f32,
@@ -449,12 +658,13 @@ fn render_script_scene(
     scale: Vec3,
     source: String,
     static_scene: bool,
-    mut ancestry: Vec<Hashcode>,
+    mut ancestry: Vec<(Hashcode, Hashcode)>,
 ) {
-    if ancestry.len() >= 64 || ancestry.contains(&script_hashcode) {
+    let script_key = (current_file, script_hashcode);
+    if ancestry.len() >= 64 || ancestry.contains(&script_key) {
         return;
     }
-    let Some(script) = scripts.get(&script_hashcode).copied() else {
+    let Some(script) = scripts.get(&script_key) else {
         missing.push(GuiSceneMissing {
             source,
             file_hash: current_file,
@@ -463,7 +673,7 @@ fn render_script_scene(
         });
         return;
     };
-    ancestry.push(script_hashcode);
+    ancestry.push(script_key);
 
     let current_frame = (script.frame_at_time(current_time) + 1.0e-4).floor() as isize;
     for command in script
@@ -542,12 +752,16 @@ fn render_script_scene(
                     );
                 }
             }
-            UXGeoScriptCommandData::Sound { hashcode } => missing.push(GuiSceneMissing {
-                source: format!("{source}/sound"),
-                file_hash: current_file,
-                object_hash: hashcode,
-                reason: "sound_item",
-            }),
+            UXGeoScriptCommandData::Sound { hashcode } => push_item(
+                items,
+                "script_sound",
+                format!("{source}/sound"),
+                current_file,
+                hashcode,
+                child_position,
+                child_rotation,
+                child_scale,
+            ),
             _ => {}
         }
     }
@@ -669,11 +883,20 @@ pub struct EurochefMapExport {
     pub lights: Vec<EXGeoLight>,
     pub sounds: Vec<EXGeoSound>,
     pub skies: Vec<u32>,
+    pub zones: Vec<EXGeoMapZone>,
     pub mapzone_entities: Vec<EXGeoMapZoneEntity>,
     pub triggers: Vec<UXGeoTrigger>,
     pub scripts: Vec<UXGeoScript>,
     pub trigger_forensics: Vec<EurochefTriggerForensicExport>,
     pub trigger_scripts: Vec<EurochefTriggerScriptExport>,
+}
+
+#[derive(Serialize)]
+pub struct EurochefTriggerParameterExport {
+    pub index: u32,
+    pub name: Option<String>,
+    pub dtype: &'static str,
+    pub raw: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -685,8 +908,49 @@ pub struct EurochefTriggerForensicExport {
     pub trig_type: u32,
     pub trig_subtype: u32,
     pub engine_options: EXGeoTriggerEngineOptions,
+    pub resolved_parameters: Vec<EurochefTriggerParameterExport>,
     pub script_create_flags: Option<RobotsScriptCreateFlags>,
     pub incoming_links: Vec<usize>,
+}
+
+fn trigger_dtype_name(dtype: DefinitionDataType) -> &'static str {
+    match dtype {
+        DefinitionDataType::Unknown32 => "unknown32",
+        DefinitionDataType::U32 => "u32",
+        DefinitionDataType::Float => "float",
+        DefinitionDataType::Hashcode => "hashcode",
+        DefinitionDataType::Pickup => "pickup",
+        DefinitionDataType::ScriptCreateFlags => "scriptflags",
+    }
+}
+
+fn resolved_trigger_parameters(
+    typemap: Option<&TriggerInformation>,
+    trig_type: u32,
+    trig_subtype: u32,
+    data: &[Option<u32>],
+) -> Vec<EurochefTriggerParameterExport> {
+    let Some(typemap) = typemap else {
+        return Vec::new();
+    };
+    let mut definitions = std::collections::BTreeMap::new();
+    if let Some(primary) = typemap.triggers.get(&trig_type) {
+        definitions.extend(primary.values.iter().map(|(index, value)| (*index, value)));
+    }
+    if trig_subtype != 0 && trig_subtype != 0x4200_0001 {
+        if let Some(subtype) = typemap.triggers.get(&trig_subtype) {
+            definitions.extend(subtype.values.iter().map(|(index, value)| (*index, value)));
+        }
+    }
+    definitions
+        .into_iter()
+        .map(|(index, value)| EurochefTriggerParameterExport {
+            index,
+            name: value.name.clone(),
+            dtype: trigger_dtype_name(value.dtype),
+            raw: data.get(index as usize).copied().flatten(),
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -707,4 +971,117 @@ fn load_trigger_types<P: AsRef<Path>>(path: P) -> anyhow::Result<TriggerInformat
     let file = File::open(path).unwrap();
     let mut reader = BufReader::new(file);
     Ok(serde_yaml::from_reader(&mut reader)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn robots_runtime_scene_manifest_keeps_native_space_and_versioned_schema() {
+        let export = EurochefMapExport {
+            paths: vec![],
+            placements: vec![],
+            lights: vec![],
+            sounds: vec![],
+            skies: vec![],
+            zones: vec![],
+            mapzone_entities: vec![],
+            triggers: vec![],
+            scripts: vec![],
+            trigger_forensics: vec![],
+            trigger_scripts: vec![],
+        };
+        let scene = GuiSceneExport {
+            source_file: 0x1234_5678,
+            items: vec![
+                GuiSceneItem {
+                    kind: "placement",
+                    source: "placement[0]".to_string(),
+                    file_hash: 0x1234_5678,
+                    object_hash: 0x8200_0001,
+                    position: [0.0; 3],
+                    rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0; 3],
+                },
+                GuiSceneItem {
+                    kind: "script_entity",
+                    source: "placement[1]/cmd[3]".to_string(),
+                    file_hash: 0x1234_5678,
+                    object_hash: 0x8200_0001,
+                    position: [0.0; 3],
+                    rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0; 3],
+                },
+                GuiSceneItem {
+                    kind: "script_animation_target_resource",
+                    source: "placement[2]/animation".to_string(),
+                    file_hash: 0x8765_4321,
+                    object_hash: 0x8300_0007,
+                    position: [0.0; 3],
+                    rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0; 3],
+                },
+                GuiSceneItem {
+                    kind: "script_sound",
+                    source: "placement[2]/sound".to_string(),
+                    file_hash: 0x8765_4321,
+                    object_hash: 0x0A00_0010,
+                    position: [0.0; 3],
+                    rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0; 3],
+                },
+            ],
+            missing: vec![],
+        };
+
+        let manifest = build_robots_runtime_scene_manifest(
+            &export,
+            &scene,
+            Path::new("."),
+            0x1234_5678,
+            0x9ABC_DEF0,
+        );
+        let value = serde_json::to_value(manifest).expect("runtime scene manifest JSON");
+
+        assert_eq!(value["schema"], "robots-runtime-scene-v1");
+        assert_eq!(value["source_file"], 0x1234_5678u32);
+        assert_eq!(value["map_hash"], 0x9ABC_DEF0u32);
+        assert_eq!(
+            value["coordinate_contract"]["native_transform_storage"],
+            "manifest transforms remain in native EuroChef space"
+        );
+        assert_eq!(
+            value["coordinate_contract"]["canonical_fbx_transform"],
+            "(-x, -z, y) * 100"
+        );
+        assert_eq!(
+            value["script_library"]["schema"],
+            "robots-script-library-v1"
+        );
+        assert_eq!(
+            value["script_library"]["identity"],
+            "(owner_file, script_uid)"
+        );
+        assert_eq!(value["decoded_scripts_file"], "12345678.scripts.json");
+        assert_eq!(value["zone_collisions"].as_array().map(Vec::len), Some(0));
+        assert_eq!(value["assets"].as_array().map(Vec::len), Some(3));
+        assert_eq!(value["assets"][0]["resource_kind"], "AnimSkin");
+        assert_eq!(value["assets"][0]["owner_file"], 0x8765_4321u32);
+        assert!(value["assets"][0]["canonical_import_file"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("_SK.fbx")));
+        assert_eq!(value["assets"][1]["resource_kind"], "Entity");
+        assert_eq!(value["assets"][1]["owner_file"], 0x1234_5678u32);
+        assert!(value["assets"][1]["canonical_import_file"]
+            .as_str()
+            .is_some_and(|path| path.ends_with(".gltf")));
+        assert_eq!(
+            value["assets"][1]["sources"].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(value["assets"][2]["resource_kind"], "Sound");
+        assert_eq!(value["assets"][2]["owner_file"], 0x8765_4321u32);
+        assert!(value["assets"][2]["canonical_import_file"].is_null());
+    }
 }

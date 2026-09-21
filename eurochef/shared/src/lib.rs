@@ -5,6 +5,7 @@ pub mod filesystem;
 pub mod hashcodes;
 pub mod maps;
 pub mod platform;
+pub mod robots_runtime;
 pub mod script;
 pub mod spreadsheets;
 pub mod textures;

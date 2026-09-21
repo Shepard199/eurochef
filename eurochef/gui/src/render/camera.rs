@@ -132,6 +132,21 @@ impl ArcBallCamera {
         }
     }
 
+    /// Preserve the current editor view when switching from Fly to Orbit.
+    /// Orbit stores a pivot plus spherical orientation, so reconstruct the pivot
+    /// from the requested camera position, forward direction and existing zoom.
+    pub fn set_pose_from_direction(&mut self, position: Vec3, direction: Vec3) {
+        let direction = direction.normalize_or_zero();
+        if direction.length_squared() <= f32::EPSILON {
+            return;
+        }
+        self.orientation.x = direction.y.clamp(-1.0, 1.0).asin().to_degrees();
+        self.orientation.y = direction.x.atan2(direction.z).to_degrees();
+        let distance = self.zoom();
+        self.pivot = direction * distance - position;
+        self.calculate_matrix();
+    }
+
     // fn eye(&self) -> Vec3 {
     //     (self.camera_inv * Vec4::W).xyz()
     // }
@@ -169,7 +184,10 @@ impl Camera3D for ArcBallCamera {
             if response.dragged_by(egui::PointerButton::Primary)
                 || response.dragged_by(egui::PointerButton::Middle)
             {
-                let mouse_delta = response.drag_delta();
+                // egui Response::drag_delta() is cumulative from drag start. Adding
+                // it every frame makes Orbit accelerate while a button is held.
+                // Pointer::delta() is the actual current-frame mouse motion.
+                let mouse_delta = ui.input(|i| i.pointer.delta());
                 self.orientation += Vec2::new(mouse_delta.y * 0.8, mouse_delta.x) * 0.15;
             }
         }
@@ -180,8 +198,9 @@ impl Camera3D for ArcBallCamera {
             }
 
             if response.dragged_by(egui::PointerButton::Secondary) {
-                self.pivot += (-self.up() * response.drag_delta().y * 0.003) * self.zoom();
-                self.pivot += (self.right() * response.drag_delta().x * 0.003) * self.zoom();
+                let mouse_delta = ui.input(|i| i.pointer.delta());
+                self.pivot += (-self.up() * mouse_delta.y * 0.003) * self.zoom();
+                self.pivot += (self.right() * mouse_delta.x * 0.003) * self.zoom();
             }
         }
 
@@ -275,6 +294,7 @@ pub struct FpsCamera {
     pub right: Vec3,
     pub position: Vec3,
     pub speed_mul: f32,
+    pub invert_mouse_y: bool,
 }
 
 impl Default for FpsCamera {
@@ -285,6 +305,7 @@ impl Default for FpsCamera {
             position: Vec3::ZERO,
             orientation: Vec2::ZERO,
             speed_mul: 1.0,
+            invert_mouse_y: false,
         }
     }
 }
@@ -320,9 +341,20 @@ impl Camera3D for FpsCamera {
                 self.speed_mul = (self.speed_mul + scroll.y * 0.005).clamp(0.0, 5.0);
             }
 
-            let mouse_delta = response.drag_delta();
-            self.orientation += Vec2::new(mouse_delta.y * 0.8, mouse_delta.x) * 0.15;
+            // Fly look is intentionally RMB-only. Response::drag_delta() is
+            // cumulative from drag start, so use the per-frame pointer delta.
+            if response.dragged_by(egui::PointerButton::Secondary) {
+                let mouse_delta = ui.input(|i| i.pointer.delta());
+                let pitch_sign = if self.invert_mouse_y { -1.0 } else { 1.0 };
+                self.orientation +=
+                    Vec2::new(mouse_delta.y * 0.8 * pitch_sign, mouse_delta.x) * 0.15;
+            }
         }
+
+        self.orientation.x = self.orientation.x.clamp(-89.9, 89.9);
+        // Movement in the same frame must use the newly requested yaw/pitch,
+        // rather than the previous frame's basis vectors.
+        self.update_vectors();
 
         let mut speed = delta * zoom_factor(self.speed_mul) * 10.0;
         if ui.input(|i| i.modifiers.shift) {
@@ -355,10 +387,6 @@ impl Camera3D for FpsCamera {
         }
 
         self.position += direction * speed;
-
-        self.orientation.x = self.orientation.x.clamp(-89.9, 89.9);
-
-        self.update_vectors();
     }
 
     fn calculate_matrix(&mut self) -> Mat4 {
@@ -455,5 +483,19 @@ mod tests {
             actual.distance(expected) < 1.0e-5,
             "expected={expected:?} actual={actual:?}"
         );
+    }
+
+    #[test]
+    fn orbit_pose_setter_preserves_requested_position_and_forward() {
+        let mut camera = ArcBallCamera::default();
+        let position = Vec3::new(12.0, 3.0, -7.0);
+        let direction = Vec3::new(0.25, -0.5, 1.0).normalize();
+        camera.set_pose_from_direction(position, direction);
+
+        let inverse = camera.calculate_matrix().inverse();
+        let actual_position = inverse.transform_point3(Vec3::ZERO);
+        let actual_direction = inverse.transform_vector3(Vec3::Z).normalize();
+        assert!(actual_position.distance(position) < 1.0e-5);
+        assert!(actual_direction.distance(direction) < 1.0e-5);
     }
 }

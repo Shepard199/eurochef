@@ -1,5 +1,34 @@
 use super::*;
 
+fn robots_surface_debug_colour(surface_mask: u16) -> Vec3 {
+    match eurochef_edb::entity::robots_v248_isolated_surface_category(surface_mask).0 {
+        1 => Vec3::new(0.25, 0.65, 1.0),
+        2 => Vec3::new(0.15, 0.95, 1.0),
+        4 => Vec3::new(1.0, 0.2, 0.2),
+        32 => Vec3::new(0.25, 1.0, 0.35),
+        64 => Vec3::new(0.95, 0.65, 0.15),
+        128 => Vec3::new(0.75, 0.25, 1.0),
+        256 => Vec3::new(0.45, 0.45, 1.0),
+        _ => Vec3::new(0.9, 0.4, 0.9),
+    }
+}
+
+fn robots_ai_character_render_pose(
+    runtime_controls_presence: bool,
+    ai_state: Option<(bool, Option<(Vec3, Quat)>)>,
+    serialized_position: Vec3,
+    serialized_rotation: Quat,
+) -> Option<(Vec3, Quat)> {
+    if !runtime_controls_presence {
+        return Some((serialized_position, serialized_rotation));
+    }
+    let (xitem_live, live_pose) = ai_state?;
+    if !xitem_live {
+        return None;
+    }
+    Some(live_pose.unwrap_or((serialized_position, serialized_rotation)))
+}
+
 impl MapFrame {
     pub(super) fn show_canvas(
         &mut self,
@@ -14,7 +43,17 @@ impl MapFrame {
         let time: f64 = ui.input(|input| input.time);
         let runtime_start = *self.runtime_motion_start_time.get_or_insert(time);
         let runtime_time = (time - runtime_start).max(0.0) as f32;
+        self.sync_native_sweeper_boss_runtime_map(map);
+        self.sync_runtime_character_bodies(map, runtime_time);
         let runtime_event_snapshots = self.runtime_event_snapshots(map, time);
+        // Runtime events own Sweeper factory creation. Sync dynamic character
+        // bodies after that phase so same-frame spawned XItems are visible to the
+        // common AI/body host without fabricating serialized Trigger records.
+        self.sync_runtime_dynamic_character_bodies(map);
+        if !self.apply_native_camera_viewport || !self.native_camera_viewpoint_valid {
+            self.native_script_trigger_lifecycle_valid = false;
+        }
+        self.advance_native_ai_simulation(map, time);
         let script_start = *self.script_animation_start_time.get_or_insert(time);
         let script_global_time = (time - script_start).max(0.0) as f32;
 
@@ -55,7 +94,7 @@ impl MapFrame {
         self.draw_trigger_inspector(context, map);
         self.draw_sound_inspector(context, map);
 
-        if self.animate_scripts || self.animate_runtime_paths {
+        if self.animate_scripts || self.animate_runtime_paths || self.simulate_ai {
             context.request_repaint();
         }
 
@@ -65,9 +104,11 @@ impl MapFrame {
             .native_camera_runtime
             .as_ref()
             .is_some_and(|runtime| runtime.is_transitioning())
-            || (self.native_camera_live_player_preview
-                && self.apply_native_camera_viewport
-                && self.active_camera_trigger.is_some())
+            || self
+                .native_default_camera_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.is_transitioning())
+            || (self.native_camera_live_player_preview && self.apply_native_camera_viewport)
         {
             context.request_repaint();
         }
@@ -149,6 +190,12 @@ impl MapFrame {
         let streaming_requested = map.native_streaming_request_zone_indices(camera_pos);
         let ready_resource_mask =
             self.sync_native_zone_runtime(map, &visual_frame, &streaming_requested);
+        // The Script registration-mask-0x02 lifecycle may consume this zone
+        // frame on the next native fixed update only when the matrix above was
+        // produced by a validated native Camera viewpoint. Orbit/Fly is editor
+        // state and must never masquerade as gameplay MapZone +0x6B input.
+        self.native_script_trigger_lifecycle_valid =
+            self.apply_native_camera_viewport && self.native_camera_viewpoint_valid;
         let active_visual_zones = visual_frame
             .ordered
             .iter()
@@ -285,6 +332,14 @@ impl MapFrame {
             eprintln!("[Robots] map sky selection: {sky_diagnostic}");
             self.sky_diagnostic = sky_diagnostic;
         }
+        // Keep the full trace for the console and Controls panel, but give the
+        // viewport a scan-friendly status line instead of a wall of diagnostics.
+        let hud_zone = active_zone_index;
+        let hud_sky = sky_selection.and_then(|selection| selection.sky_index);
+        let hud_resource = sky_selection
+            .and_then(|selection| selection.zone_index)
+            .and_then(|index| map.zones.get(index))
+            .map(|zone| zone.zone_resource_ref);
         // 0x004ECB24 only advances cached animator state through
         // 0x004ECB98 -> 0x004E9123. The transform/render submit is the distinct
         // 0x004ECA75 -> 0x004E9188 path invoked by 0x004EC921 for the sky chosen
@@ -324,6 +379,7 @@ impl MapFrame {
         let render_filter = self.render_filter;
         let preview_zone_background = self.preview_zone_background;
         let show_portals = self.show_portals;
+        let show_native_surfaces = self.show_native_surfaces;
         let global_lighting_enabled = self.global_lighting;
         let native_lights_enabled = self.native_lights;
         let native_light_strength = self.native_light_strength;
@@ -331,6 +387,21 @@ impl MapFrame {
 
         let render_store = self.render_store.clone();
         let current_file = self.file;
+        let native_ai_runtime_controls_presence =
+            self.native_script_trigger_lifecycle_valid || self.simulate_ai;
+        let runtime_ai_render_state = map
+            .triggers
+            .iter()
+            .enumerate()
+            .map(|(trigger_index, trigger)| {
+                robots_character_runtime_type(trigger.ttype).map(|_| {
+                    (
+                        self.runtime_ai_character_xitem_live(map.hashcode, trigger_index),
+                        self.runtime_ai_character_live_pose(map.hashcode, trigger_index),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
 
         let collision_renderer = self.collision_renderer.clone();
         let renderers = self.ref_renderers.clone();
@@ -852,33 +923,44 @@ impl MapFrame {
                         }
                     }
 
-                    // Monster/NPC/Fish triggers do not serialize visual_object.
-                    // Robots.exe resolves data[0] through d00_mons.edb and creates
-                    // an XItem from the selected external character EDB. Queue the
-                    // first shipped local Animation Script as a static complete
-                    // model preview; gameplay AI and animation-state selection stay
-                    // outside this geometry reconstruction.
+                    // All shipped XTrigger_AI_Character families resolve their XItem
+                    // resource through MonsterDatabase. In editor-only Fly/Orbit keep
+                    // the old static placement preview; under a validated native camera
+                    // frame, render only an actually-live XItem and use its runtime body
+                    // pose so spawn/despawn and NPC root-motion are visible in the scene.
                     if !resolved_trigger_visuals[i] {
                         if let Some(character) = &t.character_visual {
-                            let rotation = Quat::from_euler(
+                            let ai_state = runtime_ai_render_state.get(i).copied().flatten();
+                            let serialized_rotation = Quat::from_euler(
                                 glam::EulerRot::ZXY,
                                 t.rotation[2],
                                 t.rotation[0],
                                 t.rotation[1],
                             );
-                            let queue_start = render_queue.len();
-                            render_static_script(
-                                trigger_position,
-                                rotation,
-                                t.scale,
-                                character.file,
-                                character.script,
-                                0.0,
-                                &render_store.read(),
-                                &mut |queued| render_queue.push(queued),
-                                vec![],
-                            );
-                            resolved_trigger_visuals[i] = render_queue.len() > queue_start;
+                            let runtime_controls_presence =
+                                ai_state.is_some() && native_ai_runtime_controls_presence;
+                            if let Some((character_position, character_rotation)) =
+                                robots_ai_character_render_pose(
+                                    runtime_controls_presence,
+                                    ai_state,
+                                    trigger_position,
+                                    serialized_rotation,
+                                )
+                            {
+                                let queue_start = render_queue.len();
+                                render_static_script(
+                                    character_position,
+                                    character_rotation,
+                                    t.scale,
+                                    character.file,
+                                    character.script,
+                                    0.0,
+                                    &render_store.read(),
+                                    &mut |queued| render_queue.push(queued),
+                                    vec![],
+                                );
+                                resolved_trigger_visuals[i] = render_queue.len() > queue_start;
+                            }
                         }
                     }
 
@@ -1033,6 +1115,27 @@ impl MapFrame {
                         particle_settings,
                         &store,
                     );
+                }
+            }
+
+            if show_native_surfaces {
+                painter.gl().depth_mask(true);
+                if let Some(zone_index) = active_zone_index {
+                    if let Some(surface_triangles) = map.zone_surface_triangles.get(zone_index) {
+                        for triangle in surface_triangles {
+                            let colour = robots_surface_debug_colour(triangle.surface_mask);
+                            for edge in 0..3usize {
+                                link_renderer.render(
+                                    painter.gl(),
+                                    &render_context,
+                                    triangle.positions[edge],
+                                    triangle.positions[(edge + 1) % 3],
+                                    colour,
+                                    1.0,
+                                );
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1270,6 +1373,93 @@ impl MapFrame {
             callback: Arc::new(cb),
         };
         ui.painter().add(callback);
+        self.draw_canvas_hud_overlay(ui, rect, hud_zone, hud_sky, hud_resource);
+    }
+
+    /// Overlay controls stay inside the viewport so scene toggles remain close
+    /// to the result they affect, without changing the renderer state path.
+    fn draw_canvas_hud_overlay(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        zone: Option<usize>,
+        sky: Option<usize>,
+        resource: Option<u32>,
+    ) {
+        let overlay = egui::Frame::new()
+            .fill(egui::Color32::from_black_alpha(210))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(74)))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(8, 6));
+
+        egui::Area::new(egui::Id::new("map_canvas_toolbar"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_top() + egui::vec2(10.0, 10.0))
+            .show(ui.ctx(), |ui| {
+                overlay.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.strong(format!("{} View", font_awesome::EYE));
+                        ui.separator();
+                        ui.toggle_value(
+                            &mut self.show_triggers,
+                            font_awesome::MAP_MARKER.to_string(),
+                        )
+                        .on_hover_text("Triggers");
+                        ui.toggle_value(&mut self.show_sounds, font_awesome::VOLUME_UP.to_string())
+                            .on_hover_text("Sounds");
+                        ui.toggle_value(&mut self.show_portals, font_awesome::RANDOM.to_string())
+                            .on_hover_text("Portals");
+                        ui.toggle_value(
+                            &mut self.show_native_surfaces,
+                            font_awesome::CUBE.to_string(),
+                        )
+                        .on_hover_text("Native surfaces");
+                        ui.separator();
+                        ui.toggle_value(&mut self.global_lighting, font_awesome::SUN.to_string())
+                            .on_hover_text("Global lighting");
+                        ui.toggle_value(
+                            &mut self.native_lights,
+                            font_awesome::LIGHTBULB.to_string(),
+                        )
+                        .on_hover_text("Native lights");
+                    });
+                });
+            });
+
+        egui::Area::new(egui::Id::new("map_canvas_zone_hud"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_bottom() + egui::vec2(10.0, -38.0))
+            .show(ui.ctx(), |ui| {
+                overlay.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.strong(format!("{} Zone", font_awesome::CUBE));
+                        ui.label(
+                            zone.map(|value| format!("#{value}"))
+                                .unwrap_or_else(|| "None".into()),
+                        );
+                        ui.separator();
+                        ui.strong("Sky");
+                        ui.label(
+                            sky.map(|value| format!("#{value}"))
+                                .unwrap_or_else(|| "None".into()),
+                        );
+                        ui.separator();
+                        ui.monospace(
+                            resource
+                                .map(|value| format!("0x{value:08X}"))
+                                .unwrap_or_else(|| "No resource".into()),
+                        );
+                        ui.separator();
+                        let active = zone.is_some();
+                        let colour = if active {
+                            egui::Color32::from_rgb(72, 190, 132)
+                        } else {
+                            egui::Color32::GRAY
+                        };
+                        ui.colored_label(colour, if active { "ACTIVE" } else { "INACTIVE" });
+                    });
+                });
+            });
     }
 
     fn render_pickbuffer(
@@ -1315,5 +1505,50 @@ impl MapFrame {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ai_character_render_pose_switches_from_editor_preview_to_live_xitem_ownership() {
+        let serialized_position = Vec3::new(1.0, 2.0, 3.0);
+        let serialized_rotation = Quat::from_rotation_y(0.25);
+        let live_position = Vec3::new(9.0, 4.0, -2.0);
+        let live_rotation = Quat::from_rotation_y(-0.5);
+
+        assert_eq!(
+            robots_ai_character_render_pose(false, None, serialized_position, serialized_rotation,),
+            Some((serialized_position, serialized_rotation))
+        );
+        assert_eq!(
+            robots_ai_character_render_pose(
+                true,
+                Some((false, None)),
+                serialized_position,
+                serialized_rotation,
+            ),
+            None
+        );
+        assert_eq!(
+            robots_ai_character_render_pose(
+                true,
+                Some((true, None)),
+                serialized_position,
+                serialized_rotation,
+            ),
+            Some((serialized_position, serialized_rotation))
+        );
+        assert_eq!(
+            robots_ai_character_render_pose(
+                true,
+                Some((true, Some((live_position, live_rotation)))),
+                serialized_position,
+                serialized_rotation,
+            ),
+            Some((live_position, live_rotation))
+        );
     }
 }

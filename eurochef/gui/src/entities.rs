@@ -1,14 +1,19 @@
-use std::{io::Seek, ops::Range, sync::Arc};
+use std::{collections::BTreeMap, io::Seek, ops::Range, sync::Arc};
 
 use anyhow::anyhow;
 use egui::{mutex::RwLock, Color32, RichText, Widget};
 use eurochef_edb::{
-    anim::EXGeoBaseAnimSkin, binrw::BinReaderExt, edb::EdbFile, entity::EXGeoEntity,
-    versions::Platform, Hashcode, HashcodeUtils,
+    anim::EXGeoBaseAnimSkin,
+    binrw::BinReaderExt,
+    edb::EdbFile,
+    entity::{robots_v248_isolated_surface_category, EXGeoEntity},
+    versions::Platform,
+    Hashcode, HashcodeUtils,
 };
 use eurochef_shared::{
     entities::{read_entity, TriStrip, UXVertex},
     maps::format_typed_hashcode_with_id,
+    robots_runtime::monster_navigation::RobotsMonsterNavGroup,
     textures::UXGeoTexture,
     IdentifiableResult,
 };
@@ -52,6 +57,33 @@ pub struct EntityListPanel {
     platform: Platform,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RobotsSurfaceTriangle {
+    pub positions: [Vec3; 3],
+    pub surface_mask: u16,
+}
+
+/// Exact Robots PC-v248 `EXGeoEntity::DoRayCast` face input. Unlike
+/// `RobotsSurfaceTriangle`, this preserves every serialized 10-byte face,
+/// including faces whose metadata word is zero.
+#[derive(Debug, Clone, Copy)]
+pub struct RobotsRaycastTriangle {
+    pub positions: [Vec3; 3],
+    pub face_mask: u16,
+    pub trailing_raw: u16,
+}
+
+/// Immutable gameplay topology decoded from Robots v248 `EXGeoNavMeshEntity`.
+/// Rendering keeps using the existing flattened vertex/strip buffers; AI navigation
+/// consumes this view so renderer and gameplay do not own duplicate geometry.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessedNavMesh {
+    pub vertices: Vec<[f32; 3]>,
+    pub faces: Vec<[u32; 3]>,
+    pub adjacency: Vec<[Option<u32>; 3]>,
+    pub groups: Vec<RobotsMonsterNavGroup>,
+}
+
 #[derive(Clone)]
 pub struct ProcessedEntityMesh {
     pub vertex_data: Vec<UXVertex>,
@@ -60,6 +92,16 @@ pub struct ProcessedEntityMesh {
     pub flags: u32,
     pub is_navmesh: bool,
     pub part_vertex_ranges: Vec<Range<usize>>,
+    /// Nonzero Robots v248 `face_info` metadata masks, aggregated across mesh parts.
+    pub robots_surface_mask_counts: BTreeMap<u16, usize>,
+    /// Exact nonzero native surface faces expressed in the same source vertex coordinates as the renderer.
+    pub robots_surface_triangles: Vec<RobotsSurfaceTriangle>,
+    /// Complete native face stream consumed by `EXGeoEntity::DoRayCast` at
+    /// Robots.exe `0x005182B4`, including zero-metadata faces.
+    pub robots_raycast_triangles: Vec<RobotsRaycastTriangle>,
+    /// Native 0x607 topology retained for monster/NPC navigation. Split entities
+    /// can contain more than one NavMesh child, hence the outer vector.
+    pub robots_navmeshes: Vec<ProcessedNavMesh>,
 }
 
 mod panel;
@@ -81,6 +123,210 @@ fn collect_mesh_vertex_ranges(
             }
         }
         _ => {}
+    }
+}
+
+fn collect_robots_surface_mask_counts(entity: &EXGeoEntity, counts: &mut BTreeMap<u16, usize>) {
+    match entity {
+        EXGeoEntity::Mesh(mesh) => {
+            if let Some(face_info) = &mesh.robots_face_info {
+                for group in &face_info.groups {
+                    for face in &group.faces {
+                        let mask = face.surface_metadata & 0x78;
+                        if mask != 0 {
+                            *counts.entry(mask).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+        EXGeoEntity::Split(split) => {
+            for child in &split.entities {
+                collect_robots_surface_mask_counts(child, counts);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_robots_surface_triangles(
+    entity: &EXGeoEntity,
+    triangles: &mut Vec<RobotsSurfaceTriangle>,
+) {
+    match entity {
+        EXGeoEntity::Mesh(mesh) => {
+            let Some(face_info) = &mesh.robots_face_info else {
+                return;
+            };
+            for group in &face_info.groups {
+                for face in &group.faces {
+                    let surface_mask = face.surface_metadata & 0x78;
+                    if surface_mask == 0 {
+                        continue;
+                    }
+                    let [a, b, c] = face.vertex_indices.map(usize::from);
+                    let (Some(a), Some(b), Some(c)) = (
+                        mesh.vertices.get(a),
+                        mesh.vertices.get(b),
+                        mesh.vertices.get(c),
+                    ) else {
+                        continue;
+                    };
+                    triangles.push(RobotsSurfaceTriangle {
+                        positions: [Vec3::from(a.pos), Vec3::from(b.pos), Vec3::from(c.pos)],
+                        surface_mask,
+                    });
+                }
+            }
+        }
+        EXGeoEntity::Split(split) => {
+            for child in &split.entities {
+                collect_robots_surface_triangles(child, triangles);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_robots_raycast_triangles(
+    entity: &EXGeoEntity,
+    triangles: &mut Vec<RobotsRaycastTriangle>,
+) {
+    match entity {
+        EXGeoEntity::Mesh(mesh) => {
+            let Some(face_info) = &mesh.robots_face_info else {
+                return;
+            };
+            for group in &face_info.groups {
+                for face in &group.faces {
+                    let [a, b, c] = face.vertex_indices.map(usize::from);
+                    let (Some(a), Some(b), Some(c)) = (
+                        mesh.vertices.get(a),
+                        mesh.vertices.get(b),
+                        mesh.vertices.get(c),
+                    ) else {
+                        continue;
+                    };
+                    triangles.push(RobotsRaycastTriangle {
+                        positions: [Vec3::from(a.pos), Vec3::from(b.pos), Vec3::from(c.pos)],
+                        face_mask: face.surface_metadata,
+                        trailing_raw: face.trailing_raw,
+                    });
+                }
+            }
+        }
+        EXGeoEntity::Split(split) => {
+            for child in &split.entities {
+                collect_robots_raycast_triangles(child, triangles);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_robots_navmeshes(
+    entity: &EXGeoEntity,
+    edb: &mut EdbFile,
+    out: &mut Vec<ProcessedNavMesh>,
+) -> anyhow::Result<()> {
+    const INDEX_MASK: u32 = 0x000f_ffff;
+    match entity {
+        EXGeoEntity::NavMesh(navmesh) => {
+            let restore = edb.stream_position()?;
+
+            edb.seek(std::io::SeekFrom::Start(navmesh.vertices.offset_absolute()))?;
+            let mut vertices = Vec::with_capacity(navmesh.vertex_count as usize);
+            for _ in 0..navmesh.vertex_count {
+                vertices.push(edb.read_type::<[f32; 3]>(edb.endian)?);
+            }
+
+            edb.seek(std::io::SeekFrom::Start(navmesh.faces.offset_absolute()))?;
+            let mut faces = Vec::with_capacity(navmesh.face_count as usize);
+            for face_index in 0..navmesh.face_count {
+                let raw = edb.read_type::<[u32; 4]>(edb.endian)?;
+                let face = [
+                    raw[0] & INDEX_MASK,
+                    raw[1] & INDEX_MASK,
+                    raw[2] & INDEX_MASK,
+                ];
+                if face.iter().any(|index| *index >= navmesh.vertex_count) {
+                    anyhow::bail!(
+                        "Robots NavMesh face {face_index} references vertex outside 0..{}: {face:?}",
+                        navmesh.vertex_count
+                    );
+                }
+                faces.push(face);
+            }
+
+            edb.seek(std::io::SeekFrom::Start(
+                navmesh.adjacency.offset_absolute(),
+            ))?;
+            let mut adjacency = Vec::with_capacity(navmesh.face_count as usize);
+            for face_index in 0..navmesh.face_count {
+                let raw = edb.read_type::<[u32; 3]>(edb.endian)?;
+                let mut decoded = [None; 3];
+                for edge in 0..3 {
+                    let neighbor = raw[edge] & INDEX_MASK;
+                    if neighbor != INDEX_MASK {
+                        if neighbor >= navmesh.face_count {
+                            anyhow::bail!(
+                                "Robots NavMesh adjacency {face_index} edge {edge} references face {neighbor} outside 0..{}",
+                                navmesh.face_count
+                            );
+                        }
+                        decoded[edge] = Some(neighbor);
+                    }
+                }
+                adjacency.push(decoded);
+            }
+
+            edb.seek(std::io::SeekFrom::Start(navmesh.groups.offset_absolute()))?;
+            let mut groups = Vec::with_capacity(navmesh.group_count as usize);
+            for group_index in 0..navmesh.group_count {
+                let raw = edb.read_type::<[u32; 2]>(edb.endian)?;
+                let face_count = raw[0] & 0x00ff_ffff;
+                let start_face = raw[1] & INDEX_MASK;
+                if start_face > navmesh.face_count
+                    || face_count > navmesh.face_count
+                    || start_face.saturating_add(face_count) > navmesh.face_count
+                {
+                    anyhow::bail!(
+                        "Robots NavMesh group {group_index} range {start_face}+{face_count} exceeds {} faces",
+                        navmesh.face_count
+                    );
+                }
+                groups.push(RobotsMonsterNavGroup {
+                    start_face,
+                    face_count,
+                    flags0: (raw[0] >> 24) as u8,
+                    flags1: (raw[1] >> 20) as u16,
+                });
+            }
+
+            out.push(ProcessedNavMesh {
+                vertices,
+                faces,
+                adjacency,
+                groups,
+            });
+            edb.seek(std::io::SeekFrom::Start(restore))?;
+        }
+        EXGeoEntity::Split(split) => {
+            for child in &split.entities {
+                collect_robots_navmeshes(child, edb, out)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn robots_surface_mask_label(mask: u16) -> String {
+    let (category, role) = robots_v248_isolated_surface_category(mask);
+    if category == 0 {
+        format!("0x{mask:02X} / no special category in isolation")
+    } else {
+        format!("0x{mask:02X} -> 0x{category:04X} / {role}")
     }
 }
 
@@ -362,6 +608,14 @@ fn read_entity_identifiable(
     }
 
     let flags = ent.base().map(|b| b.flags).unwrap_or_default();
+    let mut robots_surface_mask_counts = BTreeMap::new();
+    collect_robots_surface_mask_counts(&ent, &mut robots_surface_mask_counts);
+    let mut robots_surface_triangles = Vec::new();
+    collect_robots_surface_triangles(&ent, &mut robots_surface_triangles);
+    let mut robots_raycast_triangles = Vec::new();
+    collect_robots_raycast_triangles(&ent, &mut robots_raycast_triangles);
+    let mut robots_navmeshes = Vec::new();
+    collect_robots_navmeshes(&ent, edb, &mut robots_navmeshes)?;
     let is_navmesh = strips.iter().any(|strip| strip.is_navmesh);
     if is_navmesh {
         apply_navmesh_uv(&mut vertex_data);
@@ -376,6 +630,10 @@ fn read_entity_identifiable(
             flags,
             is_navmesh,
             part_vertex_ranges,
+            robots_surface_mask_counts,
+            robots_surface_triangles,
+            robots_raycast_triangles,
+            robots_navmeshes,
         },
     ))
 }
@@ -409,6 +667,10 @@ mod tests {
             flags: 0,
             is_navmesh: false,
             part_vertex_ranges: vec![],
+            robots_surface_mask_counts: BTreeMap::new(),
+            robots_surface_triangles: Vec::new(),
+            robots_raycast_triangles: Vec::new(),
+            robots_navmeshes: Vec::new(),
         };
 
         assert_eq!(mesh.bounding_box(), (Vec3::ZERO, Vec3::ZERO));

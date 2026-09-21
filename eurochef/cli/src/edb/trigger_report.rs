@@ -14,6 +14,13 @@ use eurochef_edb::{
     HashcodeUtils, HC_BASE_ENTITY, HC_BASE_SCRIPT,
 };
 use eurochef_shared::maps::{TriggerDefinition, TriggerInformation};
+use eurochef_shared::robots_runtime::{
+    ai_character::{
+        ai_handler_class_for_runtime_selector, ai_runtime_type_for_serialized_trigger_type,
+        RobotsAiHandlerClass,
+    },
+    npc::{decode_npc_serialized_contract, RobotsNpcSerializedContract},
+};
 use serde::Serialize;
 
 use super::resource_atlas::discover_edb_paths_near_manifest;
@@ -51,6 +58,9 @@ pub struct TriggerCorpusSummary {
     missing_collision_bindings: usize,
     unresolved_visual_objects: usize,
     triggers_with_path_hash_matches: usize,
+    ai_character_rows: usize,
+    ai_character_rows_missing_selector: usize,
+    ai_handler_class_counts: BTreeMap<String, usize>,
     trigger_type_counts: BTreeMap<String, usize>,
     trigger_subtype_counts: BTreeMap<String, usize>,
     trigger_script_status_counts: BTreeMap<String, usize>,
@@ -140,14 +150,32 @@ pub struct TriggerReportRow {
     rotation: [f32; 3],
     scale: [f32; 3],
     data: [Option<u32>; 16],
+    ai_runtime_type: Option<u32>,
+    ai_config_index: Option<u32>,
+    ai_handler_class: Option<RobotsAiHandlerClass>,
     outgoing_links: [i32; 8],
     invalid_outgoing_links: Vec<i32>,
     incoming_links: Vec<usize>,
     path_hash_matches: Vec<TriggerPathMatch>,
     runtime_preview: TriggerRuntimePreview,
+    npc_runtime_contract: Option<RobotsNpcSerializedContract>,
     visual: TriggerVisualBinding,
     trigger_script: TriggerScriptBinding,
     collision: TriggerCollisionBinding,
+}
+
+fn resolve_ai_runtime_identity(
+    serialized_type: u32,
+    data: &[Option<u32>],
+) -> (Option<u32>, Option<u32>, Option<RobotsAiHandlerClass>) {
+    let runtime_type = ai_runtime_type_for_serialized_trigger_type(serialized_type);
+    let config_index = runtime_type.and_then(|_| data.first().copied().flatten());
+    let handler_class = runtime_type
+        .zip(config_index)
+        .and_then(|(runtime_type, config_index)| {
+            ai_handler_class_for_runtime_selector(runtime_type, config_index)
+        });
+    (runtime_type, config_index, handler_class)
 }
 
 pub fn execute_command(
@@ -410,6 +438,23 @@ fn scan_file(
                 summary.unresolved_visual_objects += 1;
             }
             increment(&mut summary.visual_status_counts, visual.status.clone());
+            let (ai_runtime_type, ai_config_index, ai_handler_class) =
+                resolve_ai_runtime_identity(trigger_type.trig_type, &trigger.data);
+            if ai_runtime_type.is_some() {
+                summary.ai_character_rows += 1;
+                if ai_config_index.is_none() {
+                    summary.ai_character_rows_missing_selector += 1;
+                }
+                if let Some(handler_class) = ai_handler_class {
+                    increment(
+                        &mut summary.ai_handler_class_counts,
+                        format!("{handler_class:?}"),
+                    );
+                }
+            }
+
+            let npc_runtime_contract = (trigger_type.trig_type == 48)
+                .then(|| decode_npc_serialized_contract(&trigger.data));
 
             rows.push(TriggerReportRow {
                 edb_uid: header.hashcode,
@@ -432,11 +477,15 @@ fn scan_file(
                 rotation: trigger.rotation,
                 scale: trigger.scale,
                 data: trigger.data,
+                ai_runtime_type,
+                ai_config_index,
+                ai_handler_class,
                 outgoing_links: trigger.links,
                 invalid_outgoing_links,
                 incoming_links: incoming_links[trigger_index].clone(),
                 path_hash_matches,
                 runtime_preview,
+                npc_runtime_contract,
                 visual,
                 trigger_script,
                 collision,
@@ -633,7 +682,12 @@ fn classify_runtime_preview(
         48 => (
             "native_context_diagnostic",
             "npc_mission_cutscene_context",
-            "data[0] and data[1] have native getters, data[2] is the NPC flag word, data[3] is the HT_TextGroup value, and data[4..7] are alternate cutscene UIDs selected by XTrigger_NPC::ActivateCutscene; Mission/Tutorial lookup and NPC dialogue AI are not simulated",
+            "data[0] and data[1] have native getters, data[2] is the NPC flag word, data[3] is HT_TextGroup and data[4..7] are alternate cutscene UIDs; native XItemHandler_Npc::DoInteraction branching is recovered as an engine-neutral shared contract, while Mission/Tutorial manager state and actual cutscene playback remain host inputs",
+        ),
+        50 => (
+            "native_context_diagnostic",
+            "fluid_water_grid_and_body_response",
+            "XTrigger_Fluid creates XItemHandler_Fluid and a native water grid: data[0..1] are grid width/height, data[2..3] are native envelope/wave solver scalars, data[4] is the water entity quad size, data[5] seeds initial random waves, data[6] bit0 enables periodic waves and data[7] is their interval; water deformation and real gameplay body response are not simulated in Maps",
         ),
         60 if has_path_slot(1) => (
             "native_context_diagnostic",
@@ -885,13 +939,13 @@ fn write_rows_tsv(path: &Path, rows: &[TriggerReportRow]) -> Result<()> {
     let mut file = File::create(path)?;
     writeln!(
         file,
-        "edb_uid\tedb_path\tmap_uid\tmap_index\ttrigger_index\ttrigger_file_offset\tlink_ref\ttype_index\ttrig_type\ttrig_type_name\ttrig_subtype\ttrig_subtype_name\tdebug\tgame_flags\ttrig_flags\tposition\trotation\tscale\tdata\toutgoing_links\tinvalid_outgoing_links\tincoming_links\tpath_hash_matches\tvisual_object\tvisual_file\tvisual_resolved_entity\tvisual_resolved_script\tvisual_object_kind\tvisual_status\tgamescript_index\tgamescript_offset\tgamescript_aux\tgamescript_status\tcollision_index\tcollision_status\tcollision_type\tcollision_hashref\tcollision_extents\tcollision_position\tcollision_quaternion"
+        "edb_uid\tedb_path\tmap_uid\tmap_index\ttrigger_index\ttrigger_file_offset\tlink_ref\ttype_index\ttrig_type\ttrig_type_name\ttrig_subtype\ttrig_subtype_name\tdebug\tgame_flags\ttrig_flags\tposition\trotation\tscale\tdata\tai_runtime_type\tai_config_index\tai_handler_class\toutgoing_links\tinvalid_outgoing_links\tincoming_links\tpath_hash_matches\tnpc_runtime_contract\tvisual_object\tvisual_file\tvisual_resolved_entity\tvisual_resolved_script\tvisual_object_kind\tvisual_status\tgamescript_index\tgamescript_offset\tgamescript_aux\tgamescript_status\tcollision_index\tcollision_status\tcollision_type\tcollision_hashref\tcollision_extents\tcollision_position\tcollision_quaternion"
     )?;
     for row in rows {
         let collision = row.collision.datum.as_ref();
         writeln!(
             file,
-            "0x{edb_uid:08X}\t{edb_path}\t0x{map_uid:08X}\t{map_index}\t{trigger_index}\t0x{trigger_file_offset:08X}\t{link_ref}\t{type_index}\t{trig_type}\t{trig_type_name}\t{trig_subtype}\t{trig_subtype_name}\t{debug}\t0x{game_flags:08X}\t0x{trig_flags:08X}\t{position}\t{rotation}\t{scale}\t{data}\t{outgoing}\t{invalid}\t{incoming}\t{path_matches}\t{visual_object}\t{visual_file}\t{visual_resolved_entity}\t{visual_resolved_script}\t{visual_kind}\t{visual_status}\t{script_index}\t{script_offset}\t{script_aux}\t{script_status}\t{collision_index}\t{collision_status}\t{collision_type}\t{collision_hashref}\t{collision_extents}\t{collision_position}\t{collision_quaternion}",
+            "0x{edb_uid:08X}\t{edb_path}\t0x{map_uid:08X}\t{map_index}\t{trigger_index}\t0x{trigger_file_offset:08X}\t{link_ref}\t{type_index}\t{trig_type}\t{trig_type_name}\t{trig_subtype}\t{trig_subtype_name}\t{debug}\t0x{game_flags:08X}\t0x{trig_flags:08X}\t{position}\t{rotation}\t{scale}\t{data}\t{ai_runtime_type}\t{ai_config_index}\t{ai_handler_class}\t{outgoing}\t{invalid}\t{incoming}\t{path_matches}\t{npc_runtime_contract}\t{visual_object}\t{visual_file}\t{visual_resolved_entity}\t{visual_resolved_script}\t{visual_kind}\t{visual_status}\t{script_index}\t{script_offset}\t{script_aux}\t{script_status}\t{collision_index}\t{collision_status}\t{collision_type}\t{collision_hashref}\t{collision_extents}\t{collision_position}\t{collision_quaternion}",
             edb_uid = row.edb_uid,
             edb_path = escape_tsv(&row.edb_path),
             map_uid = row.map_uid,
@@ -911,10 +965,22 @@ fn write_rows_tsv(path: &Path, rows: &[TriggerReportRow]) -> Result<()> {
             rotation = json_cell(&row.rotation)?,
             scale = json_cell(&row.scale)?,
             data = json_cell(&row.data)?,
+            ai_runtime_type = optional_decimal(row.ai_runtime_type),
+            ai_config_index = optional_decimal(row.ai_config_index),
+            ai_handler_class = row
+                .ai_handler_class
+                .map(|handler_class| format!("{handler_class:?}"))
+                .unwrap_or_default(),
             outgoing = json_cell(&row.outgoing_links)?,
             invalid = json_cell(&row.invalid_outgoing_links)?,
             incoming = json_cell(&row.incoming_links)?,
             path_matches = json_cell(&row.path_hash_matches)?,
+            npc_runtime_contract = row
+                .npc_runtime_contract
+                .as_ref()
+                .map(json_cell)
+                .transpose()?
+                .unwrap_or_default(),
             visual_object = optional_hex(row.visual.object),
             visual_file = optional_hex(row.visual.file),
             visual_resolved_entity = optional_hex(row.visual.resolved_entity),
@@ -1146,8 +1212,9 @@ fn optional_decimal(value: Option<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_runtime_preview, invalid_links, parse_u32, read_manifest, resolve_visual,
-        valid_link_index, FileCatalogEntry, TriggerPathMatch,
+        classify_runtime_preview, invalid_links, parse_u32, read_manifest,
+        resolve_ai_runtime_identity, resolve_visual, valid_link_index, FileCatalogEntry,
+        TriggerPathMatch,
     };
 
     #[test]
@@ -1177,6 +1244,31 @@ mod tests {
         assert_eq!(entries[0].source_path, edb);
 
         std::fs::remove_dir_all(root).expect("remove manifest fixture");
+    }
+
+    #[test]
+    fn ai_runtime_identity_uses_shared_native_trigger_and_handler_tables() {
+        use eurochef_shared::robots_runtime::ai_character::RobotsAiHandlerClass as C;
+
+        let mut data = [None; 16];
+        data[0] = Some(7);
+        assert_eq!(
+            resolve_ai_runtime_identity(10, &data),
+            (Some(5), Some(7), Some(C::MalfBot))
+        );
+
+        data[0] = Some(11);
+        assert_eq!(
+            resolve_ai_runtime_identity(48, &data),
+            (Some(11), Some(11), Some(C::NpcFender))
+        );
+
+        data[0] = None;
+        assert_eq!(
+            resolve_ai_runtime_identity(18, &data),
+            (Some(7), None, None)
+        );
+        assert_eq!(resolve_ai_runtime_identity(47, &data), (None, None, None));
     }
 
     #[test]
@@ -1240,6 +1332,10 @@ mod tests {
         let npc = classify_runtime_preview(48, &[None; 16], &[]);
         assert_eq!(npc.status, "native_context_diagnostic");
         assert_eq!(npc.mode, "npc_mission_cutscene_context");
+
+        let fluid = classify_runtime_preview(50, &[None; 16], &[]);
+        assert_eq!(fluid.status, "native_context_diagnostic");
+        assert_eq!(fluid.mode, "fluid_water_grid_and_body_response");
 
         let watchbot = classify_runtime_preview(60, &[None; 16], &[path_match(1)]);
         assert_eq!(watchbot.status, "native_context_diagnostic");

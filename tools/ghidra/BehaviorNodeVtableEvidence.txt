@@ -1,0 +1,3399 @@
+INFO  Using log config file: jar:file:/D:/GitHubHome/Ghidra/Ghidra/Framework/Generic/lib/Generic.jar!/generic.log4j.xml (LoggingInitialization)  
+INFO  Using log file: D:\GitHubHome\Robots\Robot_one_click\CodexPro-Up\state\profile\AppData\Roaming\ghidra\ghidra_12.1.2_PUBLIC\application.log (LoggingInitialization)  
+INFO  Loading user preferences: D:\GitHubHome\Robots\Robot_one_click\CodexPro-Up\state\profile\AppData\Roaming\ghidra\ghidra_12.1.2_PUBLIC\preferences (Preferences)  
+INFO  Searching for classes... (ClassSearcher)  
+INFO  Class search complete (1243 ms) (ClassSearcher)  
+INFO  Initializing SSL Context (DefaultSSLContextInitializer)  
+INFO  Initializing Random Number Generator... (SecureRandomFactory)  
+INFO  Random Number Generator initialization complete: SHA1PRNG (SecureRandomFactory)  
+INFO  Trust manager disabled, cacerts have not been set (DefaultTrustManagerFactory)  
+INFO  Headless startup complete (2680 ms) (AnalyzeHeadless)  
+INFO  Class searcher loaded 59 extension points (20 false positives) (ClassSearcher)  
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::staticFieldOffset has been called by org.apache.felix.framework.util.SecureAction (file:/D:/GitHubHome/Ghidra/Ghidra/Features/Base/lib/org.apache.felix.framework-7.0.5.jar)
+WARNING: Please consider reporting this to the maintainers of class org.apache.felix.framework.util.SecureAction
+WARNING: sun.misc.Unsafe::staticFieldOffset will be removed in a future release
+INFO  HEADLESS Script Paths:
+    D:\GitHubHome\Ghidra\Ghidra\Features\BSim\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Processors\PIC\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\SwiftDemangler\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\PyGhidra\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\FunctionID\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\VersionTracking\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Processors\Atmel\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\BytePatterns\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Debug\Debugger-rmi-trace\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Debug\Debugger\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\Base\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\MicrosoftCodeAnalyzer\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\Jython\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\FileFormats\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\SystemEmulation\ghidra_scripts
+    D:\GitHubHome\Robots\Robot_one_click\_tools\eurochef-main_legacy\tools\ghidra
+    D:\GitHubHome\Ghidra\Ghidra\Processors\JVM\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Processors\8051\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\PDB\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Processors\DATA\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\DecompilerDependent\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\Decompiler\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\GnuDemangler\ghidra_scripts
+    D:\GitHubHome\Ghidra\Ghidra\Features\WildcardAssembler\ghidra_scripts (HeadlessAnalyzer)  
+INFO  HEADLESS: execution starts (HeadlessAnalyzer)  
+INFO  Opening existing project: D:\GitHubHome\Robots\Robot_one_click\_tools\eurochef-main_legacy\ghidra-projects\robots (HeadlessAnalyzer)  
+INFO  Opening project: D:\GitHubHome\Robots\Robot_one_click\_tools\eurochef-main_legacy\ghidra-projects\robots (HeadlessProject)  
+INFO  REPORT: Processing read-only project file: /Robots.exe (HeadlessAnalyzer)  
+INFO  REPORT: Execute script: BehaviorNodeVtableEvidence.java  (HeadlessAnalyzer)  
+INFO  SCRIPT: D:\GitHubHome\Robots\Robot_one_click\_tools\eurochef-main_legacy\tools\ghidra\BehaviorNodeVtableEvidence.java (HeadlessAnalyzer)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== CTOR 0046A390 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 * __fastcall FUN_0046a390(undefined4 *param_1)
+
+{
+  void *local_c;
+  undefined1 *puStack_8;
+  undefined4 local_4;
+  
+  local_4 = 0xffffffff;
+  puStack_8 = &LAB_005d6df8;
+  local_c = ExceptionList;
+  ExceptionList = &local_c;
+  FUN_00456e60();
+  local_4 = 0;
+  *param_1 = &PTR_FUN_005e6ef0;
+  FUN_00456ec0();
+  param_1[10] = 0;
+  param_1[9] = 0;
+  *(undefined1 *)(param_1 + 2) = 0x50;
+  ExceptionList = local_c;
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== CTOR 004508A0 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 * __fastcall FUN_004508a0(undefined4 *param_1)
+
+{
+  undefined4 uVar1;
+  void *local_c;
+  undefined1 *puStack_8;
+  undefined4 local_4;
+  
+  local_4 = 0xffffffff;
+  puStack_8 = &LAB_005d4d70;
+  local_c = ExceptionList;
+  ExceptionList = &local_c;
+  FUN_00456e60();
+  local_4 = 0;
+  *param_1 = &PTR_FUN_005e1fbc;
+  FUN_00456ec0();
+  param_1[9] = 0;
+  param_1[0xf] = 0;
+  param_1[0xe] = 0;
+  param_1[0x10] = 0;
+  *(undefined1 *)(param_1 + 0x11) = 1;
+  param_1[10] = 0;
+  param_1[0xc] = 0;
+  param_1[0xb] = 0;
+  *(undefined1 *)(param_1 + 0xd) = 0;
+  param_1[0x12] = 0;
+  param_1[0x13] = 0;
+  param_1[0x14] = 0;
+  param_1[0x18] = 0;
+  param_1[0x17] = 0;
+  param_1[0x16] = 0;
+  param_1[0x15] = 0;
+  param_1[0x19] = DAT_005e1fa8;
+  local_4 = 1;
+  *param_1 = &PTR_FUN_005e2100;
+  FUN_00456ec0();
+  param_1[9] = 0;
+  param_1[0xf] = 0;
+  param_1[0xe] = 0;
+  param_1[0x10] = 0;
+  *(undefined1 *)(param_1 + 0x11) = 1;
+  param_1[10] = 0;
+  param_1[0xc] = 0;
+  param_1[0xb] = 0;
+  *(undefined1 *)(param_1 + 0xd) = 0;
+  param_1[0x12] = 0;
+  param_1[0x13] = 0;
+  param_1[0x14] = 0;
+  param_1[0x18] = 0;
+  param_1[0x17] = 0;
+  param_1[0x16] = 0;
+  param_1[0x15] = 0;
+  uVar1 = DAT_005e1fa8;
+  param_1[0x1c] = 0;
+  param_1[0x19] = uVar1;
+  param_1[0x1b] = 0;
+  param_1[0x1a] = 0;
+  param_1[0x1d] = 0;
+  param_1[0x1e] = 0xffffffff;
+  param_1[0x1f] = 0;
+  *(undefined1 *)(param_1 + 0x20) = 0;
+  ExceptionList = local_c;
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== CTOR 0046B4A0 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0046b4a0(int param_1)
+
+{
+  byte *pbVar1;
+  byte bVar2;
+  char cVar3;
+  int *piVar4;
+  int iVar5;
+  int *piVar6;
+  undefined4 uVar7;
+  uint uVar8;
+  int iVar9;
+  bool bVar10;
+  undefined4 uStack_30;
+  int iStack_2c;
+  void *apvStack_20 [6];
+  undefined1 *puStack_8;
+  undefined4 uStack_4;
+  
+  uStack_4 = 0xffffffff;
+  puStack_8 = &LAB_005d6f12;
+  apvStack_20[5] = ExceptionList;
+  ExceptionList = apvStack_20 + 5;
+  FUN_00451780();
+  piVar4 = *(int **)(*(int *)(param_1 + 4) + 0x154);
+  if (piVar4 != (int *)0x0) {
+    bVar2 = (**(code **)(*piVar4 + 0x10c))();
+    if ((bVar2 & 0x20) == 0x20) {
+      iStack_2c = FUN_004e4b62(0x28,0);
+      uStack_4 = 0;
+      if (iStack_2c == 0) {
+        piVar4 = (int *)0x0;
+      }
+      else {
+        piVar4 = (int *)FUN_00458ba0();
+      }
+      uStack_4 = 0xffffffff;
+      (**(code **)(*piVar4 + 0x38))(param_1,0x90000eb);
+      FUN_004046e0(piVar4,1);
+      (**(code **)(*piVar4 + 0x1c))(3);
+      uStack_30 = 0x90000ed;
+      uVar8 = 0;
+      do {
+        cVar3 = FUN_00405260(apvStack_20[uVar8 - 5]);
+        if (cVar3 == '\0') break;
+        uVar8 = uVar8 + 1;
+      } while (uVar8 < 2);
+      if (uVar8 != 0) {
+        iVar5 = FUN_004e4b62(0x40,0);
+        apvStack_20[4] = (void *)0x1;
+        if (iVar5 == 0) {
+          piVar4 = (int *)0x0;
+        }
+        else {
+          piVar4 = (int *)FUN_004590a0();
+        }
+        apvStack_20[4] = (void *)0xffffffff;
+        (**(code **)(*piVar4 + 0x38))(param_1,300,uVar8,&stack0xffffffcc);
+        FUN_004046e0(piVar4,1);
+      }
+      FUN_00455e30(0);
+      pbVar1 = (byte *)(*(int *)(*(int *)(param_1 + 4) + 0x150) + 8);
+      *pbVar1 = *pbVar1 | 2;
+      FUN_004535d0(1);
+      FUN_00453600(1);
+      *(undefined1 *)(param_1 + 0x604) = 0;
+      ExceptionList = apvStack_20[2];
+      return;
+    }
+    apvStack_20[0] = (void *)0x9000006;
+    apvStack_20[1] = (void *)0x9000007;
+    apvStack_20[2] = (void *)0x9000008;
+    apvStack_20[3] = (void *)0x9000009;
+    apvStack_20[4] = (void *)0x900000a;
+    uVar8 = 0;
+    do {
+      cVar3 = FUN_00405260(apvStack_20[uVar8]);
+      if (cVar3 == '\0') break;
+      uVar8 = uVar8 + 1;
+    } while (uVar8 < 5);
+    if (uVar8 != 0) {
+      iStack_2c = FUN_004e4b62(0x40,0);
+      uStack_4 = 2;
+      if (iStack_2c == 0) {
+        piVar6 = (int *)0x0;
+      }
+      else {
+        piVar6 = (int *)FUN_004590a0();
+      }
+      uStack_4 = 0xffffffff;
+      (**(code **)(*piVar6 + 0x38))(param_1,300,uVar8,apvStack_20);
+      iVar5 = *(int *)(param_1 + 0x4cc) + 1;
+      if (*(int *)(param_1 + 0x4c4) < iVar5) {
+        FUN_004292b0(iVar5);
+      }
+      *(int **)(*(int *)(param_1 + 0x4d0) + *(int *)(param_1 + 0x4cc) * 4) = piVar6;
+      *(int *)(param_1 + 0x4cc) = *(int *)(param_1 + 0x4cc) + 1;
+    }
+    iVar5 = (**(code **)(*piVar4 + 0xfc))();
+    if (iVar5 != 0xb000000) {
+      uVar8 = (**(code **)(*piVar4 + 0xfc))();
+      if ((uVar8 & 0xb000000) == 0xb000000) {
+        iStack_2c = FUN_004e4b62(0x98,0);
+        uStack_4 = 3;
+        if (iStack_2c == 0) {
+          piVar6 = (int *)0x0;
+        }
+        else {
+          piVar6 = (int *)FUN_0046bdb0();
+        }
+        iVar5 = *piVar6;
+        uStack_4 = 0xffffffff;
+        uVar7 = (**(code **)(*piVar4 + 0xfc))(0x3dcccccd);
+        (**(code **)(iVar5 + 0x38))(param_1,uVar7);
+        iVar5 = *(int *)(param_1 + 0x4cc) + 1;
+        if (*(int *)(param_1 + 0x4c4) < iVar5) {
+          FUN_004292b0(iVar5);
+        }
+        *(int **)(*(int *)(param_1 + 0x4d0) + *(int *)(param_1 + 0x4cc) * 4) = piVar6;
+        *(int *)(param_1 + 0x4cc) = *(int *)(param_1 + 0x4cc) + 1;
+      }
+    }
+    bVar2 = (**(code **)(*piVar4 + 0x10c))();
+    if ((bVar2 & 2) == 2) {
+      iStack_2c = FUN_004e4b62(0x54,0);
+      uStack_4 = 4;
+      if (iStack_2c == 0) {
+        piVar6 = (int *)0x0;
+      }
+      else {
+        piVar6 = (int *)FUN_0046cb30();
+      }
+      uStack_4 = 0xffffffff;
+      (**(code **)(*piVar6 + 0x38))(param_1,0x41a00000);
+      iVar5 = *(int *)(param_1 + 0x4cc) + 1;
+      if (*(int *)(param_1 + 0x4c4) < iVar5) {
+        iVar9 = *(int *)(param_1 + 0x4c8) + *(int *)(param_1 + 0x4c4);
+        if (0 < iVar5) {
+          for (; iVar9 < iVar5; iVar9 = iVar9 + *(int *)(param_1 + 0x4c8)) {
+          }
+        }
+        uVar7 = FUN_004e4b76(*(undefined4 *)(param_1 + 0x4d0),iVar9 * 4);
+        *(undefined4 *)(param_1 + 0x4d0) = uVar7;
+        *(int *)(param_1 + 0x4c4) = iVar9;
+      }
+      *(int **)(*(int *)(param_1 + 0x4d0) + *(int *)(param_1 + 0x4cc) * 4) = piVar6;
+      *(int *)(param_1 + 0x4cc) = *(int *)(param_1 + 0x4cc) + 1;
+    }
+    bVar2 = (**(code **)(*piVar4 + 0x10c))();
+    bVar10 = (bVar2 & 0x10) == 0x10;
+    *(bool *)(param_1 + 0x639) = bVar10;
+    if (!bVar10) {
+      iStack_2c = FUN_004e4b62(0x30,0);
+      uStack_4 = 5;
+      if (iStack_2c == 0) {
+        piVar6 = (int *)0x0;
+      }
+      else {
+        piVar6 = (int *)FUN_00458c50();
+      }
+      uStack_4 = 0xffffffff;
+      (**(code **)(*piVar6 + 0x38))(param_1,0x40600000,0x40a00000);
+      iVar5 = *(int *)(param_1 + 0x4cc) + 1;
+      if (*(int *)(param_1 + 0x4c4) < iVar5) {
+        iVar9 = *(int *)(param_1 + 0x4c8) + *(int *)(param_1 + 0x4c4);
+        if (0 < iVar5) {
+          for (; iVar9 < iVar5; iVar9 = iVar9 + *(int *)(param_1 + 0x4c8)) {
+          }
+        }
+        uVar7 = FUN_004e4b76(*(undefined4 *)(param_1 + 0x4d0),iVar9 * 4);
+        *(undefined4 *)(param_1 + 0x4d0) = uVar7;
+        *(int *)(param_1 + 0x4c4) = iVar9;
+      }
+      *(int **)(*(int *)(param_1 + 0x4d0) + *(int *)(param_1 + 0x4cc) * 4) = piVar6;
+      *(int *)(param_1 + 0x4cc) = *(int *)(param_1 + 0x4cc) + 1;
+    }
+    uStack_30 = 0;
+    iVar5 = FUN_0044ac70(*(int *)(*(int *)(param_1 + 4) + 0x264) + -5,&uStack_30);
+    iVar9 = (**(code **)(*piVar4 + 0xf4))();
+    *(undefined4 *)(param_1 + 0x628) = *(undefined4 *)(iVar5 + 4 + iVar9 * 8);
+  }
+  ExceptionList = apvStack_20[5];
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== CTOR 0046B210 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 * FUN_0046b210(void)
+
+{
+  undefined4 *puVar1;
+  void *local_c;
+  undefined1 *puStack_8;
+  undefined4 local_4;
+  
+  local_4 = 0xffffffff;
+  puStack_8 = &LAB_005d6ebf;
+  local_c = ExceptionList;
+  ExceptionList = &local_c;
+  puVar1 = (undefined4 *)FUN_004e4b62(0x63c,0);
+  local_4 = 0;
+  if (puVar1 != (undefined4 *)0x0) {
+    FUN_004511e0();
+    *(undefined1 *)(puVar1 + 0x18e) = 0;
+    *(undefined1 *)((int)puVar1 + 0x639) = 0;
+    *(undefined1 *)((int)puVar1 + 0x63a) = 0;
+    *puVar1 = &PTR_LAB_005e71b8;
+    ExceptionList = local_c;
+    return puVar1;
+  }
+  ExceptionList = local_c;
+  return (undefined4 *)0x0;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== CTOR 0046BC10 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== CTOR 00458BA0 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 * __fastcall FUN_00458ba0(undefined4 *param_1)
+
+{
+  void *local_c;
+  undefined1 *puStack_8;
+  undefined4 local_4;
+  
+  local_4 = 0xffffffff;
+  puStack_8 = &LAB_005d5168;
+  local_c = ExceptionList;
+  ExceptionList = &local_c;
+  FUN_00456e60();
+  local_4 = 0;
+  *param_1 = &PTR_FUN_005e2508;
+  FUN_00456ec0();
+  param_1[9] = 0;
+  ExceptionList = local_c;
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== CTOR 004590A0 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 * __fastcall FUN_004590a0(undefined4 *param_1)
+
+{
+  void *local_c;
+  undefined1 *puStack_8;
+  undefined4 local_4;
+  
+  local_4 = 0xffffffff;
+  puStack_8 = &LAB_005d51d3;
+  local_c = ExceptionList;
+  ExceptionList = &local_c;
+  FUN_00456e60();
+  param_1[0xc] = 4;
+  param_1[0xb] = 0;
+  param_1[0xd] = 0;
+  param_1[0xe] = 0;
+  local_4 = 1;
+  *param_1 = &PTR_FUN_005e25d0;
+  FUN_00456ec0();
+  param_1[0xf] = 0;
+  param_1[9] = 0;
+  param_1[10] = 0;
+  ExceptionList = local_c;
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== CTOR 0046BDB0 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 * __fastcall FUN_0046bdb0(undefined4 *param_1)
+
+{
+  void *pvStack_c;
+  undefined1 *puStack_8;
+  undefined4 local_4;
+  
+  local_4 = 0xffffffff;
+  puStack_8 = &LAB_005d6f53;
+  pvStack_c = ExceptionList;
+  ExceptionList = &pvStack_c;
+  FUN_00456e60();
+  local_4 = 0;
+  FUN_004226f0();
+  local_4 = CONCAT31(local_4._1_3_,1);
+  *param_1 = &PTR_FUN_005e7368;
+  FUN_00456ec0();
+  param_1[9] = 0;
+  *(undefined1 *)(param_1 + 2) = 0xf;
+  param_1[0xd] = 0;
+  param_1[0xc] = 0;
+  param_1[0xb] = 0;
+  param_1[10] = 0;
+  param_1[0x25] = 0;
+  param_1[0x23] = 0;
+  param_1[0x24] = 0;
+  (**(code **)(param_1[0xe] + 8))();
+  ExceptionList = pvStack_c;
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== CTOR 00458C50 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 * __fastcall FUN_00458c50(undefined4 *param_1)
+
+{
+  void *local_c;
+  undefined1 *puStack_8;
+  undefined4 local_4;
+  
+  local_4 = 0xffffffff;
+  puStack_8 = &LAB_005d5188;
+  local_c = ExceptionList;
+  ExceptionList = &local_c;
+  FUN_00456e60();
+  local_4 = 0;
+  *param_1 = &PTR_FUN_005e2548;
+  FUN_00456ec0();
+  param_1[10] = 0;
+  param_1[9] = 0;
+  param_1[0xb] = 0;
+  *(undefined1 *)(param_1 + 2) = 0x15;
+  ExceptionList = local_c;
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== NpcVsFender DIFF 0x005E7048 -> 0x005E71B8 (368 bytes) === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +000: 0046B1F0 -> 0046B290 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +004: 0046B300 -> 0046B2A0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +100: 0046B4A0 -> 0046BC10 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== Dog6D9E0 VTABLE 0x005E74E8 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +00 -> 0046DA80 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +04 -> 0046DAF0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +08 -> 0046E0E0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +0C -> 0046E110 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +10 -> 00457400 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +14 -> 00456F60 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +18 -> 0046DF20 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +1C -> 004510D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +20 -> 00456F20 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +24 -> 0046E120 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +28 -> 0041CDD0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +2C -> 0046DFB0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +30 -> 004510E0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +34 -> 0046DA70 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +38 -> 0046DB30 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +3C -> 0046DB60 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +40 -> 0046DCA0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046DA80 FUN_0046da80 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall FUN_0046da80(undefined4 param_1,byte param_2)
+
+{
+  FUN_0046daa0();
+  if ((param_2 & 1) != 0) {
+    FUN_004e4bb4(param_1);
+  }
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046DAF0 FUN_0046daf0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0046daf0(int param_1)
+
+{
+  FUN_00456ec0();
+  *(undefined1 *)(param_1 + 0x24) = 0;
+  *(undefined1 *)(param_1 + 0x25) = 0;
+  *(undefined1 *)(param_1 + 0x26) = 0;
+  *(undefined4 *)(param_1 + 0x38) = 0;
+  *(undefined4 *)(param_1 + 0x40) = 0xffffffff;
+  *(undefined4 *)(param_1 + 0x3c) = 0xffffffff;
+  *(undefined4 *)(param_1 + 0x34) = 0;
+  *(undefined4 *)(param_1 + 0x30) = 0;
+  *(undefined4 *)(param_1 + 0x2c) = 0;
+  *(undefined4 *)(param_1 + 0x28) = 0;
+  *(undefined4 *)(param_1 + 0x4c) = 0;
+  *(undefined4 *)(param_1 + 0x60) = 0;
+  *(undefined4 *)(param_1 + 0x54) = 0;
+  *(undefined4 *)(param_1 + 0x58) = 0;
+  *(undefined4 *)(param_1 + 0x5c) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046E0E0 FUN_0046e0e0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0046e0e0(int param_1)
+
+{
+  FUN_00456f00();
+  *(undefined1 *)(param_1 + 0x26) = 0;
+  if (*(int *)(param_1 + 0x54) != 0) {
+    *(undefined4 *)(param_1 + 0x60) = 1;
+    return;
+  }
+  *(undefined4 *)(param_1 + 0x60) = 3;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046E110 FUN_0046e110 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0046e110(int param_1)
+
+{
+  FUN_00456f10();
+  *(undefined1 *)(param_1 + 0x25) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00457400 FUN_00457400 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00457400(int *param_1)
+
+{
+  (**(code **)(*param_1 + 0x3c))();
+                    /* WARNING: Could not recover jumptable at 0x0045740d. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+  (**(code **)(*param_1 + 0x40))();
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F60 FUN_00456f60 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f60(int param_1)
+
+{
+  if (*(char *)(param_1 + 9) != '\0') {
+    *(int *)(param_1 + 0x10) = *(int *)(param_1 + 0x10) + 1;
+    return;
+  }
+  *(int *)(param_1 + 0x14) = *(int *)(param_1 + 0x14) + 1;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046DF20 forced_0046df20 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+undefined1 __fastcall forced_0046df20(int param_1)
+
+{
+  char cVar1;
+  int iVar2;
+  int iVar3;
+  undefined1 auStack_10 [16];
+  
+  iVar2 = FUN_00454de0();
+  if (((iVar2 != 0) && (iVar2 = *(int *)(*(int *)(param_1 + 4) + 0x61c), iVar2 != 0)) &&
+     (iVar2 == DAT_007b2a04)) {
+    cVar1 = FUN_00455560();
+    if (cVar1 == '\0') {
+      if ((*(char *)(param_1 + 0x24) != '\0') || (*(char *)(param_1 + 0x25) != '\0')) {
+        if ((*(byte *)(*(int *)(param_1 + 4) + 0x2c0) & 1) == 1) {
+          iVar2 = *(int *)(*(int *)(param_1 + 4) + 4);
+          iVar3 = FUN_004056e0(auStack_10);
+          if (*(float *)(iVar2 + 0xd4) - *(float *)(iVar3 + 4) <= _DAT_005dd384) {
+            return *(undefined1 *)(param_1 + 8);
+          }
+        }
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510D0 forced_004510d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall forced_004510d0(int param_1,undefined1 param_2)
+
+{
+  *(undefined1 *)(param_1 + 8) = param_2;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F20 FUN_00456f20 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __fastcall FUN_00456f20(int *param_1)
+
+{
+  char cVar1;
+  uint uVar2;
+  undefined4 uVar3;
+  
+  if (*(char *)((int)param_1 + 9) == '\0') {
+    uVar2 = param_1[6];
+    if (uVar2 <= (uint)param_1[5]) goto LAB_00456f54;
+  }
+  else {
+    cVar1 = (**(code **)(*param_1 + 0x30))();
+    if (((cVar1 == '\0') || (uVar2 = param_1[6], uVar2 == 0)) &&
+       ((uVar2 = param_1[7], uVar2 == 0 || ((uint)param_1[4] < uVar2)))) {
+LAB_00456f54:
+                    /* WARNING: Could not recover jumptable at 0x00456f59. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+      uVar3 = (**(code **)(*param_1 + 0x18))();
+      return uVar3;
+    }
+  }
+  return CONCAT31((int3)(uVar2 >> 8),1);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046E120 forced_0046e120 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall forced_0046e120(int param_1,int param_2)
+
+{
+  if ((*(int *)(param_2 + 0xc) == 0x16000001) && (*(int *)(param_1 + 0x60) == 2)) {
+    *(undefined4 *)(param_1 + 0x60) = 3;
+  }
+  return 0;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0041CDD0 FUN_0041cdd0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_0041cdd0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046DFB0 forced_0046dfb0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall forced_0046dfb0(int param_1)
+
+{
+  undefined1 uVar1;
+  char cVar2;
+  int iVar3;
+  undefined4 *puVar4;
+  undefined1 auStack_20 [16];
+  undefined1 auStack_10 [16];
+  
+  iVar3 = FUN_00454de0();
+  if ((iVar3 == 0) || (cVar2 = FUN_004558d0(), cVar2 == '\0')) {
+    *(undefined1 *)(param_1 + 0x24) = 0;
+    *(undefined1 *)(param_1 + 0x25) = 0;
+    return;
+  }
+  iVar3 = FUN_0046fcc0(*(undefined4 *)(*(int *)(param_1 + 4) + 0x61c));
+  if (iVar3 == 0) {
+    return;
+  }
+  FUN_00451fc0();
+  *(undefined4 *)(param_1 + 0x3c) = *(undefined4 *)(*(int *)(param_1 + 4) + 0x614);
+  *(undefined4 *)(param_1 + 0x40) = DAT_007b2a08;
+  uVar1 = *(undefined1 *)(*(int *)(param_1 + 4) + 0x605);
+  iVar3 = FUN_00454de0();
+  cVar2 = FUN_0046f050(*(int *)(*(int *)(param_1 + 4) + 4) + 0xd0,iVar3 + 0xd0,auStack_20,
+                       *(undefined4 *)(param_1 + 0x3c),0,uVar1);
+  *(char *)(param_1 + 0x24) = cVar2;
+  if (cVar2 != '\0') {
+    return;
+  }
+  if ((*(char *)(param_1 + 9) != '\0') && (*(char *)(param_1 + 0x26) == '\0')) {
+    return;
+  }
+  *(undefined1 *)(param_1 + 0x25) = 0;
+  *(undefined4 *)(param_1 + 0x38) = 0;
+  if (*(int *)(param_1 + 0x3c) < 0) {
+    return;
+  }
+  if (*(int *)(param_1 + 0x40) < 0) {
+    return;
+  }
+  cVar2 = FUN_0046eca0(param_1 + 0x44,*(int *)(param_1 + 0x3c),*(int *)(param_1 + 0x40),
+                       *(undefined1 *)(*(int *)(param_1 + 4) + 0x605));
+  *(char *)(param_1 + 0x25) = cVar2;
+  if (cVar2 == '\0') {
+    return;
+  }
+  puVar4 = (undefined4 *)FUN_0046f400(auStack_10,**(undefined4 **)(param_1 + 0x50));
+  *(undefined4 *)(param_1 + 0x28) = *puVar4;
+  *(undefined4 *)(param_1 + 0x2c) = puVar4[1];
+  *(undefined4 *)(param_1 + 0x30) = puVar4[2];
+  *(undefined4 *)(param_1 + 0x34) = puVar4[3];
+  *(undefined1 *)(param_1 + 0x26) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510E0 forced_004510e0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall forced_004510e0(int param_1)
+
+{
+  return *(undefined1 *)(param_1 + 0x21);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046DA70 forced_0046da70 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+char * forced_0046da70(void)
+
+{
+  return s_AI_PursueNavMesh_00619984;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046DB30 FUN_0046db30 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall
+FUN_0046db30(int param_1,undefined4 param_2,float param_3,undefined4 param_4,undefined4 param_5)
+
+{
+  FUN_00456ec0();
+  *(undefined4 *)(param_1 + 4) = param_2;
+  *(undefined4 *)(param_1 + 0x54) = param_4;
+  *(undefined4 *)(param_1 + 0x5c) = param_5;
+  *(float *)(param_1 + 0x58) = param_3 * param_3;
+  *(undefined1 *)(param_1 + 8) = 0x1f;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046DB60 FUN_0046db60 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+void __fastcall FUN_0046db60(int param_1)
+
+{
+  float *pfVar1;
+  float fVar2;
+  float fVar3;
+  float fVar4;
+  int iVar5;
+  float *pfVar6;
+  float10 fVar7;
+  undefined1 local_10 [16];
+  
+  iVar5 = *(int *)(param_1 + 0x60);
+  if (iVar5 == 1) {
+    fVar7 = (float10)(**(code **)(**(int **)(param_1 + 4) + 0x13c))();
+    if (ABS(fVar7) < (float10)_DAT_005de538 != (ABS(fVar7) == (float10)_DAT_005de538)) {
+      *(undefined4 *)(param_1 + 0x60) = 2;
+    }
+  }
+  else if (iVar5 == 3) {
+    if ((*(char *)(param_1 + 0x24) == '\0') && (*(char *)(param_1 + 0x26) == '\0')) {
+      *(undefined4 *)(param_1 + 0x60) = 4;
+      return;
+    }
+  }
+  else if (iVar5 == 4) {
+    if (*(char *)(param_1 + 0x24) != '\0') {
+      *(undefined4 *)(param_1 + 0x60) = 3;
+      return;
+    }
+    pfVar1 = (float *)(param_1 + 0x28);
+    iVar5 = *(int *)(*(int *)(param_1 + 4) + 4);
+    fVar2 = *(float *)(iVar5 + 0xd0) - *pfVar1;
+    fVar4 = *(float *)(iVar5 + 0xd4) - *(float *)(param_1 + 0x2c);
+    fVar3 = *(float *)(iVar5 + 0xd8) - *(float *)(param_1 + 0x30);
+    if (fVar2 * fVar2 + fVar4 * fVar4 + fVar3 * fVar3 < _DAT_005dd384) {
+      iVar5 = *(int *)(param_1 + 0x38) + 1;
+      *(int *)(param_1 + 0x38) = iVar5;
+      if (*(int *)(param_1 + 0x4c) <= iVar5) {
+        *(undefined1 *)(param_1 + 0x26) = 1;
+        *(undefined4 *)(param_1 + 0x60) = 3;
+        return;
+      }
+      FUN_0046fcc0(*(undefined4 *)(*(int *)(param_1 + 4) + 0x61c));
+      iVar5 = *(int *)(param_1 + 0x38);
+      if (*(int *)(param_1 + 0x4c) + -1 <= iVar5) {
+        pfVar6 = (float *)FUN_0046f400(local_10,*(undefined4 *)
+                                                 (*(int *)(param_1 + 0x50) + iVar5 * 4));
+        *pfVar1 = *pfVar6;
+        *(float *)(param_1 + 0x2c) = pfVar6[1];
+        *(float *)(param_1 + 0x30) = pfVar6[2];
+        *(float *)(param_1 + 0x34) = pfVar6[3];
+        return;
+      }
+      FUN_0046f570(*(undefined4 *)(*(int *)(param_1 + 0x50) + iVar5 * 4),
+                   *(undefined4 *)(*(int *)(param_1 + 0x50) + 4 + iVar5 * 4),pfVar1);
+      return;
+    }
+  }
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046DCA0 FUN_0046dca0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+void __fastcall FUN_0046dca0(int param_1)
+
+{
+  int *piVar1;
+  float fVar2;
+  float fVar3;
+  float fVar4;
+  int iVar5;
+  int iVar6;
+  float10 fVar7;
+  
+  switch(*(undefined4 *)(param_1 + 0x60)) {
+  case 1:
+    iVar6 = **(int **)(param_1 + 4);
+    fVar7 = (float10)(**(code **)(iVar6 + 0x13c))(0x40490fdb,0x9000028);
+    (**(code **)(iVar6 + 0x118))((float)fVar7);
+    return;
+  case 2:
+    FUN_00456f70(*(undefined4 *)(param_1 + 0x54));
+    return;
+  case 3:
+    break;
+  case 4:
+    iVar6 = *(int *)(*(int *)(param_1 + 4) + 4);
+    fVar7 = (float10)fpatan((float10)*(float *)(param_1 + 0x28) - (float10)*(float *)(iVar6 + 0xd0),
+                            (float10)*(float *)(param_1 + 0x30) - (float10)*(float *)(iVar6 + 0xd8))
+    ;
+    *(float *)(*(int *)(param_1 + 4) + 0x5d8) = (float)fVar7;
+    piVar1 = *(int **)(param_1 + 4);
+    if ((DAT_007b2a10 == piVar1) || (*(float *)(param_1 + 0x5c) == DAT_005e74a4)) {
+      (**(code **)(*piVar1 + 0x10c))(0x3f400000,0xbf800000);
+    }
+    else {
+      iVar6 = FUN_00454de0();
+      fVar2 = _DAT_005dff8c;
+      if (iVar6 != 0) {
+        iVar5 = piVar1[1];
+        fVar4 = *(float *)(iVar5 + 0xd0) - *(float *)(iVar6 + 0xd0);
+        fVar3 = *(float *)(iVar5 + 0xd4) - *(float *)(iVar6 + 0xd4);
+        fVar2 = *(float *)(iVar5 + 0xd8) - *(float *)(iVar6 + 0xd8);
+        fVar2 = fVar4 * fVar4 + fVar3 * fVar3 + fVar2 * fVar2;
+      }
+      fVar2 = SQRT(fVar2) - *(float *)(param_1 + 0x5c);
+      fVar3 = _DAT_005e74a8;
+      if ((fVar2 < _DAT_005e74a8) &&
+         (fVar3 = fVar2, fVar2 < DAT_005dd380 != (fVar2 == DAT_005dd380))) {
+        fVar3 = DAT_005dd380;
+      }
+      (**(code **)(**(int **)(param_1 + 4) + 0x10c))
+                ((fVar3 / _DAT_005e74a8) * _DAT_005e752c,0xbf800000);
+    }
+    FUN_004190d0(param_1 + 0x28,0xffffffff,0,0x3ff00000);
+  default:
+    return;
+  }
+  iVar6 = *(int *)(param_1 + 4);
+  iVar5 = FUN_00454de0();
+  iVar6 = *(int *)(iVar6 + 4);
+  fVar7 = (float10)fpatan((float10)*(float *)(iVar5 + 0xd0) - (float10)*(float *)(iVar6 + 0xd0),
+                          (float10)*(float *)(iVar5 + 0xd8) - (float10)*(float *)(iVar6 + 0xd8));
+  *(float *)(*(int *)(param_1 + 4) + 0x5d8) = (float)fVar7;
+  piVar1 = *(int **)(param_1 + 4);
+  if ((DAT_007b2a10 != piVar1) && (*(float *)(param_1 + 0x5c) != DAT_005e74a4)) {
+    iVar6 = FUN_00454de0();
+    fVar2 = _DAT_005dff8c;
+    if (iVar6 != 0) {
+      iVar5 = piVar1[1];
+      fVar4 = *(float *)(iVar5 + 0xd0) - *(float *)(iVar6 + 0xd0);
+      fVar3 = *(float *)(iVar5 + 0xd4) - *(float *)(iVar6 + 0xd4);
+      fVar2 = *(float *)(iVar5 + 0xd8) - *(float *)(iVar6 + 0xd8);
+      fVar2 = fVar4 * fVar4 + fVar3 * fVar3 + fVar2 * fVar2;
+    }
+    fVar2 = SQRT(fVar2) - *(float *)(param_1 + 0x5c);
+    fVar3 = _DAT_005e74a8;
+    if ((fVar2 < _DAT_005e74a8) && (fVar3 = fVar2, fVar2 < DAT_005dd380 != (fVar2 == DAT_005dd380)))
+    {
+      fVar3 = DAT_005dd380;
+    }
+    (**(code **)(**(int **)(param_1 + 4) + 0x10c))(fVar3 / _DAT_005e74a8,0xbf800000);
+    return;
+  }
+  (**(code **)(*piVar1 + 0x10c))(0x3f800000,0xbf800000);
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== Dog6A850 VTABLE 0x005E6F68 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +00 -> 0046BCA0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +04 -> 0046A890 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +08 -> 0046AA00 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +0C -> 0046AA20 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +10 -> 00457400 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +14 -> 0046AA30 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +18 -> 0046A8E0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +1C -> 004510D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +20 -> 00456F20 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +24 -> 0046ABA0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +28 -> 0041CDD0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +2C -> 004190D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +30 -> 004510E0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +34 -> 0046A880 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +38 -> 0046A8B0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +3C -> 0046AA50 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +40 -> 0046AB10 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046BCA0 FUN_0046bca0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall FUN_0046bca0(undefined4 param_1,byte param_2)
+
+{
+  thunk_FUN_00456eb0();
+  if ((param_2 & 1) != 0) {
+    FUN_004e4bb4(param_1);
+  }
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046AA00 FUN_0046aa00 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0046aa00(int param_1)
+
+{
+  FUN_00456f00();
+  *(undefined4 *)(param_1 + 0x38) = 1;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046AA20 thunk_FUN_00456f10 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void thunk_FUN_00456f10(void)
+
+{
+  FUN_00456f10();
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00457400 FUN_00457400 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00457400(int *param_1)
+
+{
+  (**(code **)(*param_1 + 0x3c))();
+                    /* WARNING: Could not recover jumptable at 0x0045740d. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+  (**(code **)(*param_1 + 0x40))();
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046AA30 FUN_0046aa30 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+void __fastcall FUN_0046aa30(int param_1)
+
+{
+  FUN_00456f60();
+  *(float *)(param_1 + 0x34) = *(float *)(param_1 + 0x34) - DAT_00620034 * _DAT_005dd93c;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046A8E0 FUN_0046a8e0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+undefined1 __fastcall FUN_0046a8e0(int param_1)
+
+{
+  float fVar1;
+  float fVar2;
+  float fVar3;
+  char cVar4;
+  int iVar5;
+  int iVar6;
+  
+  iVar5 = FUN_00454de0();
+  if ((iVar5 != 0) && (cVar4 = FUN_004558d0(), cVar4 != '\0')) {
+    if ((*(char *)(param_1 + 9) != '\0') && (*(int *)(param_1 + 0x38) == 4)) {
+      return *(undefined1 *)(param_1 + 8);
+    }
+    cVar4 = FUN_00455da0();
+    if ((cVar4 == '\0') || (cVar4 = (**(code **)(**(int **)(param_1 + 4) + 0x158))(), cVar4 == '\0')
+       ) {
+      iVar5 = *(int *)(param_1 + 4);
+      if (*(char *)(param_1 + 9) == '\0') {
+        iVar6 = FUN_00454de0();
+        fVar1 = _DAT_005dff8c;
+        if (iVar6 != 0) {
+          iVar5 = *(int *)(iVar5 + 4);
+          fVar3 = *(float *)(iVar5 + 0xd0) - *(float *)(iVar6 + 0xd0);
+          fVar2 = *(float *)(iVar5 + 0xd4) - *(float *)(iVar6 + 0xd4);
+          fVar1 = *(float *)(iVar5 + 0xd8) - *(float *)(iVar6 + 0xd8);
+          fVar1 = fVar3 * fVar3 + fVar2 * fVar2 + fVar1 * fVar1;
+        }
+        if (fVar1 <= *(float *)(param_1 + 0x24)) goto LAB_0046a9ef;
+      }
+      else {
+        iVar6 = FUN_00454de0();
+        fVar1 = _DAT_005dff8c;
+        if (iVar6 != 0) {
+          iVar5 = *(int *)(iVar5 + 4);
+          fVar3 = *(float *)(iVar5 + 0xd0) - *(float *)(iVar6 + 0xd0);
+          fVar2 = *(float *)(iVar5 + 0xd4) - *(float *)(iVar6 + 0xd4);
+          fVar1 = *(float *)(iVar5 + 0xd8) - *(float *)(iVar6 + 0xd8);
+          fVar1 = fVar3 * fVar3 + fVar2 * fVar2 + fVar1 * fVar1;
+        }
+        if (fVar1 < *(float *)(param_1 + 0x28)) {
+LAB_0046a9ef:
+          return *(undefined1 *)(param_1 + 8);
+        }
+      }
+    }
+  }
+  return 1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510D0 forced_004510d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall forced_004510d0(int param_1,undefined1 param_2)
+
+{
+  *(undefined1 *)(param_1 + 8) = param_2;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F20 FUN_00456f20 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __fastcall FUN_00456f20(int *param_1)
+
+{
+  char cVar1;
+  uint uVar2;
+  undefined4 uVar3;
+  
+  if (*(char *)((int)param_1 + 9) == '\0') {
+    uVar2 = param_1[6];
+    if (uVar2 <= (uint)param_1[5]) goto LAB_00456f54;
+  }
+  else {
+    cVar1 = (**(code **)(*param_1 + 0x30))();
+    if (((cVar1 == '\0') || (uVar2 = param_1[6], uVar2 == 0)) &&
+       ((uVar2 = param_1[7], uVar2 == 0 || ((uint)param_1[4] < uVar2)))) {
+LAB_00456f54:
+                    /* WARNING: Could not recover jumptable at 0x00456f59. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+      uVar3 = (**(code **)(*param_1 + 0x18))();
+      return uVar3;
+    }
+  }
+  return CONCAT31((int3)(uVar2 >> 8),1);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046ABA0 forced_0046aba0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+undefined4 __thiscall forced_0046aba0(int param_1,int param_2)
+
+{
+  uint uVar1;
+  undefined4 *puVar2;
+  undefined4 uStack_4;
+  
+  if ((*(int *)(param_2 + 0xc) == 0x16000001) && (*(int *)(param_1 + 0x38) == 4)) {
+    *(undefined4 *)(param_1 + 0x38) = 1;
+    uStack_4 = 0x3f800000;
+    uVar1 = FUN_00509c48();
+    puVar2 = &param_2;
+    if ((float)(int)(uVar1 % 200 - 100) * _DAT_005de534 + *(float *)(param_1 + 0x30) < _DAT_005dd384
+       ) {
+      puVar2 = &uStack_4;
+    }
+    *(undefined4 *)(param_1 + 0x34) = *puVar2;
+  }
+  return 0;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0041CDD0 FUN_0041cdd0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_0041cdd0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004190D0 FUN_004190d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_004190d0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510E0 forced_004510e0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall forced_004510e0(int param_1)
+
+{
+  return *(undefined1 *)(param_1 + 0x21);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046A880 forced_0046a880 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+char * forced_0046a880(void)
+
+{
+  return s_AI_StalkNavMesh_00619718;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046A8B0 forced_0046a8b0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall
+forced_0046a8b0(int param_1,undefined4 param_2,float param_3,float param_4,undefined4 param_5,
+               undefined4 param_6)
+
+{
+  *(undefined4 *)(param_1 + 4) = param_2;
+  *(undefined4 *)(param_1 + 0x2c) = param_5;
+  *(undefined4 *)(param_1 + 0x30) = param_6;
+  *(float *)(param_1 + 0x24) = param_3 * param_3;
+  *(float *)(param_1 + 0x28) = param_4 * param_4;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046AA50 FUN_0046aa50 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+void __fastcall FUN_0046aa50(int param_1)
+
+{
+  int iVar1;
+  char cVar2;
+  float10 fVar3;
+  
+  iVar1 = *(int *)(param_1 + 0x38);
+  if (iVar1 == 1) {
+    fVar3 = (float10)(**(code **)(**(int **)(param_1 + 4) + 0x13c))();
+    if ((float10)_DAT_005e6e14 < ABS(fVar3)) {
+      *(undefined4 *)(param_1 + 0x38) = 2;
+    }
+    if ((*(int *)(param_1 + 0x2c) != 0) && (*(float *)(param_1 + 0x34) < _DAT_005dd3bc)) {
+      cVar2 = FUN_004565b0(1);
+      if (cVar2 != '\0') {
+        *(undefined4 *)(param_1 + 0x38) = 3;
+      }
+    }
+  }
+  else if (iVar1 == 2) {
+    fVar3 = (float10)(**(code **)(**(int **)(param_1 + 4) + 0x13c))();
+    if (ABS(fVar3) < (float10)_DAT_005de538) {
+      *(undefined4 *)(param_1 + 0x38) = 1;
+      return;
+    }
+  }
+  else if (iVar1 == 3) {
+    fVar3 = (float10)(**(code **)(**(int **)(param_1 + 4) + 0x13c))();
+    if (ABS(fVar3) < (float10)_DAT_005de538) {
+      FUN_00456f90(*(undefined4 *)(param_1 + 0x2c));
+      *(undefined4 *)(param_1 + 0x38) = 4;
+      return;
+    }
+  }
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046AB10 FUN_0046ab10 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0046ab10(int param_1)
+
+{
+  int iVar1;
+  int iVar2;
+  float10 fVar3;
+  
+  switch(*(undefined4 *)(param_1 + 0x38)) {
+  case 1:
+    FUN_00456f70(0x9000004);
+    break;
+  case 2:
+  case 3:
+    iVar1 = *(int *)(param_1 + 4);
+    iVar2 = FUN_00454de0();
+    iVar1 = *(int *)(iVar1 + 4);
+    fVar3 = (float10)fpatan((float10)*(float *)(iVar2 + 0xd0) - (float10)*(float *)(iVar1 + 0xd0),
+                            (float10)*(float *)(iVar2 + 0xd8) - (float10)*(float *)(iVar1 + 0xd8));
+    *(float *)(*(int *)(param_1 + 4) + 0x5d8) = (float)fVar3;
+    (**(code **)(**(int **)(param_1 + 4) + 0x10c))(0,0x3fc90fdb);
+    return;
+  case 4:
+    FUN_00456f70(*(undefined4 *)(param_1 + 0x2c));
+                    /* WARNING: Could not recover jumptable at 0x0046ab8a. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+    (**(code **)(**(int **)(param_1 + 4) + 0x130))();
+    return;
+  }
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== Dog6CB30 VTABLE 0x005E7428 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +00 -> 0046CBD0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +04 -> 0046CC40 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +08 -> 0046CE90 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +0C -> 00456F10 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +10 -> 0046CC70 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +14 -> 0046CF90 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +18 -> 0046CE40 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +1C -> 004510D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +20 -> 00456F20 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +24 -> 00456EF0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +28 -> 0041CDD0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +2C -> 004190D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +30 -> 004510E0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +34 -> 0046CBC0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +38 -> 00458430 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +3C -> 3F666666 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +40 -> 0046BCA0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046CBD0 FUN_0046cbd0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall FUN_0046cbd0(undefined4 param_1,byte param_2)
+
+{
+  FUN_0046cbf0();
+  if ((param_2 & 1) != 0) {
+    FUN_004e4bb4(param_1);
+  }
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046CC40 FUN_0046cc40 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0046cc40(int param_1)
+
+{
+  FUN_00456ec0();
+  *(undefined4 *)(param_1 + 4) = 0;
+  *(undefined4 *)(param_1 + 0x30) = 0;
+  *(undefined1 *)(param_1 + 8) = 0xb;
+  *(undefined1 *)(param_1 + 0x4c) = 0;
+  *(undefined4 *)(param_1 + 0x38) = 0xffffffff;
+  *(undefined4 *)(param_1 + 0x50) = 0;
+  *(undefined4 *)(param_1 + 0x48) = 0;
+  *(undefined4 *)(param_1 + 0x44) = 0;
+  *(undefined4 *)(param_1 + 0x40) = 0;
+  *(undefined4 *)(param_1 + 0x3c) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046CE90 FUN_0046ce90 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0046ce90(int param_1)
+
+{
+  int iVar1;
+  int iVar2;
+  uint uVar3;
+  int *piVar4;
+  uint uVar5;
+  
+  iVar1 = FUN_0046fcc0(*(undefined4 *)(*(int *)(param_1 + 4) + 0x61c));
+  if (iVar1 != 0) {
+    iVar2 = 0;
+    iVar1 = *(int *)(param_1 + 0x30);
+    if (0 < iVar1) {
+      piVar4 = *(int **)(param_1 + 0x34);
+      do {
+        if (*piVar4 == *(int *)(*(int *)(param_1 + 4) + 0x614)) goto LAB_0046ced0;
+        iVar2 = iVar2 + 1;
+        piVar4 = piVar4 + 1;
+      } while (iVar2 < iVar1);
+    }
+    iVar2 = -1;
+LAB_0046ced0:
+    if (((iVar1 < 1) || (iVar2 < 0)) ||
+       (uVar3 = iVar2 - *(int *)(param_1 + 0x38), uVar5 = (int)uVar3 >> 0x1f,
+       2 < (int)((uVar3 ^ uVar5) - uVar5))) {
+      FUN_0046cef0();
+      return;
+    }
+  }
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F10 FUN_00456f10 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f10(int param_1)
+
+{
+  *(undefined1 *)(param_1 + 9) = 0;
+  *(undefined4 *)(param_1 + 0x14) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046CC70 forced_0046cc70 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+void __fastcall forced_0046cc70(int param_1)
+
+{
+  float *pfVar1;
+  undefined4 *puVar2;
+  int iVar3;
+  float fVar4;
+  float fVar5;
+  float fVar6;
+  int iVar7;
+  float *pfVar8;
+  float10 fVar9;
+  undefined1 auStack_10 [16];
+  
+  if (*(int *)(param_1 + 0x30) < 2) {
+    FUN_0046cef0();
+  }
+  if (_DAT_005e7464 < *(float *)(*(int *)(param_1 + 4) + 0x5e4)) {
+    FUN_0046cef0();
+  }
+  iVar3 = *(int *)(param_1 + 4);
+  if (*(int *)(param_1 + 0x30) < 2) {
+    FUN_00454e60(0x9000004,0xffffffff);
+    return;
+  }
+  iVar7 = *(int *)(iVar3 + 4);
+  pfVar1 = (float *)(param_1 + 0x3c);
+  fVar4 = *(float *)(iVar7 + 0xd0) - *pfVar1;
+  fVar6 = *(float *)(iVar7 + 0xd4) - *(float *)(param_1 + 0x40);
+  fVar5 = *(float *)(iVar7 + 0xd8) - *(float *)(param_1 + 0x44);
+  if (fVar4 * fVar4 + fVar6 * fVar6 + fVar5 * fVar5 < _DAT_005dff0c) {
+    if (*(char *)(param_1 + 0x4c) == '\0') {
+      iVar7 = *(int *)(param_1 + 0x38) + 1;
+      *(int *)(param_1 + 0x38) = iVar7;
+      if (iVar7 < *(int *)(param_1 + 0x30) + -1) {
+        FUN_0046fcc0(*(undefined4 *)(iVar3 + 0x61c));
+        FUN_0046f570(*(undefined4 *)(*(int *)(param_1 + 0x34) + *(int *)(param_1 + 0x38) * 4),
+                     *(undefined4 *)(*(int *)(param_1 + 0x34) + 4 + *(int *)(param_1 + 0x38) * 4),
+                     pfVar1);
+      }
+      else {
+        *(undefined1 *)(param_1 + 0x4c) = 1;
+        FUN_0046fcc0(*(undefined4 *)(iVar3 + 0x61c));
+        pfVar8 = (float *)FUN_0046f400(auStack_10,
+                                       *(undefined4 *)
+                                        (*(int *)(param_1 + 0x34) + *(int *)(param_1 + 0x38) * 4));
+        *pfVar1 = *pfVar8;
+        *(float *)(param_1 + 0x40) = pfVar8[1];
+        *(float *)(param_1 + 0x44) = pfVar8[2];
+        *(float *)(param_1 + 0x48) = pfVar8[3];
+      }
+    }
+    else {
+      iVar7 = *(int *)(param_1 + 0x38) + -1;
+      *(int *)(param_1 + 0x38) = iVar7;
+      if (iVar7 < 1) {
+        *(undefined1 *)(param_1 + 0x4c) = 0;
+        FUN_0046fcc0(*(undefined4 *)(iVar3 + 0x61c));
+        pfVar8 = (float *)FUN_0046f400(auStack_10,
+                                       *(undefined4 *)
+                                        (*(int *)(param_1 + 0x34) + *(int *)(param_1 + 0x38) * 4));
+        *pfVar1 = *pfVar8;
+        *(float *)(param_1 + 0x40) = pfVar8[1];
+        *(float *)(param_1 + 0x44) = pfVar8[2];
+        *(float *)(param_1 + 0x48) = pfVar8[3];
+      }
+      else {
+        FUN_0046fcc0(*(undefined4 *)(iVar3 + 0x61c));
+        puVar2 = (undefined4 *)(*(int *)(param_1 + 0x34) + *(int *)(param_1 + 0x38) * 4);
+        FUN_0046f570(*puVar2,puVar2[-1],pfVar1);
+      }
+    }
+  }
+  iVar3 = *(int *)(*(int *)(param_1 + 4) + 4);
+  fVar9 = (float10)fpatan((float10)*pfVar1 - (float10)*(float *)(iVar3 + 0xd0),
+                          (float10)*(float *)(param_1 + 0x44) - (float10)*(float *)(iVar3 + 0xd8));
+  *(float *)(*(int *)(param_1 + 4) + 0x5d8) = (float)fVar9;
+  (**(code **)(**(int **)(param_1 + 4) + 0x10c))(0,0x40490fdb);
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046CF90 FUN_0046cf90 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+void __fastcall FUN_0046cf90(int param_1)
+
+{
+  FUN_00456f60();
+  *(float *)(param_1 + 0x50) = *(float *)(param_1 + 0x50) - DAT_00620034 * _DAT_005dd93c;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046CE40 FUN_0046ce40 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall FUN_0046ce40(int param_1)
+
+{
+  int iVar1;
+  
+  iVar1 = FUN_0046fcc0(*(undefined4 *)(*(int *)(param_1 + 4) + 0x61c));
+  if ((iVar1 != 0) &&
+     ((DAT_007b30ac < 1 ||
+      ((((iVar1 = *(int *)(DAT_007b30b0 + -4 + DAT_007b30ac * 4), iVar1 != 1 && (iVar1 != 2)) &&
+        (iVar1 != 3)) && (iVar1 != 0xf)))))) {
+    return *(undefined1 *)(param_1 + 8);
+  }
+  return 1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510D0 forced_004510d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall forced_004510d0(int param_1,undefined1 param_2)
+
+{
+  *(undefined1 *)(param_1 + 8) = param_2;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F20 FUN_00456f20 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __fastcall FUN_00456f20(int *param_1)
+
+{
+  char cVar1;
+  uint uVar2;
+  undefined4 uVar3;
+  
+  if (*(char *)((int)param_1 + 9) == '\0') {
+    uVar2 = param_1[6];
+    if (uVar2 <= (uint)param_1[5]) goto LAB_00456f54;
+  }
+  else {
+    cVar1 = (**(code **)(*param_1 + 0x30))();
+    if (((cVar1 == '\0') || (uVar2 = param_1[6], uVar2 == 0)) &&
+       ((uVar2 = param_1[7], uVar2 == 0 || ((uint)param_1[4] < uVar2)))) {
+LAB_00456f54:
+                    /* WARNING: Could not recover jumptable at 0x00456f59. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+      uVar3 = (**(code **)(*param_1 + 0x18))();
+      return uVar3;
+    }
+  }
+  return CONCAT31((int3)(uVar2 >> 8),1);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456EF0 forced_00456ef0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 forced_00456ef0(void)
+
+{
+  return 0;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0041CDD0 FUN_0041cdd0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_0041cdd0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004190D0 FUN_004190d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_004190d0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510E0 forced_004510e0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall forced_004510e0(int param_1)
+
+{
+  return *(undefined1 *)(param_1 + 0x21);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046CBC0 forced_0046cbc0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+char * forced_0046cbc0(void)
+
+{
+  return s_AI_PatrolNavMesh2_00619950;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00458430 forced_00458430 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall forced_00458430(int param_1,undefined4 param_2,undefined4 param_3)
+
+{
+  *(undefined4 *)(param_1 + 4) = param_2;
+  *(undefined4 *)(param_1 + 0x24) = param_3;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046BCA0 FUN_0046bca0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall FUN_0046bca0(undefined4 param_1,byte param_2)
+
+{
+  thunk_FUN_00456eb0();
+  if ((param_2 & 1) != 0) {
+    FUN_004e4bb4(param_1);
+  }
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== Dog44EE20 VTABLE 0x005E1FBC === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +00 -> 0044EEC0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +04 -> 0044EF60 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +08 -> 0044F100 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +0C -> 0044F140 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +10 -> 0044F020 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +14 -> 00456F60 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +18 -> 0044F080 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +1C -> 004510D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +20 -> 00456F20 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +24 -> 0044F180 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +28 -> 0041CDD0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +2C -> 004190D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +30 -> 004510E0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +34 -> 0044EEB0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +38 -> 0044EFB0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +3C -> 0044F990 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +40 -> 0044FA30 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0044EEC0 FUN_0044eec0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall FUN_0044eec0(undefined4 param_1,byte param_2)
+
+{
+  FUN_0044eee0();
+  if ((param_2 & 1) != 0) {
+    FUN_004e4bb4(param_1);
+  }
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0044EF60 FUN_0044ef60 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0044ef60(int param_1)
+
+{
+  FUN_00456ec0();
+  *(undefined1 *)(param_1 + 0x44) = 1;
+  *(undefined4 *)(param_1 + 0x24) = 0;
+  *(undefined4 *)(param_1 + 0x3c) = 0;
+  *(undefined4 *)(param_1 + 0x38) = 0;
+  *(undefined4 *)(param_1 + 0x40) = 0;
+  *(undefined4 *)(param_1 + 0x28) = 0;
+  *(undefined4 *)(param_1 + 0x30) = 0;
+  *(undefined4 *)(param_1 + 0x2c) = 0;
+  *(undefined1 *)(param_1 + 0x34) = 0;
+  *(undefined4 *)(param_1 + 0x48) = 0;
+  *(undefined4 *)(param_1 + 0x4c) = 0;
+  *(undefined4 *)(param_1 + 0x50) = 0;
+  *(undefined4 *)(param_1 + 0x60) = 0;
+  *(undefined4 *)(param_1 + 0x5c) = 0;
+  *(undefined4 *)(param_1 + 0x58) = 0;
+  *(undefined4 *)(param_1 + 0x54) = 0;
+  *(undefined4 *)(param_1 + 100) = DAT_005e1fa8;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0044F100 FUN_0044f100 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+void __fastcall FUN_0044f100(int param_1)
+
+{
+  FUN_00456f00();
+  *(undefined4 *)(param_1 + 0x2c) = *(undefined4 *)(param_1 + 0x30);
+  *(undefined1 *)(param_1 + 0x34) = 0;
+  FUN_00456f90(*(undefined4 *)(param_1 + 0x24));
+  if (((byte)*(undefined4 *)(param_1 + 0x48) & 2) != 2) {
+    _DAT_007b2a3c = DAT_007b2a18;
+  }
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0044F140 FUN_0044f140 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0044f140(int param_1)
+
+{
+  FUN_00456f10();
+  if (*(int *)(param_1 + 0x4c) != 0) {
+    FUN_00448d30(0x1af002a6);
+    FUN_00443ee0();
+    *(undefined4 *)(param_1 + 0x4c) = 0;
+  }
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0044F020 FUN_0044f020 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0044f020(int param_1)
+
+{
+  if (*(char *)(param_1 + 0x34) == '\0') {
+    if (((byte)*(undefined4 *)(param_1 + 0x48) & 4) != 4) {
+      (**(code **)(**(int **)(param_1 + 4) + 0x130))();
+    }
+    FUN_00456f70(*(undefined4 *)(param_1 + 0x24));
+    FUN_0044f6a0();
+    return;
+  }
+  FUN_00456f70(*(undefined4 *)(param_1 + 0x28));
+  if (*(int *)(param_1 + 0x2c) != 0) {
+    *(int *)(param_1 + 0x2c) = *(int *)(param_1 + 0x2c) + -1;
+    FUN_0044f6a0();
+    return;
+  }
+  *(undefined1 *)(param_1 + 0x21) = 1;
+  FUN_0044f6a0();
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F60 FUN_00456f60 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f60(int param_1)
+
+{
+  if (*(char *)(param_1 + 9) != '\0') {
+    *(int *)(param_1 + 0x10) = *(int *)(param_1 + 0x10) + 1;
+    return;
+  }
+  *(int *)(param_1 + 0x14) = *(int *)(param_1 + 0x14) + 1;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0044F080 FUN_0044f080 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall FUN_0044f080(int *param_1)
+
+{
+  char cVar1;
+  
+  if (((*(char *)((int)param_1 + 9) == '\0') || ((char)param_1[0x11] == '\0')) ||
+     (cVar1 = (**(code **)(*param_1 + 0x30))(), cVar1 != '\0')) {
+    cVar1 = FUN_0044f3c0(1);
+    if (cVar1 == '\0') {
+      return 1;
+    }
+    cVar1 = (**(code **)(*(int *)param_1[1] + 0x158))();
+    if (cVar1 == '\0') {
+      return 1;
+    }
+    if ((((byte)param_1[0x12] & 1) == 1) && (cVar1 = FUN_00455da0(), cVar1 == '\0')) {
+      return 1;
+    }
+    if (((byte)param_1[0x12] & 8) == 8) {
+      cVar1 = FUN_004565b0(2);
+      if (cVar1 == '\0') {
+        return 1;
+      }
+    }
+  }
+  return (char)param_1[2];
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510D0 forced_004510d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall forced_004510d0(int param_1,undefined1 param_2)
+
+{
+  *(undefined1 *)(param_1 + 8) = param_2;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F20 FUN_00456f20 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __fastcall FUN_00456f20(int *param_1)
+
+{
+  char cVar1;
+  uint uVar2;
+  undefined4 uVar3;
+  
+  if (*(char *)((int)param_1 + 9) == '\0') {
+    uVar2 = param_1[6];
+    if (uVar2 <= (uint)param_1[5]) goto LAB_00456f54;
+  }
+  else {
+    cVar1 = (**(code **)(*param_1 + 0x30))();
+    if (((cVar1 == '\0') || (uVar2 = param_1[6], uVar2 == 0)) &&
+       ((uVar2 = param_1[7], uVar2 == 0 || ((uint)param_1[4] < uVar2)))) {
+LAB_00456f54:
+                    /* WARNING: Could not recover jumptable at 0x00456f59. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+      uVar3 = (**(code **)(*param_1 + 0x18))();
+      return uVar3;
+    }
+  }
+  return CONCAT31((int3)(uVar2 >> 8),1);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0044F180 forced_0044f180 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall forced_0044f180(int param_1,int param_2)
+
+{
+  short sVar1;
+  int iVar2;
+  undefined4 uVar3;
+  undefined4 uVar4;
+  undefined4 uVar5;
+  
+  switch(*(undefined4 *)(param_2 + 0xc)) {
+  case 0x16000001:
+    if ((*(int *)(param_1 + 0x28) != 0) && (*(int *)(param_1 + 0x2c) != 0)) {
+      *(undefined1 *)(param_1 + 0x34) = 1;
+      return 0;
+    }
+    *(undefined1 *)(param_1 + 0x21) = 1;
+    return 0;
+  case 0x1600001f:
+    iVar2 = *(int *)(param_1 + 4);
+    *(short *)(iVar2 + 0x434) = DAT_00616da8;
+    DAT_00616da8 = DAT_00616da8 + 1;
+    sVar1 = *(short *)(iVar2 + 0x434);
+    uVar5 = *(undefined4 *)(*(int *)(param_1 + 4) + 4);
+    uVar3 = FUN_00454de0();
+    FUN_004dfeb0(uVar5,*(undefined4 *)(param_2 + 0x14),(int)sVar1,*(undefined4 *)(param_2 + 0x18),
+                 *(undefined4 *)(param_2 + 0x1c),*(undefined4 *)(param_2 + 0x20),uVar3);
+    return 0;
+  case 0x16000043:
+    *(undefined4 *)(param_1 + 0x50) = *(undefined4 *)(param_2 + 0x18);
+    FUN_0044f4f0();
+    return 0;
+  case 0x16000044:
+    if (*(int *)(param_1 + 0x4c) != 0) {
+      FUN_00448d30(0x1af002a6);
+      FUN_00443ee0();
+      *(undefined4 *)(param_1 + 0x4c) = 0;
+      return 0;
+    }
+    break;
+  case 0x16000046:
+    uVar5 = *(undefined4 *)(param_2 + 0x24);
+    uVar3 = *(undefined4 *)(param_2 + 0x20);
+    uVar4 = __ftol(uVar3,uVar5);
+    FUN_0044f2f0(*(undefined4 *)(param_2 + 0x14),*(undefined4 *)(param_2 + 0x18),uVar4,uVar3,uVar5);
+  }
+  return 0;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0041CDD0 FUN_0041cdd0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_0041cdd0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004190D0 FUN_004190d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_004190d0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510E0 forced_004510e0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall forced_004510e0(int param_1)
+
+{
+  return *(undefined1 *)(param_1 + 0x21);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0044EEB0 forced_0044eeb0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+char * forced_0044eeb0(void)
+
+{
+  return s_AI_Attack_00618db0;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0044EFB0 FUN_0044efb0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall
+FUN_0044efb0(int param_1,undefined4 param_2,undefined4 param_3,float param_4,float param_5,
+            undefined4 param_6,undefined1 param_7,undefined4 param_8,undefined4 param_9,
+            undefined4 param_10)
+
+{
+  undefined4 uVar1;
+  
+  FUN_00456ec0();
+  *(undefined4 *)(param_1 + 4) = param_2;
+  *(undefined4 *)(param_1 + 0x24) = param_3;
+  *(float *)(param_1 + 0x38) = param_4 * param_4;
+  *(undefined4 *)(param_1 + 0x40) = param_6;
+  *(undefined1 *)(param_1 + 0x44) = param_7;
+  *(undefined4 *)(param_1 + 0x28) = param_8;
+  *(float *)(param_1 + 0x3c) = param_5 * param_5;
+  uVar1 = __ftol();
+  *(undefined4 *)(param_1 + 0x30) = uVar1;
+  *(undefined4 *)(param_1 + 100) = param_10;
+  *(undefined1 *)(param_1 + 8) = 0x32;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0044F990 FUN_0044f990 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall FUN_0044f990(undefined4 param_1,byte param_2)
+
+{
+  FUN_0044f9b0();
+  if ((param_2 & 1) != 0) {
+    FUN_004e4bb4(param_1);
+  }
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0044FA30 FUN_0044fa30 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0044fa30(int param_1)
+
+{
+  FUN_00456ec0();
+  *(undefined1 *)(param_1 + 0x44) = 1;
+  *(undefined4 *)(param_1 + 0x24) = 0;
+  *(undefined4 *)(param_1 + 0x3c) = 0;
+  *(undefined4 *)(param_1 + 0x38) = 0;
+  *(undefined4 *)(param_1 + 0x40) = 0;
+  *(undefined4 *)(param_1 + 0x28) = 0;
+  *(undefined4 *)(param_1 + 0x30) = 0;
+  *(undefined4 *)(param_1 + 0x2c) = 0;
+  *(undefined1 *)(param_1 + 0x34) = 0;
+  *(undefined4 *)(param_1 + 0x48) = 0;
+  *(undefined4 *)(param_1 + 0x4c) = 0;
+  *(undefined4 *)(param_1 + 0x50) = 0;
+  *(undefined4 *)(param_1 + 0x60) = 0;
+  *(undefined4 *)(param_1 + 0x5c) = 0;
+  *(undefined4 *)(param_1 + 0x58) = 0;
+  *(undefined4 *)(param_1 + 0x54) = 0;
+  *(undefined4 *)(param_1 + 100) = DAT_005e1fa8;
+  *(undefined4 *)(param_1 + 0x68) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== Dog69E20 VTABLE 0x005E6E78 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +00 -> 0046BCA0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +04 -> 00469E90 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +08 -> 0046A0D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +0C -> 00456F10 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +10 -> 00469F00 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +14 -> 00456F60 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +18 -> 00469FD0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +1C -> 004510D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +20 -> 00456F20 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +24 -> 00459360 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +28 -> 0041CDD0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +2C -> 004190D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +30 -> 004510E0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +34 -> 00469E80 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +38 -> 00469EB0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +3C -> 0046BCA0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +40 -> 0046A190 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046BCA0 FUN_0046bca0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall FUN_0046bca0(undefined4 param_1,byte param_2)
+
+{
+  thunk_FUN_00456eb0();
+  if ((param_2 & 1) != 0) {
+    FUN_004e4bb4(param_1);
+  }
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00469E90 FUN_00469e90 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00469e90(int param_1)
+
+{
+  FUN_00456ec0();
+  *(undefined4 *)(param_1 + 0x24) = 0;
+  *(undefined4 *)(param_1 + 0x28) = 0;
+  *(undefined4 *)(param_1 + 0x30) = 0;
+  *(undefined4 *)(param_1 + 0x34) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046A0D0 FUN_0046a0d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0046a0d0(int param_1)
+
+{
+  int iVar1;
+  int iVar2;
+  float10 fVar3;
+  
+  FUN_00456f00();
+  FUN_00454ee0(*(undefined4 *)(param_1 + 0x24),0xffffffff);
+  iVar1 = *(int *)(param_1 + 4);
+  iVar2 = FUN_00454de0();
+  iVar1 = *(int *)(iVar1 + 4);
+  fVar3 = (float10)fpatan((float10)*(float *)(iVar2 + 0xd0) - (float10)*(float *)(iVar1 + 0xd0),
+                          (float10)*(float *)(iVar2 + 0xd8) - (float10)*(float *)(iVar1 + 0xd8));
+  *(float *)(param_1 + 0x2c) = (float)fVar3;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F10 FUN_00456f10 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f10(int param_1)
+
+{
+  *(undefined1 *)(param_1 + 9) = 0;
+  *(undefined4 *)(param_1 + 0x14) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F60 FUN_00456f60 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f60(int param_1)
+
+{
+  if (*(char *)(param_1 + 9) != '\0') {
+    *(int *)(param_1 + 0x10) = *(int *)(param_1 + 0x10) + 1;
+    return;
+  }
+  *(int *)(param_1 + 0x14) = *(int *)(param_1 + 0x14) + 1;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00469FD0 FUN_00469fd0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+undefined1 __fastcall FUN_00469fd0(int *param_1)
+
+{
+  int iVar1;
+  float fVar2;
+  float fVar3;
+  float fVar4;
+  char cVar5;
+  int iVar6;
+  float10 fVar7;
+  
+  if ((*(char *)((int)param_1 + 9) != '\0') &&
+     (cVar5 = (**(code **)(*param_1 + 0x30))(), cVar5 == '\0')) {
+    return (char)param_1[2];
+  }
+  fVar7 = (float10)(**(code **)(*(int *)param_1[1] + 0x13c))();
+  if ((float10)(float)param_1[10] < ABS(fVar7)) {
+    iVar1 = param_1[1];
+    iVar6 = FUN_00454de0();
+    fVar2 = _DAT_005dff8c;
+    if (iVar6 != 0) {
+      iVar1 = *(int *)(iVar1 + 4);
+      fVar4 = *(float *)(iVar1 + 0xd0) - *(float *)(iVar6 + 0xd0);
+      fVar3 = *(float *)(iVar1 + 0xd4) - *(float *)(iVar6 + 0xd4);
+      fVar2 = *(float *)(iVar1 + 0xd8) - *(float *)(iVar6 + 0xd8);
+      fVar2 = fVar4 * fVar4 + fVar3 * fVar3 + fVar2 * fVar2;
+    }
+    if ((float)param_1[0xd] <= fVar2) {
+      iVar1 = param_1[1];
+      iVar6 = FUN_00454de0();
+      fVar2 = _DAT_005dff8c;
+      if (iVar6 != 0) {
+        iVar1 = *(int *)(iVar1 + 4);
+        fVar4 = *(float *)(iVar1 + 0xd0) - *(float *)(iVar6 + 0xd0);
+        fVar3 = *(float *)(iVar1 + 0xd4) - *(float *)(iVar6 + 0xd4);
+        fVar2 = *(float *)(iVar1 + 0xd8) - *(float *)(iVar6 + 0xd8);
+        fVar2 = fVar4 * fVar4 + fVar3 * fVar3 + fVar2 * fVar2;
+      }
+      if (fVar2 < (float)param_1[0xe] != (fVar2 == (float)param_1[0xe])) {
+        return (char)param_1[2];
+      }
+    }
+  }
+  return 1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510D0 forced_004510d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall forced_004510d0(int param_1,undefined1 param_2)
+
+{
+  *(undefined1 *)(param_1 + 8) = param_2;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F20 FUN_00456f20 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __fastcall FUN_00456f20(int *param_1)
+
+{
+  char cVar1;
+  uint uVar2;
+  undefined4 uVar3;
+  
+  if (*(char *)((int)param_1 + 9) == '\0') {
+    uVar2 = param_1[6];
+    if (uVar2 <= (uint)param_1[5]) goto LAB_00456f54;
+  }
+  else {
+    cVar1 = (**(code **)(*param_1 + 0x30))();
+    if (((cVar1 == '\0') || (uVar2 = param_1[6], uVar2 == 0)) &&
+       ((uVar2 = param_1[7], uVar2 == 0 || ((uint)param_1[4] < uVar2)))) {
+LAB_00456f54:
+                    /* WARNING: Could not recover jumptable at 0x00456f59. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+      uVar3 = (**(code **)(*param_1 + 0x18))();
+      return uVar3;
+    }
+  }
+  return CONCAT31((int3)(uVar2 >> 8),1);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00459360 forced_00459360 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall forced_00459360(int param_1,int param_2)
+
+{
+  if (*(int *)(param_2 + 0xc) == 0x16000001) {
+    *(undefined1 *)(param_1 + 0x21) = 1;
+  }
+  return 0;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0041CDD0 FUN_0041cdd0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_0041cdd0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004190D0 FUN_004190d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_004190d0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510E0 forced_004510e0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall forced_004510e0(int param_1)
+
+{
+  return *(undefined1 *)(param_1 + 0x21);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00469EB0 FUN_00469eb0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall
+FUN_00469eb0(int param_1,undefined4 param_2,undefined4 param_3,undefined4 param_4,undefined4 param_5
+            ,float param_6,float param_7)
+
+{
+  FUN_00456ec0();
+  *(undefined4 *)(param_1 + 4) = param_2;
+  *(undefined4 *)(param_1 + 0x24) = param_3;
+  *(float *)(param_1 + 0x34) = param_6 * param_6;
+  *(undefined4 *)(param_1 + 0x28) = param_4;
+  *(undefined4 *)(param_1 + 0x30) = param_5;
+  *(undefined1 *)(param_1 + 8) = 0x46;
+  *(float *)(param_1 + 0x38) = param_7 * param_7;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046A190 FUN_0046a190 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0046a190(int param_1)
+
+{
+  FUN_00456ec0();
+  *(undefined4 *)(param_1 + 0x24) = 0;
+  *(undefined4 *)(param_1 + 0x28) = 0;
+  *(undefined4 *)(param_1 + 0x2c) = 0;
+  *(undefined4 *)(param_1 + 0x34) = 0;
+  *(undefined4 *)(param_1 + 0x30) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== Npc58BA0 VTABLE 0x005E2508 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +00 -> 0046BCA0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +04 -> 00458C00 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +08 -> 00456F00 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +0C -> 00456F10 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +10 -> 00458450 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +14 -> 00456F60 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +18 -> 00458C40 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +1C -> 004510D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +20 -> 00456F20 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +24 -> 00456EF0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +28 -> 0041CDD0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +2C -> 004190D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +30 -> 004510E0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +34 -> 00458BF0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +38 -> 00458C20 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +3C -> 00000000 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +40 -> 0046BCA0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046BCA0 FUN_0046bca0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall FUN_0046bca0(undefined4 param_1,byte param_2)
+
+{
+  thunk_FUN_00456eb0();
+  if ((param_2 & 1) != 0) {
+    FUN_004e4bb4(param_1);
+  }
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00458C00 FUN_00458c00 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00458c00(int param_1)
+
+{
+  FUN_00456ec0();
+  *(undefined4 *)(param_1 + 0x24) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F00 FUN_00456f00 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f00(int param_1)
+
+{
+  *(undefined1 *)(param_1 + 9) = 1;
+  *(undefined1 *)(param_1 + 0x21) = 0;
+  *(undefined4 *)(param_1 + 0x10) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F10 FUN_00456f10 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f10(int param_1)
+
+{
+  *(undefined1 *)(param_1 + 9) = 0;
+  *(undefined4 *)(param_1 + 0x14) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00458450 forced_00458450 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall forced_00458450(int param_1)
+
+{
+  FUN_00456f70(*(undefined4 *)(param_1 + 0x24));
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F60 FUN_00456f60 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f60(int param_1)
+
+{
+  if (*(char *)(param_1 + 9) != '\0') {
+    *(int *)(param_1 + 0x10) = *(int *)(param_1 + 0x10) + 1;
+    return;
+  }
+  *(int *)(param_1 + 0x14) = *(int *)(param_1 + 0x14) + 1;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00458C40 forced_00458c40 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall forced_00458c40(int param_1)
+
+{
+  return *(undefined1 *)(param_1 + 8);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510D0 forced_004510d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall forced_004510d0(int param_1,undefined1 param_2)
+
+{
+  *(undefined1 *)(param_1 + 8) = param_2;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F20 FUN_00456f20 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __fastcall FUN_00456f20(int *param_1)
+
+{
+  char cVar1;
+  uint uVar2;
+  undefined4 uVar3;
+  
+  if (*(char *)((int)param_1 + 9) == '\0') {
+    uVar2 = param_1[6];
+    if (uVar2 <= (uint)param_1[5]) goto LAB_00456f54;
+  }
+  else {
+    cVar1 = (**(code **)(*param_1 + 0x30))();
+    if (((cVar1 == '\0') || (uVar2 = param_1[6], uVar2 == 0)) &&
+       ((uVar2 = param_1[7], uVar2 == 0 || ((uint)param_1[4] < uVar2)))) {
+LAB_00456f54:
+                    /* WARNING: Could not recover jumptable at 0x00456f59. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+      uVar3 = (**(code **)(*param_1 + 0x18))();
+      return uVar3;
+    }
+  }
+  return CONCAT31((int3)(uVar2 >> 8),1);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456EF0 forced_00456ef0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 forced_00456ef0(void)
+
+{
+  return 0;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0041CDD0 FUN_0041cdd0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_0041cdd0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004190D0 FUN_004190d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_004190d0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510E0 forced_004510e0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall forced_004510e0(int param_1)
+
+{
+  return *(undefined1 *)(param_1 + 0x21);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00458BF0 forced_00458bf0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+char * forced_00458bf0(void)
+
+{
+  return s_AI_Idle_00619028;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00458C20 FUN_00458c20 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall FUN_00458c20(int param_1,undefined4 param_2,undefined4 param_3)
+
+{
+  FUN_00456ec0();
+  *(undefined4 *)(param_1 + 4) = param_2;
+  *(undefined4 *)(param_1 + 0x24) = param_3;
+  *(undefined1 *)(param_1 + 8) = 2;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== Npc590A0 VTABLE 0x005E25D0 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +00 -> 00459120 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +04 -> 00459140 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +08 -> 004592D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +0C -> 00456F10 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +10 -> 00459290 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +14 -> 00459380 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +18 -> 004592A0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +1C -> 004510D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +20 -> 00456F20 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +24 -> 00459360 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +28 -> 0041CDD0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +2C -> 004190D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +30 -> 004510E0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +34 -> 00459110 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +38 -> 004591C0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +3C -> 005E217C (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +40 -> 006196CC (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00459120 FUN_00459120 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall FUN_00459120(undefined4 param_1,byte param_2)
+
+{
+  FUN_00459160();
+  if ((param_2 & 1) != 0) {
+    FUN_004e4bb4(param_1);
+  }
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00459140 FUN_00459140 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00459140(int param_1)
+
+{
+  FUN_00456ec0();
+  *(undefined4 *)(param_1 + 0x3c) = 0;
+  *(undefined4 *)(param_1 + 0x24) = 0;
+  *(undefined4 *)(param_1 + 0x28) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004592D0 FUN_004592d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+uint __fastcall FUN_004592d0(int param_1)
+
+{
+  undefined4 uVar1;
+  int iVar2;
+  int iVar3;
+  uint uVar4;
+  uint uVar5;
+  int iVar6;
+  
+  FUN_00456f00();
+  uVar4 = *(uint *)(param_1 + 0x34);
+  if (uVar4 == 0) {
+    uVar5 = 0;
+  }
+  else {
+    uVar5 = FUN_00509c48();
+    uVar5 = uVar5 % uVar4;
+  }
+  uVar1 = *(undefined4 *)(*(int *)(param_1 + 0x38) + uVar5 * 4);
+  *(undefined4 *)(param_1 + 0x3c) = uVar1;
+  FUN_00454ee0(uVar1,0xffffffff);
+  iVar2 = *(int *)(param_1 + 0x24);
+  iVar3 = (int)(iVar2 + (iVar2 >> 0x1f & 3U)) >> 2;
+  uVar4 = iVar2 + (iVar2 >> 0x1f & 3U);
+  iVar6 = -iVar3;
+  uVar5 = ((int)uVar4 >> 2) + iVar3;
+  if (uVar5 == 0) {
+    *(int *)(param_1 + 0x28) = iVar2 + iVar6;
+    return uVar4;
+  }
+  uVar4 = FUN_00509c48();
+  *(uint *)(param_1 + 0x28) = *(int *)(param_1 + 0x24) + uVar4 % uVar5 + iVar6;
+  return uVar4 / uVar5;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F10 FUN_00456f10 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f10(int param_1)
+
+{
+  *(undefined1 *)(param_1 + 9) = 0;
+  *(undefined4 *)(param_1 + 0x14) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00459290 forced_00459290 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall forced_00459290(int param_1)
+
+{
+  FUN_00456f70(*(undefined4 *)(param_1 + 0x3c));
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00459380 forced_00459380 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall forced_00459380(int param_1)
+
+{
+  if ((*(char *)(param_1 + 9) == '\0') && (0 < *(int *)(param_1 + 0x28))) {
+    *(int *)(param_1 + 0x28) = *(int *)(param_1 + 0x28) + -1;
+  }
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004592A0 FUN_004592a0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall FUN_004592a0(int *param_1)
+
+{
+  char cVar1;
+  
+  if (((*(char *)((int)param_1 + 9) == '\0') ||
+      (cVar1 = (**(code **)(*param_1 + 0x30))(), cVar1 != '\0')) && (0 < param_1[10])) {
+    return 1;
+  }
+  return (char)param_1[2];
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510D0 forced_004510d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall forced_004510d0(int param_1,undefined1 param_2)
+
+{
+  *(undefined1 *)(param_1 + 8) = param_2;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F20 FUN_00456f20 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __fastcall FUN_00456f20(int *param_1)
+
+{
+  char cVar1;
+  uint uVar2;
+  undefined4 uVar3;
+  
+  if (*(char *)((int)param_1 + 9) == '\0') {
+    uVar2 = param_1[6];
+    if (uVar2 <= (uint)param_1[5]) goto LAB_00456f54;
+  }
+  else {
+    cVar1 = (**(code **)(*param_1 + 0x30))();
+    if (((cVar1 == '\0') || (uVar2 = param_1[6], uVar2 == 0)) &&
+       ((uVar2 = param_1[7], uVar2 == 0 || ((uint)param_1[4] < uVar2)))) {
+LAB_00456f54:
+                    /* WARNING: Could not recover jumptable at 0x00456f59. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+      uVar3 = (**(code **)(*param_1 + 0x18))();
+      return uVar3;
+    }
+  }
+  return CONCAT31((int3)(uVar2 >> 8),1);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00459360 forced_00459360 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall forced_00459360(int param_1,int param_2)
+
+{
+  if (*(int *)(param_2 + 0xc) == 0x16000001) {
+    *(undefined1 *)(param_1 + 0x21) = 1;
+  }
+  return 0;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0041CDD0 FUN_0041cdd0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_0041cdd0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004190D0 FUN_004190d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_004190d0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510E0 forced_004510e0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall forced_004510e0(int param_1)
+
+{
+  return *(undefined1 *)(param_1 + 0x21);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00459110 forced_00459110 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+char * forced_00459110(void)
+
+{
+  return s_AI_PeriodicIdle_0061904c;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004591C0 FUN_004591c0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall FUN_004591c0(int param_1,undefined4 param_2,int param_3,int param_4,int param_5)
+
+{
+  undefined4 uVar1;
+  int iVar2;
+  undefined4 uVar3;
+  uint uVar4;
+  uint uVar5;
+  int iVar6;
+  int iVar7;
+  
+  FUN_00456ec0();
+  *(undefined4 *)(param_1 + 4) = param_2;
+  *(int *)(param_1 + 0x24) = param_3;
+  iVar2 = (int)(param_3 + (param_3 >> 0x1f & 3U)) >> 2;
+  uVar5 = ((int)(param_3 + (param_3 >> 0x1f & 3U)) >> 2) + iVar2;
+  if (uVar5 == 0) {
+    uVar4 = 0;
+  }
+  else {
+    uVar4 = FUN_00509c48();
+    uVar4 = uVar4 % uVar5;
+  }
+  iVar6 = 0;
+  *(uint *)(param_1 + 0x28) = (*(int *)(param_1 + 0x24) + uVar4) - iVar2;
+  if (0 < param_4) {
+    do {
+      iVar2 = *(int *)(param_1 + 0x34) + 1;
+      uVar1 = *(undefined4 *)(param_5 + iVar6 * 4);
+      if (*(int *)(param_1 + 0x2c) < iVar2) {
+        iVar7 = *(int *)(param_1 + 0x30) + *(int *)(param_1 + 0x2c);
+        if (0 < iVar2) {
+          for (; iVar7 < iVar2; iVar7 = iVar7 + *(int *)(param_1 + 0x30)) {
+          }
+        }
+        uVar3 = FUN_004e4b76(*(undefined4 *)(param_1 + 0x38),iVar7 * 4);
+        *(undefined4 *)(param_1 + 0x38) = uVar3;
+        *(int *)(param_1 + 0x2c) = iVar7;
+      }
+      *(undefined4 *)(*(int *)(param_1 + 0x38) + *(int *)(param_1 + 0x34) * 4) = uVar1;
+      iVar6 = iVar6 + 1;
+      *(int *)(param_1 + 0x34) = *(int *)(param_1 + 0x34) + 1;
+    } while (iVar6 < param_4);
+  }
+  *(undefined1 *)(param_1 + 8) = 0x16;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== Npc6BDB0 VTABLE 0x005E7368 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +00 -> 0046BE50 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +04 -> 0046BEC0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +08 -> 0046BF80 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +0C -> 00456F10 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +10 -> 0046BFA0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +14 -> 00456F60 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +18 -> 004572E0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +1C -> 004510D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +20 -> 00456F20 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +24 -> 0046C1F0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +28 -> 0041CDD0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +2C -> 004190D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +30 -> 004510E0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +34 -> 0046BE40 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +38 -> 0046BF00 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +3C -> 0046C1B0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +40 -> 0046C310 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046BE50 FUN_0046be50 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall FUN_0046be50(undefined4 param_1,byte param_2)
+
+{
+  FUN_0046be70();
+  if ((param_2 & 1) != 0) {
+    FUN_004e4bb4(param_1);
+  }
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046BEC0 FUN_0046bec0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0046bec0(int param_1)
+
+{
+  FUN_00456ec0();
+  *(undefined1 *)(param_1 + 8) = 0xf;
+  *(undefined4 *)(param_1 + 0x24) = 0;
+  *(undefined4 *)(param_1 + 0x34) = 0;
+  *(undefined4 *)(param_1 + 0x30) = 0;
+  *(undefined4 *)(param_1 + 0x2c) = 0;
+  *(undefined4 *)(param_1 + 0x28) = 0;
+  *(undefined4 *)(param_1 + 0x94) = 0;
+  *(undefined4 *)(param_1 + 0x8c) = 0;
+  *(undefined4 *)(param_1 + 0x90) = 0;
+                    /* WARNING: Could not recover jumptable at 0x0046bef5. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+  (**(code **)(*(int *)(param_1 + 0x38) + 8))();
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046BF80 FUN_0046bf80 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_0046bf80(int param_1)
+
+{
+  FUN_00456f00();
+  *(undefined4 *)(param_1 + 0x94) = 0;
+  FUN_00423f60(param_1 + 0x28);
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F10 FUN_00456f10 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f10(int param_1)
+
+{
+  *(undefined1 *)(param_1 + 9) = 0;
+  *(undefined4 *)(param_1 + 0x14) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046BFA0 forced_0046bfa0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall forced_0046bfa0(int *param_1)
+
+{
+  int iVar1;
+  uint uVar2;
+  char cVar3;
+  undefined4 uVar4;
+  float10 fVar5;
+  short sStack_18;
+  ushort uStack_16;
+  ushort uStack_14;
+  undefined4 uStack_10;
+  undefined4 uStack_c;
+  undefined4 uStack_8;
+  undefined4 uStack_4;
+  
+  if (param_1[0x25] != 0) {
+    if ((param_1[0x25] == 2) && (iVar1 = param_1[0x24], param_1[0x24] = iVar1 + -1, iVar1 + -1 == 0)
+       ) {
+      param_1[0x25] = 0;
+    }
+    goto LAB_0046c11a;
+  }
+  if (param_1[0x19] == 0) goto LAB_0046c11a;
+  iVar1 = *(int *)(param_1[1] + 4);
+  uStack_10 = *(undefined4 *)(iVar1 + 0xd0);
+  uStack_c = *(undefined4 *)(iVar1 + 0xd4);
+  uStack_8 = *(undefined4 *)(iVar1 + 0xd8);
+  uStack_4 = *(undefined4 *)(iVar1 + 0xdc);
+  if (param_1[0x19] == 0) goto LAB_0046c11a;
+  cVar3 = FUN_00420990(&uStack_10,
+                       CONCAT22((short)((uint)(iVar1 + 0xd0) >> 0x10),
+                                *(undefined2 *)((int)param_1 + 0x86)));
+  if (cVar3 == '\0') goto LAB_0046c11a;
+  if (param_1[0x19] != 0) {
+    cVar3 = FUN_00420890((short)param_1[0x21],&sStack_18);
+    if (cVar3 != '\0') {
+      if (sStack_18 == 1) {
+        uVar4 = FUN_004f9032(uStack_16 + 0x9000000);
+        FUN_004190d0(s_Running_animation__s_006198e8,uVar4);
+        uVar2 = (uint)uStack_16;
+        param_1[0x25] = 1;
+      }
+      else {
+        if (sStack_18 != 2) goto LAB_0046c113;
+        uVar4 = FUN_004f9032(uStack_16 + 0x9000000,uStack_14);
+        FUN_004190d0(s_Running_animation__s_for__d_secs_00619900,uVar4);
+        uVar2 = CONCAT22(uStack_14,uStack_16);
+        param_1[0x25] = 2;
+        param_1[0x24] = (uint)uStack_14 * 0x3c;
+      }
+      param_1[0x23] = (uVar2 & 0xffff) + 0x9000000;
+    }
+  }
+LAB_0046c113:
+  (**(code **)(*param_1 + 0x3c))();
+LAB_0046c11a:
+  iVar1 = param_1[0x25];
+  if (iVar1 == 0) {
+    iVar1 = *(int *)(param_1[1] + 4);
+    fVar5 = (float10)fpatan((float10)(float)param_1[10] - (float10)*(float *)(iVar1 + 0xd0),
+                            (float10)(float)param_1[0xc] - (float10)*(float *)(iVar1 + 0xd8));
+    *(float *)(param_1[1] + 0x5d8) = (float)fVar5;
+    (**(code **)(*(int *)param_1[1] + 0x10c))(param_1[9],0xbf800000);
+    FUN_004190d0(param_1 + 10,0xff00ff00,0,0x3ff00000);
+  }
+  else {
+    if (iVar1 == 1) {
+      FUN_00456f70(param_1[0x23]);
+      return;
+    }
+    if (iVar1 == 2) {
+      FUN_00456f70(param_1[0x23]);
+      return;
+    }
+  }
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F60 FUN_00456f60 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f60(int param_1)
+
+{
+  if (*(char *)(param_1 + 9) != '\0') {
+    *(int *)(param_1 + 0x10) = *(int *)(param_1 + 0x10) + 1;
+    return;
+  }
+  *(int *)(param_1 + 0x14) = *(int *)(param_1 + 0x14) + 1;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004572E0 forced_004572e0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall forced_004572e0(int param_1)
+
+{
+  return *(undefined1 *)(param_1 + 8);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510D0 forced_004510d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall forced_004510d0(int param_1,undefined1 param_2)
+
+{
+  *(undefined1 *)(param_1 + 8) = param_2;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F20 FUN_00456f20 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __fastcall FUN_00456f20(int *param_1)
+
+{
+  char cVar1;
+  uint uVar2;
+  undefined4 uVar3;
+  
+  if (*(char *)((int)param_1 + 9) == '\0') {
+    uVar2 = param_1[6];
+    if (uVar2 <= (uint)param_1[5]) goto LAB_00456f54;
+  }
+  else {
+    cVar1 = (**(code **)(*param_1 + 0x30))();
+    if (((cVar1 == '\0') || (uVar2 = param_1[6], uVar2 == 0)) &&
+       ((uVar2 = param_1[7], uVar2 == 0 || ((uint)param_1[4] < uVar2)))) {
+LAB_00456f54:
+                    /* WARNING: Could not recover jumptable at 0x00456f59. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+      uVar3 = (**(code **)(*param_1 + 0x18))();
+      return uVar3;
+    }
+  }
+  return CONCAT31((int3)(uVar2 >> 8),1);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046C1F0 forced_0046c1f0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall forced_0046c1f0(int param_1,int param_2)
+
+{
+  if ((*(int *)(param_2 + 0xc) == 0x16000001) && (*(int *)(param_1 + 0x94) == 1)) {
+    *(undefined4 *)(param_1 + 0x94) = 0;
+  }
+  return 0;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0041CDD0 FUN_0041cdd0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_0041cdd0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004190D0 FUN_004190d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_004190d0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510E0 forced_004510e0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall forced_004510e0(int param_1)
+
+{
+  return *(undefined1 *)(param_1 + 0x21);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046BF00 FUN_0046bf00 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall FUN_0046bf00(int param_1,undefined4 param_2,undefined4 param_3,undefined4 param_4)
+
+{
+  char cVar1;
+  undefined4 uVar2;
+  void *local_c;
+  undefined1 *puStack_8;
+  undefined4 local_4;
+  
+  uVar2 = param_3;
+  local_4 = 0xffffffff;
+  puStack_8 = &LAB_005d6f88;
+  local_c = ExceptionList;
+  ExceptionList = &local_c;
+  *(undefined4 *)(param_1 + 4) = param_2;
+  *(undefined4 *)(param_1 + 0x6c) = param_3;
+  cVar1 = FUN_00422a20();
+  if (cVar1 == '\0') {
+    param_2 = 0;
+    local_4 = 0;
+    uVar2 = FUN_004f9032(uVar2);
+    FUN_004fbfb8(&param_2,s_Failed_to_find_path__s_006198d0,uVar2);
+    do {
+                    /* WARNING: Do nothing block with infinite loop */
+    } while( true );
+  }
+  *(undefined4 *)(param_1 + 0x24) = param_4;
+  ExceptionList = local_c;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046C310 FUN_0046c310 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall FUN_0046c310(undefined4 param_1,byte param_2)
+
+{
+  FUN_0046c330();
+  if ((param_2 & 1) != 0) {
+    FUN_004e4bb4(param_1);
+  }
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+=== Npc58C50 VTABLE 0x005E2548 === (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +00 -> 0046BCA0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +04 -> 00458CC0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +08 -> 00456F00 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +0C -> 00456F10 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +10 -> 00457400 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +14 -> 00456F60 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +18 -> 00458D00 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +1C -> 004510D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +20 -> 00456F20 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +24 -> 00456EF0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +28 -> 0041CDD0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +2C -> 004190D0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +30 -> 004510E0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +34 -> 00458CB0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +38 -> 00458CE0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +3C -> 00458DE0 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> +40 -> 00458E50 (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0046BCA0 FUN_0046bca0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __thiscall FUN_0046bca0(undefined4 param_1,byte param_2)
+
+{
+  thunk_FUN_00456eb0();
+  if ((param_2 & 1) != 0) {
+    FUN_004e4bb4(param_1);
+  }
+  return param_1;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00458CC0 FUN_00458cc0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00458cc0(int param_1)
+
+{
+  FUN_00456ec0();
+  *(undefined1 *)(param_1 + 8) = 0x15;
+  *(undefined4 *)(param_1 + 0x28) = 0;
+  *(undefined4 *)(param_1 + 0x24) = 0;
+  *(undefined4 *)(param_1 + 0x2c) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F00 FUN_00456f00 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f00(int param_1)
+
+{
+  *(undefined1 *)(param_1 + 9) = 1;
+  *(undefined1 *)(param_1 + 0x21) = 0;
+  *(undefined4 *)(param_1 + 0x10) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F10 FUN_00456f10 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f10(int param_1)
+
+{
+  *(undefined1 *)(param_1 + 9) = 0;
+  *(undefined4 *)(param_1 + 0x14) = 0;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00457400 FUN_00457400 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00457400(int *param_1)
+
+{
+  (**(code **)(*param_1 + 0x3c))();
+                    /* WARNING: Could not recover jumptable at 0x0045740d. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+  (**(code **)(*param_1 + 0x40))();
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F60 FUN_00456f60 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00456f60(int param_1)
+
+{
+  if (*(char *)(param_1 + 9) != '\0') {
+    *(int *)(param_1 + 0x10) = *(int *)(param_1 + 0x10) + 1;
+    return;
+  }
+  *(int *)(param_1 + 0x14) = *(int *)(param_1 + 0x14) + 1;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00458D00 FUN_00458d00 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+int __fastcall FUN_00458d00(int param_1)
+
+{
+  float fVar1;
+  bool bVar2;
+  uint uVar3;
+  float fVar4;
+  float fVar5;
+  int iVar6;
+  int iVar7;
+  
+  iVar6 = FUN_00454de0();
+  if (iVar6 == 0) {
+    return 1;
+  }
+  iVar6 = *(int *)(param_1 + 4);
+  if (*(char *)(param_1 + 9) == '\0') {
+    iVar7 = FUN_00454de0();
+    fVar4 = _DAT_005dff8c;
+    if (iVar7 != 0) {
+      iVar6 = *(int *)(iVar6 + 4);
+      fVar5 = *(float *)(iVar6 + 0xd0) - *(float *)(iVar7 + 0xd0);
+      fVar1 = *(float *)(iVar6 + 0xd4) - *(float *)(iVar7 + 0xd4);
+      fVar4 = *(float *)(iVar6 + 0xd8) - *(float *)(iVar7 + 0xd8);
+      fVar4 = fVar5 * fVar5 + fVar1 * fVar1 + fVar4 * fVar4;
+    }
+    fVar1 = *(float *)(param_1 + 0x24);
+    iVar6 = CONCAT31((uint3)(byte)(fVar4 < fVar1 |
+                                  (byte)((ushort)((ushort)(fVar4 == fVar1) << 0xe) >> 8)),1);
+    if (fVar4 >= fVar1 && (fVar4 == fVar1) == 0) {
+      return iVar6;
+    }
+  }
+  else {
+    iVar7 = FUN_00454de0();
+    fVar4 = _DAT_005dff8c;
+    if (iVar7 != 0) {
+      iVar6 = *(int *)(iVar6 + 4);
+      fVar5 = *(float *)(iVar6 + 0xd0) - *(float *)(iVar7 + 0xd0);
+      fVar1 = *(float *)(iVar6 + 0xd4) - *(float *)(iVar7 + 0xd4);
+      fVar4 = *(float *)(iVar6 + 0xd8) - *(float *)(iVar7 + 0xd8);
+      fVar4 = fVar5 * fVar5 + fVar1 * fVar1 + fVar4 * fVar4;
+    }
+    bVar2 = fVar4 < *(float *)(param_1 + 0x28);
+    uVar3 = (uint)bVar2;
+    iVar6 = uVar3 << 8;
+    if (uVar3 == 0) {
+      return CONCAT31((uint3)bVar2,1);
+    }
+  }
+  return CONCAT31((int3)((uint)iVar6 >> 8),*(undefined1 *)(param_1 + 8));
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510D0 forced_004510d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall forced_004510d0(int param_1,undefined1 param_2)
+
+{
+  *(undefined1 *)(param_1 + 8) = param_2;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456F20 FUN_00456f20 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 __fastcall FUN_00456f20(int *param_1)
+
+{
+  char cVar1;
+  uint uVar2;
+  undefined4 uVar3;
+  
+  if (*(char *)((int)param_1 + 9) == '\0') {
+    uVar2 = param_1[6];
+    if (uVar2 <= (uint)param_1[5]) goto LAB_00456f54;
+  }
+  else {
+    cVar1 = (**(code **)(*param_1 + 0x30))();
+    if (((cVar1 == '\0') || (uVar2 = param_1[6], uVar2 == 0)) &&
+       ((uVar2 = param_1[7], uVar2 == 0 || ((uint)param_1[4] < uVar2)))) {
+LAB_00456f54:
+                    /* WARNING: Could not recover jumptable at 0x00456f59. Too many branches */
+                    /* WARNING: Treating indirect jump as call */
+      uVar3 = (**(code **)(*param_1 + 0x18))();
+      return uVar3;
+    }
+  }
+  return CONCAT31((int3)(uVar2 >> 8),1);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00456EF0 forced_00456ef0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined4 forced_00456ef0(void)
+
+{
+  return 0;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 0041CDD0 FUN_0041cdd0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_0041cdd0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004190D0 FUN_004190d0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void FUN_004190d0(void)
+
+{
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 004510E0 forced_004510e0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+undefined1 __fastcall forced_004510e0(int param_1)
+
+{
+  return *(undefined1 *)(param_1 + 0x21);
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00458CE0 forced_00458ce0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __thiscall forced_00458ce0(int param_1,undefined4 param_2,float param_3,float param_4)
+
+{
+  *(undefined4 *)(param_1 + 4) = param_2;
+  *(float *)(param_1 + 0x24) = param_3 * param_3;
+  *(float *)(param_1 + 0x28) = param_4 * param_4;
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00458DE0 FUN_00458de0 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+/* WARNING: Globals starting with '_' overlap smaller symbols at the same address */
+
+void __fastcall FUN_00458de0(int param_1)
+
+{
+  char cVar1;
+  float10 fVar2;
+  
+  if (*(int *)(param_1 + 0x2c) == 0) {
+    cVar1 = (**(code **)(**(int **)(param_1 + 4) + 0x154))();
+    if (cVar1 != '\0') {
+      fVar2 = (float10)(**(code **)(**(int **)(param_1 + 4) + 0x13c))();
+      if ((float10)_DAT_005e258c < ABS(fVar2)) {
+        *(undefined4 *)(param_1 + 0x2c) = 1;
+      }
+    }
+  }
+  else if (*(int *)(param_1 + 0x2c) == 1) {
+    fVar2 = (float10)(**(code **)(**(int **)(param_1 + 4) + 0x13c))();
+    if (ABS(fVar2) < (float10)_DAT_005e0238) {
+      *(undefined4 *)(param_1 + 0x2c) = 0;
+      return;
+    }
+  }
+  return;
+}
+
+ (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+--- 00458E50 FUN_00458e50 --- (GhidraScript)  
+INFO  BehaviorNodeVtableEvidence.java> 
+void __fastcall FUN_00458e50(int param_1)
+
+{
+  int iVar1;
+  float10 fVar2;
+  
+  if (*(int *)(param_1 + 0x2c) == 0) {
+    FUN_00456f70(0x9000004);
+  }
+  else if (*(int *)(param_1 + 0x2c) == 1) {
+    iVar1 = **(int **)(param_1 + 4);
+    fVar2 = (float10)(**(code **)(iVar1 + 0x13c))(0x3fc90fdb,0x9000028);
+    (**(code **)(iVar1 + 0x118))((float)fVar2);
+    return;
+  }
+  return;
+}
+
+ (GhidraScript)  
