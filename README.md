@@ -37,6 +37,7 @@ Robots workflows.
   * [x] Native, spatialized PC MUSX sound preview, mixer and persistent cache
   * [x] Native skeletal animation playback (full-bone, CPU skinning)
   * [x] Native Script Animation/Sound timeline playback
+  * [x] Native NPC/Monster AI behavior runtime
   * [x] Trigger diagnostics, path-context visualization and mouse picking
   * [x] Runtime-created Monster/NPC character models (`MonsterDatabase` bridge)
 * [x] Autodesk FBX character-model and animation export (`edb fbx-characters`)
@@ -94,6 +95,14 @@ Serialized EDB decoding itself does not depend on executable addresses.
   `77/77` character triggers resolve to an existing external EDB, Script and
   mesh closure (DogBot, SawBot, JailBot, TurretBot, Spider, Ticket Clerk,
   PiranhaBot, and more).
+* **Shipped NPC and Monster AI handlers** now run through native behavior
+  hosts instead of diagnostic-only descriptors. The production runtime covers
+  patrol, pursuit, navigation, attacks, hits, status effects, projectiles,
+  attachments and class-specific behavior for the shipped handler census,
+  including ThiefBot, SpinTop, Dodgem, Flambe, PiranhaBot and TurretBot.
+  Shared behavior ownership preserves native selector ordering, fixed-60 Hz
+  movement/physics and gameplay RNG consumption; class-specific code remains
+  isolated from the generic map renderer.
 * **`EXGeoMap.skies` runtime sky assemblies** now follow the recovered native
   lifecycle instead of an editor fallback. `0x004EC2AA` scans the ordered active
   runtime zones and chooses the first `EXGeoIdentifier.sky_index >= 0`;
@@ -313,10 +322,9 @@ Serialized EDB decoding itself does not depend on executable addresses.
 * Physics/collision response beyond linear contact carry — real contact
   point, manifolds, impulses, friction and damage handoff — is not yet
   reproduced.
-* The majority of `XItemHandler` gameplay subclasses (Monster AI/combat,
-  Player/input, Projectile damage, class-specific boss/interactive state
-  machines) remain unresolved beyond structural descriptors, resolved
-  runtime models and path/trigger context diagnostics.
+* The shipped NPC/Monster AI handler census is implemented. Player input,
+  remaining boss/interactive state machines and fidelity work for map-specific
+  presentation/UE adapters remain open.
 * Native Camera ownership, shipped modes `0/3`, pose interpolation and VFOV
   are implemented. Mode `4` remains diagnostic because its native controller
   combines quaternion path sampling, live player state and controller offsets;
