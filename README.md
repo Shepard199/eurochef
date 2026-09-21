@@ -96,13 +96,13 @@ Serialized EDB decoding itself does not depend on executable addresses.
   mesh closure (DogBot, SawBot, JailBot, TurretBot, Spider, Ticket Clerk,
   PiranhaBot, and more).
 * **Shipped NPC and Monster AI handlers** now run through native behavior
-  hosts instead of diagnostic-only descriptors. The production runtime covers
-  patrol, pursuit, navigation, attacks, hits, status effects, projectiles,
-  attachments and class-specific behavior for the shipped handler census,
-  including ThiefBot, SpinTop, Dodgem, Flambe, PiranhaBot and TurretBot.
-  Shared behavior ownership preserves native selector ordering, fixed-60 Hz
-  movement/physics and gameplay RNG consumption; class-specific code remains
-  isolated from the generic map renderer.
+  hosts instead of diagnostic-only descriptors. The shipped handler census has
+  no known unhosted NPC/AI class family; it includes ThiefBot, SpinTop,
+  Dodgem, Flambe, PiranhaBot and TurretBot. Shared behavior ownership preserves
+  native selector ordering, fixed-60 Hz movement/physics and gameplay RNG
+  consumption, while class-specific code remains isolated from the generic map
+  renderer. The closure was validated by 550 shared tests, 406 GUI tests and
+  `CARGO.cmd check -p eurochef-gui`.
 * **`EXGeoMap.skies` runtime sky assemblies** now follow the recovered native
   lifecycle instead of an editor fallback. `0x004EC2AA` scans the ordered active
   runtime zones and chooses the first `EXGeoIdentifier.sky_index >= 0`;
