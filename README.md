@@ -40,6 +40,7 @@ Robots workflows.
   * [x] Native NPC/Monster AI behavior runtime
   * [x] Trigger diagnostics, path-context visualization and mouse picking
   * [x] Runtime-created Monster/NPC character models (`MonsterDatabase` bridge)
+  * [x] Experimental Robots Game Mode: title/menu flow, gameplay entry and checkpoints
 * [x] Autodesk FBX character-model and animation export (`edb fbx-characters`)
 * [x] Cross-EDB resource atlas & human-readable, deduplicated glTF resource library
 * [ ] Filelist VFS
@@ -51,10 +52,44 @@ Robots workflows.
 
 This fork keeps the upstream Rust workspace and adds evidence-backed, reverse
 engineered support for the PC release of *Robots*. Every feature below is
-tied to instruction-level proof against the verified executable
+based on recovered native behavior against the verified executable
 `Robots.exe` (`SHA-256 8fefaa09767d9d1e76ca8c023e4e60720808cc529fc3abe1ff6d863d93f668bc`)
 and validated against the full shipped 179/180-EDB corpus wherever practical.
 Serialized EDB decoding itself does not depend on executable addresses.
+Experimental frontend presentation and unresolved behavior are identified below;
+they are not claims of full original-game parity.
+
+### 🎮 Game Mode (experimental)
+
+The GUI now includes a dedicated game shell alongside the editor: Title Screen,
+Main Menu, New Game slots and overwrite confirmation, gameplay entry, pause,
+options, and save/load checkpoint slots. It reuses the existing map/runtime host.
+
+In the Robots workspace, launch with the existing Windows build wrapper:
+
+```powershell
+.\RUN_GUI.cmd --play "D:\path\to\robots\m01_vill.edb"
+```
+
+The wrapper builds the release GUI before launch; `-DebugBuild` selects a debug
+build. With an already-built standalone binary, use
+`eurochef.exe --play "D:\path\to\robots\m01_vill.edb"`. Original game data must
+be available; frontend assets resolve through the EDB index or adjacent
+`h04_fron.edb` and `h07_font.edb` resources.
+
+* Menu artwork and bitmap glyphs come from original resources. H04 Script,
+  SubScript, Entity and Event timelines retain serialized timing, native HUD
+  record ordinals and separate poses for repeated Entity instances.
+* Keyboard navigation supports Up/Down, Enter and Escape, alongside mouse
+  selection. F3 shows frontend script and per-instance pose diagnostics.
+* Checkpoint v1 stores the verified level/Player entry context and persistent
+  Player, inventory and mission groups. It does not preserve the entire
+  NPC/XItem world or implement the original game's SaveGame format.
+* Exact H04 HUD projection, per-panel material/alpha binding and live renderer
+  receiver confirmation remain open. The provisional F5 whole-panel motion
+  preview is disabled by default; frontend visual parity is not complete.
+
+See [Game Mode implementation and remaining boundaries](docs/ROBOTS_GAME_MODE_MENU.md).
 
 ### 🗺️ Maps, triggers, scripts & entities
 
@@ -133,9 +168,17 @@ Serialized EDB decoding itself does not depend on executable addresses.
   quaternion channels, and native infinite-loop opcode `16` timelines
   (`repeat = -1`) jump to their exact serialized target frame instead of
   wrapping the full clip duration.
-* Path-context is recovered (without inventing traversal) for Camera, Camera
-  Marker, Watchbot, BossRatchet, Monster Transporter and Monster; a false
-  BossSewer path match was instruction-proven and explicitly rejected.
+* BossRatchet type72 now owns its recovered path/lifecycle runtime, using
+  native piecewise-linear XPath sampling and the proven follow/Physics lanes.
+  Monster Transporter type73 uses fixed-60-Hz path, turn and node-event state;
+  Maps rendering and picking consume its live runtime transform. Type74 Monster
+  path context is recovered, but actor lifecycle-to-host movement binding
+  remains open. A false BossSewer path match was explicitly rejected.
+* NPC Flag2 locomotion uses placement-backed world-space NavMesh resolution,
+  native steering and animation root-motion. WatchBot interaction uses logical
+  action4 (PC Q); its separate mode2/mode3 static recovery probe is wired through
+  the recovered material predicate, with dynamic-XItem collision contributions
+  still unresolved.
 * Active shipped Camera modes `0/3` now drive the Maps viewport with their
   exact Marker/Camera eye-target endpoints, preserve-current-Camera axis
   flags, mode-3 player-anchor `+1.3`, native `45/60` degree vertical FOV and
@@ -300,10 +343,11 @@ Serialized EDB decoding itself does not depend on executable addresses.
 * Runtime-created Monster/NPC character geometry resolved live from the
   shipped `MonsterDatabase` spreadsheet, matching the game's own
   data-driven model instantiation.
-* Native Platform/Lift/Vehicle path motion (now gated off by default at
-  spawn, matching the native constructor), event gating, contact carry and
-  body-local gear rotation; Camera/Camera Marker/Watchbot/BossRatchet/
-  Transporter/Monster/NPC path and trigger-context diagnostics.
+* Native Platform/Lift/Vehicle event-gated path motion, contact carry and
+  body-local gear rotation; live BossRatchet and Monster Transporter path
+  hosts, NPC navigation/root-motion and WatchBot interaction/recovery seams.
+* Experimental Game Mode shell, original-resource frontend script/pose
+  diagnostics and versioned persistent-progress checkpoints (limitations above).
 * Autodesk FBX character-model and animation export for the full proven
   binding corpus (native + Script-resolved cross-EDB pairs).
 * Cross-EDB resource atlas and deduplicated, human-readable glTF resource
@@ -325,6 +369,9 @@ Serialized EDB decoding itself does not depend on executable addresses.
 * The shipped NPC/Monster AI handler census is implemented. Player input,
   remaining boss/interactive state machines and fidelity work for map-specific
   presentation/UE adapters remain open.
+* Game Mode is an initial implementation. Exact frontend rendering and full
+  world-state/native SaveGame compatibility remain open; see the dedicated
+  [Game Mode audit](docs/ROBOTS_GAME_MODE_MENU.md).
 * Native Camera ownership, shipped modes `0/3`, pose interpolation and VFOV
   are implemented. Mode `4` remains diagnostic because its native controller
   combines quaternion path sampling, live player state and controller offsets;
