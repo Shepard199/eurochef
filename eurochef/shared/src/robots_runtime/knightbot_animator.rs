@@ -92,10 +92,8 @@ pub fn step_knightbot_animator(
         return;
     }
     state.position_xyz = animator_position_xyz;
-    state.rotation_xyzw = knightbot_animator_rotation_from_points(
-        animator_position_xyz,
-        animator_rotation_point_xyz,
-    );
+    state.rotation_xyzw =
+        knightbot_animator_rotation_from_points(animator_position_xyz, animator_rotation_point_xyz);
 }
 
 #[cfg(test)]

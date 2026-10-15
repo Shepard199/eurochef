@@ -39,5 +39,4 @@ mod tests {
         );
         assert_eq!(ef03_first_update_fly_loop_plan(true), None);
     }
-
 }

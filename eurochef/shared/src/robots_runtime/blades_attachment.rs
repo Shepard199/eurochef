@@ -1,8 +1,7 @@
 use serde::Serialize;
 
 use super::{
-    ai_character::RobotsAiHandlerClass,
-    attachment_rotation::postmultiply_local_y_rotation,
+    ai_character::RobotsAiHandlerClass, attachment_rotation::postmultiply_local_y_rotation,
 };
 
 pub const ROBOTS_BLADES_ENTITY_UID: u32 = 0x0200_000F;
@@ -51,9 +50,7 @@ impl RobotsBladesAttachmentSpec {
 
 /// Shared vslot +0x34 `0x00467500`: common Monster update first, then
 /// `0x00454CA0(Handler+0x640, 0, 8*pi/60, 0)`.
-pub fn step_blades_attachment_rotation(
-    current_quaternion_xyzw: [f32; 4],
-) -> [f32; 4] {
+pub fn step_blades_attachment_rotation(current_quaternion_xyzw: [f32; 4]) -> [f32; 4] {
     postmultiply_local_y_rotation(
         current_quaternion_xyzw,
         ROBOTS_BLADES_ANGULAR_VELOCITY_RADIANS_PER_SECOND * ROBOTS_BLADES_FIXED_STEP_SECONDS,

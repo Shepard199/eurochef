@@ -90,8 +90,8 @@ impl RobotsCurrentAttackerWatchBotGateState {
         watchbot_height_above_floor: Option<f32>,
         candidate_datum_relative_y: Option<f32>,
     ) -> bool {
-        let watchbot_height = watchbot_height_above_floor
-            .unwrap_or(ROBOTS_CURRENT_ATTACKER_MISSING_FLOOR_SENTINEL);
+        let watchbot_height =
+            watchbot_height_above_floor.unwrap_or(ROBOTS_CURRENT_ATTACKER_MISSING_FLOOR_SENTINEL);
         let datum_relative_y = candidate_datum_relative_y.unwrap_or(1.0);
         let delta = watchbot_height - datum_relative_y;
         if self.blocked_5fb {
@@ -153,7 +153,11 @@ impl RobotsCurrentAttackerRuntimeState {
         let mut best = Vec::<&RobotsCurrentAttackerCandidate>::new();
         for candidate in candidates.iter().filter(|candidate| candidate.eligible) {
             let effective = u16::from(candidate.base_priority)
-                + if bonus_owner_key == Some(candidate.owner_key) { 2 } else { 0 };
+                + if bonus_owner_key == Some(candidate.owner_key) {
+                    2
+                } else {
+                    0
+                };
             if effective > best_effective_priority {
                 best_effective_priority = effective;
                 best.clear();
@@ -209,9 +213,7 @@ impl RobotsCurrentAttackerRuntimeState {
         }
 
         let nearest_distance = distance(nearest.position_xyz, target_position_xyz);
-        if nearest_distance
-            < current_distance - ROBOTS_CURRENT_ATTACKER_DISTANCE_SWITCH_MARGIN
-        {
+        if nearest_distance < current_distance - ROBOTS_CURRENT_ATTACKER_DISTANCE_SWITCH_MARGIN {
             self.current_owner_key = Some(nearest.owner_key);
         }
     }
@@ -381,7 +383,9 @@ mod tests {
 
     #[test]
     fn normal_player_floor_gate_matches_455560_boundaries_and_mode6_bypass() {
-        assert!(robots_current_attacker_player_environment_blocked(0, 2, None));
+        assert!(robots_current_attacker_player_environment_blocked(
+            0, 2, None
+        ));
         assert!(!robots_current_attacker_player_environment_blocked(
             0,
             2,
@@ -403,9 +407,7 @@ mod tests {
             Some(3.0001)
         ));
         assert!(!robots_current_attacker_player_environment_blocked(
-            6,
-            2,
-            None
+            6, 2, None
         ));
     }
 

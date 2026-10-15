@@ -291,7 +291,7 @@ impl MapFrame {
                                 "Live player pose for Camera",
                             )
                             .on_hover_text(
-                                "Feeds ordinary Camera mode 1 and trigger Camera modes 3/4 a live editor-controlled Player pose initialized from the serialized XTrigger_Player position and heading. This is a pose source for the recovered Camera controller, not a fabricated replacement for native player collision/physics.",
+                                "Editor-only Camera proxy before Player creation. Once Simulate AI has a real Player XItem, Camera tracks that owner instead. This preview never drives TriggerManager/NPC targeting and does not replace Player Physics.",
                             )
                             .changed();
                         if live_player_changed && self.native_camera_live_player_preview {
@@ -327,6 +327,21 @@ impl MapFrame {
                                     .speed(0.05),
                             );
                         });
+                        if self.simulate_ai {
+                            if let Some(player) = self.native_runtime_player_state {
+                                ui.monospace(format!(
+                                    "Gameplay Player XItem: trigger #{}, XYZ [{:.2}, {:.2}, {:.2}]",
+                                    player.trigger_index,
+                                    player.position.x,
+                                    player.position.y,
+                                    player.position.z,
+                                ));
+                            } else {
+                                ui.small(
+                                    "Gameplay Player XItem not created. Camera proxy does not trigger AI proximity, attacks or pickups. Native Player creation/input/physics is still incomplete.",
+                                );
+                            }
+                        }
                         ui.separator();
                         ui.strong("Sweeper synchronized inputs");
                         ui.horizontal(|ui| {
@@ -669,38 +684,232 @@ impl MapFrame {
                                 "Animate Runtime Motion",
                             ),
                         )
-                        .on_hover_text("Uses per-trigger Platform/Lift/Vehicle path speed from the serialized map, rotates vehicles along the path tangent, and previews Platform angular velocity.");
+                        .on_hover_text("Editor preview of Platform/Lift/Vehicle movement. During Simulate AI, native TriggerManager and event-driven paths run independently of this checkbox, using serialized speeds at 1.0.");
                         if ui
                             .add_enabled(
-                                self.show_triggers && self.animate_runtime_paths,
+                                self.show_triggers && self.animate_runtime_paths && !self.simulate_ai,
                                 egui::Checkbox::new(
                                     &mut self.native_runtime_event_gate,
                                     "Native Event Gate",
                                 ),
                             )
-                            .on_hover_text("Starts from the constructor-proven inactive state. Platform/Lift/Vehicle movement reacts to manual 0x100/0x200 events and instruction-proven path-node opcodes 4/8. Opcode 9, class-specific node values and physical contacts remain diagnostic.")
+                            .on_hover_text("Editor-only path-event preview gate. During Simulate AI, native TriggerManager is always serviced and paths remain inactive until their real events; this checkbox cannot pause the gameplay clock.")
                             .changed()
                         {
                             self.reset_all_runtime_events();
+                            self.native_submap_states.clear();
                         }
                         if ui
-                            .add_enabled(
-                                self.show_triggers && self.animate_runtime_paths,
-                                egui::Checkbox::new(&mut self.simulate_ai, "Simulate AI"),
-                            )
-                            .on_hover_text("Runs recovered fixed-step NPC/AI simulation. Native Camera mode uses real TriggerManager XItem spawn/despawn and consumes the real gameplay RNG only when it is explicitly anchored; otherwise AI uses a separate deterministic preview RNG without mutating the unknown native session seed. Fly/Orbit always uses the editor-preview XItem set and preview RNG so PatrolNavMesh/Flee/Attack behavior can actually run.")
+                            .checkbox(&mut self.simulate_ai, "Simulate AI")
+                            .on_hover_text("Runs fixed-step AI. Gameplay simulation uses actual TriggerManager XItem creation/destruction, zone activation and player proximity; no NPCs are bulk-spawned in Fly/Orbit. Use the separate editor-only checkbox below to preview all NPCs.")
                             .changed()
                         {
-                            self.native_ai_fixed_last_time = None;
-                            self.native_ai_fixed_accumulator = 0.0;
-                            self.native_ai_engine_frame_counter = 0;
-                            self.native_ai_explosion_fragment_phase_counter = 0;
-                            self.native_ai_preview_live.clear();
-                            self.native_ai_preview_map = None;
-                            self.native_ai_preview_gameplay_rng =
-                                RuntimeRobotsGlobalRngState::fresh_process_startup();
-                            self.native_ai_preview_process_lcg_seed = Some(
-                                eurochef_shared::robots_runtime::process_rng::ROBOTS_PROCESS_LCG_STARTUP_SEED,
+                            // Crossing from editor path preview to gameplay
+                            // changes who owns the global TriggerManager clock.
+                            // Reset the *entire* level timeline, not only AI/RNG:
+                            // old XItems, missions or camera sequences must not
+                            // leak into a freshly started simulation.
+                            self.reset_all_runtime_events();
+                            self.native_submap_states.clear();
+                        }
+                        if self.simulate_ai {
+                            if let Some((map_uid, source_index, request)) =
+                                self.native_change_level_request
+                            {
+                                if map_uid == current_map.hashcode {
+                                    ui.small(format!(
+                                        "ChangeLevel #{source_index}: {:?}, entry context {}. Pending gameplay transition: active Mission owner blocks ChangeLevel; the host loads only verified target EDBs.",
+                                        request.target, request.player_entry_context,
+                                    ));
+                                }
+                            }
+                            // A map can contain many Player destinations:
+                            // m03_hub1 ships 16, routed from Cutscene/Relay.
+                            // Picking the first serialized one silently starts
+                            // the wrong scene. Reuse the selected trigger as
+                            // an explicit diagnostic spawn destination only.
+                            let player_selection_before = self.selected_trigger;
+                            egui::ComboBox::from_id_salt(("player-creator", current_map.hashcode))
+                                .selected_text(
+                                    self.selected_trigger
+                                        .and_then(|index| current_map.triggers.get(index)
+                                            .filter(|t| t.ttype == ROBOTS_TRIGGER_PLAYER)
+                                            .map(|_| format!("Player trigger #{index}")))
+                                        .unwrap_or_else(|| "Select Player trigger (diagnostic)".to_string()),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (index, trigger) in current_map.triggers.iter().enumerate() {
+                                        if trigger.ttype == ROBOTS_TRIGGER_PLAYER {
+                                            ui.selectable_value(
+                                                &mut self.selected_trigger,
+                                                Some(index),
+                                                format!("#{index}  [{:.1}, {:.1}, {:.1}]",
+                                                    trigger.position.x,
+                                                    trigger.position.y,
+                                                    trigger.position.z),
+                                            );
+                                        }
+                                    }
+                                });
+                            if player_selection_before != self.selected_trigger
+                                && self.native_runtime_player_state.is_none()
+                            {
+                                // Re-anchor Camera preview only for an explicit
+                                // diagnostic selection, never mutate gameplay.
+                                self.reset_native_camera_player_preview(current_map);
+                            }
+                            let player_creator = self.selected_trigger.filter(|&index| {
+                                current_map.triggers.get(index)
+                                    .is_some_and(|trigger| trigger.ttype == ROBOTS_TRIGGER_PLAYER)
+                            });
+                            if let Some(player_index) = player_creator {
+                                ui.collapsing("Player inbound routes (EDB)", |ui| {
+                                    let mut count = 0usize;
+                                    for (source_index, source) in current_map.triggers.iter().enumerate() {
+                                        for (slot, link) in source.links.iter().take(8).enumerate() {
+                                            if map_trigger_by_link(current_map, *link)
+                                                .is_some_and(|(target, _)| target == player_index)
+                                            {
+                                                ui.monospace(format!(
+                                                    "source #{source_index} type={} link[{slot}]",
+                                                    source.ttype,
+                                                ));
+                                                count += 1;
+                                            }
+                                        }
+                                    }
+                                    if count == 0 {
+                                        ui.small("No direct incoming event links; context-based Initialise is a separate creation path.");
+                                    } else {
+                                        ui.small(format!(
+                                            "{count} direct link(s). These are possible event routes, not proof of the initial level-entry source."
+                                        ));
+                                    }
+                                });
+                            }
+                            let can_activate_player =
+                                self.native_script_trigger_lifecycle_valid
+                                    && self.native_zone_runtime_map == Some(current_map.hashcode)
+                                    && self.native_runtime_player_state.is_none();
+                            // Native GameWnd +0x308 (DAT_007B3000) is independent
+                            // of editor Player selection. Keep diagnostic context
+                            // unset until explicitly chosen; no guessed level start.
+                            egui::ComboBox::from_id_salt(("player-context", current_map.hashcode))
+                                .selected_text(
+                                    self.native_player_context_diagnostic
+                                        .map(|context| format!("Game context {context} [diagnostic]"))
+                                        .unwrap_or_else(|| "Game context unknown".to_owned())
+                                )
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.native_player_context_diagnostic,
+                                        None,
+                                        "Unknown (original source not reconstructed)",
+                                    );
+                                    let mut contexts = std::collections::BTreeSet::new();
+                                    for trigger in current_map.triggers.iter()
+                                        .filter(|trigger| trigger.ttype == ROBOTS_TRIGGER_PLAYER)
+                                    {
+                                        let context = trigger.data.first().copied()
+                                            .flatten().unwrap_or_default();
+                                        if contexts.insert(context) {
+                                            ui.selectable_value(
+                                                &mut self.native_player_context_diagnostic,
+                                                Some(context),
+                                                format!("Context {context} (0x{context:08X})"),
+                                            );
+                                        }
+                                    }
+                                });
+                            if let Some(context) = self.native_player_context_diagnostic {
+                                let candidate =
+                                    Self::native_player_initialise_candidate(current_map, context);
+                                ui.monospace(format!(
+                                    "Native Initialise context {context} -> Player {}",
+                                    candidate.map(|i| format!("#{i}")).unwrap_or_else(|| "none".to_string())
+                                ));
+                                if ui
+                                    .add_enabled(
+                                        can_activate_player && candidate.is_some(),
+                                        egui::Button::new("Initialise Player by context [diagnostic]"),
+                                    )
+                                    .on_hover_text(
+                                        "Emulates the proved GameWnd +0x308 context equality and singleton owner gate in serialized InitialiseTriggers order. Context was selected manually and is NOT the recovered game's level-start context. Other triggers are not auto-activated.",
+                                    )
+                                    .clicked()
+                                {
+                                    let wall_time = ui.input(|input| input.time);
+                                    self.initialise_native_player_for_context(
+                                        current_map, context, wall_time,
+                                    );
+                                }
+                            }
+                            if ui
+                                .add_enabled(
+                                    can_activate_player && player_creator.is_some(),
+                                    egui::Button::new("Activate Player XItem (0x100) [diagnostic]"),
+                                )
+                                .on_hover_text("Manually delivers the shipped Player activation event through the existing class dispatcher. Does not start other NPCs/triggers and does not claim original level-start initialization or Player Physics are implemented.")
+                                .clicked()
+                            {
+                                if let Some(trigger_index) = player_creator {
+                                    let wall_time = ui.input(|input| input.time);
+                                    self.dispatch_runtime_event(
+                                        current_map,
+                                        trigger_index,
+                                        ROBOTS_EVENT_ACTIVATE,
+                                        wall_time,
+                                    );
+                                }
+                            }
+                            if ui
+                                .checkbox(&mut self.preview_all_ai, "Preview ALL NPCs (editor-only)")
+                                .on_hover_text("Diagnostic only: ignores native zone/distance/spawn constraints in Fly/Orbit and starts all decoded NPC/Monster owners. Disable for real level progression. Native Camera mode always uses actual TriggerManager ownership.")
+                                .changed()
+                            {
+                                self.reset_native_ai_runtime_state();
+                            }
+                            if self.native_script_trigger_lifecycle_valid {
+                                let created = self
+                                    .native_ai_trigger_lifecycle
+                                    .values()
+                                    .filter(|state| state.xitem_exists)
+                                    .count();
+                                ui.monospace(format!(
+                                    "Level lifecycle: TriggerManager ({created} AI XItems live)"
+                                ));
+                            } else if self.preview_all_ai {
+                                ui.monospace(format!(
+                                    "Editor preview: {} AI owners (not gameplay)",
+                                    self.native_ai_preview_live.len()
+                                ));
+                            } else {
+                                ui.label(
+                                    "Level lifecycle unavailable: select a valid native Camera view. No NPCs auto-spawn in Fly/Orbit.",
+                                );
+                            }
+                        }
+                        if self.simulate_ai
+                            || !self.native_transient_script_xitems.is_empty()
+                            || !self.native_script_xitem_spawns.is_empty()
+                            || !self.native_dynamic_pickups.is_empty()
+                            || !self.native_dynamic_pickup_spawns.is_empty()
+                        {
+                            ui.label(format!(
+                                "Runtime Script XItems: {} active, {} queued",
+                                self.native_transient_script_xitems.len(),
+                                self.native_script_xitem_spawns.len()
+                            ))
+                            .on_hover_text(
+                                "Gameplay-created XItemHandler_Script instances emitted by recovered AI/projectile/explosion gameplay. They use the same Script/Particle/Light adapters intended for the UE runtime.",
+                            );
+                            ui.label(format!(
+                                "Dynamic Pickups: {} live, {} queued",
+                                self.native_dynamic_pickups.len(),
+                                self.native_dynamic_pickup_spawns.len()
+                            ))
+                            .on_hover_text(
+                                "Gameplay-created XItemHandler_Pickup owners from GeneratePickupFromHash. Serialized map Pickup triggers remain a separate ownership path.",
                             );
                         }
                         ui.add_enabled(

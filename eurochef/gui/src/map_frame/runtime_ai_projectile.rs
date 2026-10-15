@@ -1,4 +1,9 @@
-use super::{runtime_ai::horizontal_yaw, MapFrame};
+use super::{
+    runtime_ai::{horizontal_yaw, NativeAiTransientSoundRequest},
+    runtime_ai_explosion::NativeAiExplosionSpawnRequest,
+    runtime_script_xitem::NativeScriptXItemSpawnRequest,
+    MapFrame,
+};
 use crate::{
     map_runtime::{
         runtime_character_animation_datum_world_transform,
@@ -17,8 +22,8 @@ use eurochef_shared::robots_runtime::{
     hit_query::robots_hit_query_allocate_serial,
     hit_reaction::{
         robots_apply_dodgem_hit_reaction, robots_apply_ef01_mine_hit_reaction,
-        robots_apply_roller_bot_hit_reaction, robots_apply_turret_hit_reaction,
-        RobotsAcceptedHitReactionInput, RobotsAiHitReactionState,
+        robots_apply_roller_bot_hit_reaction, robots_apply_turret_bot_hit_reaction,
+        robots_apply_turret_hit_reaction, RobotsAcceptedHitReactionInput, RobotsAiHitReactionState,
     },
     hit_reaction_player::{
         robots_player_base_hit_gate, RobotsPlayerBaseHitGateInput, RobotsPlayerHitResult,
@@ -31,6 +36,9 @@ use eurochef_shared::robots_runtime::{
     },
 };
 use glam::{Mat4, Quat, Vec3};
+
+#[cfg(test)]
+use eurochef_shared::robots_runtime::hit_reaction::ROBOTS_TURRET_HIT_SOUND_UID;
 
 /// Host-resolved creation contract for a projectile emitted by an AI AnimScript.
 /// Shared code owns Event/D04 semantics; this GUI adapter supplies the live animated
@@ -74,11 +82,49 @@ pub(super) struct NativeAiProjectileTerminalEvent {
     pub(super) missile_hashcode: u32,
     pub(super) handler_kind: RobotsProjectileHandlerKind,
     pub(super) position: Vec3,
+    pub(super) rotation: Quat,
+    pub(super) terminal_file_uid: u32,
     pub(super) primary_terminal_resource: u32,
     pub(super) reason: NativeAiProjectileTerminalReason,
     /// Base Projectile lifetime expiry enters +0xD4. The eventual explosion/resource
     /// dispatch stays a separate host seam rather than being silently fabricated here.
     pub(super) requests_native_terminal_path: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NativeAiProjectileTerminalSpawn {
+    Explosion(NativeAiExplosionSpawnRequest),
+    Script(NativeScriptXItemSpawnRequest),
+}
+
+/// Native `XItemHandler_Projectile::GenerateExplosion 0x004152A0`.
+/// `0x52xxxxxx` resources enter the common Explosion factory; every other
+/// valid resource creates a generic Script XItem in Handler+0x384's file.
+fn native_ai_projectile_terminal_spawn(
+    event: NativeAiProjectileTerminalEvent,
+) -> Option<NativeAiProjectileTerminalSpawn> {
+    if !event.requests_native_terminal_path || event.primary_terminal_resource == u32::MAX {
+        return None;
+    }
+    if event.primary_terminal_resource & 0x7F00_0000 == 0x5200_0000 {
+        return Some(NativeAiProjectileTerminalSpawn::Explosion(
+            NativeAiExplosionSpawnRequest::projectile_terminal(
+                event.source_body_key,
+                event.primary_terminal_resource,
+                event.position,
+                horizontal_yaw(event.rotation),
+            ),
+        ));
+    }
+    Some(NativeAiProjectileTerminalSpawn::Script(
+        NativeScriptXItemSpawnRequest {
+            owner_key: event.source_body_key,
+            file_uid: event.terminal_file_uid,
+            script_uid: event.primary_terminal_resource,
+            position_xyzw: [event.position.x, event.position.y, event.position.z, 0.0],
+            rotation: event.rotation,
+        },
+    ))
 }
 
 pub(super) fn resolve_ai_projectile_spawn_plan(
@@ -179,44 +225,65 @@ fn apply_confirmed_native_player_query_hit(
     runtime.apply_hit(base_hit_gate, context.flags, player_state_6de)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct NativeAiCandidateReactionOutcome {
+    reaction_accepted: bool,
+    clear_roller_motion: bool,
+    request_natural_death: bool,
+    transient_sound_uid: Option<u32>,
+}
+
 fn apply_native_ai_candidate_reaction(
     reaction_kind: Option<RobotsAiHitReactionKind>,
     hit_state: &mut RobotsAiHitReactionState,
     input: RobotsAcceptedHitReactionInput,
     owner_pending_destroy: bool,
-) -> (bool, bool, bool) {
+) -> NativeAiCandidateReactionOutcome {
     match reaction_kind {
-        Some(RobotsAiHitReactionKind::Common) => (
-            hit_state.apply_hit(input, false).reaction_accepted,
-            false,
-            false,
-        ),
+        Some(RobotsAiHitReactionKind::Common) => NativeAiCandidateReactionOutcome {
+            reaction_accepted: hit_state.apply_hit(input, false).reaction_accepted,
+            ..Default::default()
+        },
         Some(RobotsAiHitReactionKind::RollerBot) => {
             let reaction = robots_apply_roller_bot_hit_reaction(hit_state, input, false);
-            (
-                reaction.base.reaction_accepted,
-                reaction.clear_four_runtime_words,
-                false,
-            )
+            NativeAiCandidateReactionOutcome {
+                reaction_accepted: reaction.base.reaction_accepted,
+                clear_roller_motion: reaction.clear_four_runtime_words,
+                ..Default::default()
+            }
         }
         Some(RobotsAiHitReactionKind::Ef01Mine) => {
             let reaction =
                 robots_apply_ef01_mine_hit_reaction(hit_state, input, owner_pending_destroy, false);
-            (
-                reaction.base.reaction_accepted,
-                false,
-                reaction.request_monster_action_dispatch_0_1,
-            )
+            NativeAiCandidateReactionOutcome {
+                reaction_accepted: reaction.base.reaction_accepted,
+                request_natural_death: reaction.request_monster_action_dispatch_0_1,
+                ..Default::default()
+            }
         }
         Some(RobotsAiHitReactionKind::TurretFamily) => {
             let reaction = robots_apply_turret_hit_reaction(hit_state, input, false);
-            (reaction.base.reaction_accepted, false, false)
+            NativeAiCandidateReactionOutcome {
+                reaction_accepted: reaction.base.reaction_accepted,
+                transient_sound_uid: reaction.transient_sound_uid,
+                ..Default::default()
+            }
         }
         Some(RobotsAiHitReactionKind::Dodgem) => {
             let reaction = robots_apply_dodgem_hit_reaction(hit_state, input, false);
-            (reaction.base.reaction_accepted, false, false)
+            NativeAiCandidateReactionOutcome {
+                reaction_accepted: reaction.base.reaction_accepted,
+                ..Default::default()
+            }
         }
-        _ => (false, false, false),
+        Some(RobotsAiHitReactionKind::TurretBot) => {
+            let reaction = robots_apply_turret_bot_hit_reaction(hit_state, input, false);
+            NativeAiCandidateReactionOutcome {
+                reaction_accepted: reaction.base.reaction_accepted,
+                ..Default::default()
+            }
+        }
+        None => NativeAiCandidateReactionOutcome::default(),
     }
 }
 
@@ -270,7 +337,7 @@ impl MapFrame {
                 };
                 let owner_pending_destroy =
                     self.native_ai_deferred_destroy.is_pending(candidate_key);
-                let (reaction_accepted, clear_roller_motion, request_natural_death) = self
+                let reaction = self
                     .native_ai_hit_reactions
                     .get_mut(&candidate_key)
                     .map(|hit_state| {
@@ -281,13 +348,20 @@ impl MapFrame {
                             owner_pending_destroy,
                         )
                     })
-                    .unwrap_or((false, false, false));
-                if clear_roller_motion {
+                    .unwrap_or_default();
+                if let Some(sound_uid) = reaction.transient_sound_uid {
+                    self.native_ai_transient_sounds
+                        .push(NativeAiTransientSoundRequest {
+                            owner_key: candidate_key,
+                            sound_uid,
+                        });
+                }
+                if reaction.clear_roller_motion {
                     if let Some(runtime) = self.native_rollerbot_runtime.get_mut(&candidate_key) {
                         runtime.clear_retained_motion();
                     }
                 }
-                if request_natural_death {
+                if reaction.request_natural_death {
                     if let Some(position) = self
                         .runtime_character_bodies
                         .get(&candidate_key)
@@ -303,7 +377,7 @@ impl MapFrame {
                         }
                     }
                 }
-                if reaction_accepted {
+                if reaction.reaction_accepted {
                     if let Some(source_yaw_radians) = source_yaw_radians {
                         self.native_ai_last_hit_source_yaw
                             .insert(candidate_key, source_yaw_radians);
@@ -440,9 +514,28 @@ impl MapFrame {
             missile_hashcode: projectile.definition.selector,
             handler_kind: projectile.handler_kind,
             position: projectile.position(),
+            rotation: projectile.launch_rotation,
+            terminal_file_uid: projectile.definition.factory_resource_pair()[0],
             primary_terminal_resource: projectile.definition.primary_terminal_resource(),
             reason,
             requests_native_terminal_path: true,
+        }
+    }
+
+    /// Drain common Projectile `+0xD8` terminal generation into the already-owned
+    /// Explosion / transient Script-XItem factories.
+    pub(super) fn consume_native_ai_projectile_terminal_events(&mut self) {
+        let events = std::mem::take(&mut self.native_ai_projectile_terminal_events);
+        for event in events {
+            match native_ai_projectile_terminal_spawn(event) {
+                Some(NativeAiProjectileTerminalSpawn::Explosion(request)) => {
+                    self.native_ai_explosion_spawns.push(request);
+                }
+                Some(NativeAiProjectileTerminalSpawn::Script(request)) => {
+                    self.native_script_xitem_spawns.push(request);
+                }
+                None => {}
+            }
         }
     }
 
@@ -561,6 +654,58 @@ mod tests {
     }
 
     #[test]
+    fn projectile_terminal_routes_script_and_explosion_into_common_factories() {
+        let rotation = Quat::from_rotation_y(0.75);
+        let script_event = NativeAiProjectileTerminalEvent {
+            source_body_key: 7,
+            missile_hashcode: 0x5700_0008,
+            handler_kind: RobotsProjectileHandlerKind::Mine,
+            position: Vec3::new(4.0, 5.0, 6.0),
+            rotation,
+            terminal_file_uid: 0x0100_0038,
+            primary_terminal_resource: 0x0400_004C,
+            reason: NativeAiProjectileTerminalReason::LifetimeExpired,
+            requests_native_terminal_path: true,
+        };
+        let Some(NativeAiProjectileTerminalSpawn::Script(script)) =
+            native_ai_projectile_terminal_spawn(script_event)
+        else {
+            panic!("generic terminal resource must create a Script XItem");
+        };
+        assert_eq!(script.owner_key, 7);
+        assert_eq!(script.file_uid, 0x0100_0038);
+        assert_eq!(script.script_uid, 0x0400_004C);
+        assert_eq!(script.position_xyzw, [4.0, 5.0, 6.0, 0.0]);
+        assert_eq!(script.rotation, rotation);
+
+        let explosion_event = NativeAiProjectileTerminalEvent {
+            primary_terminal_resource: 0x5200_0006,
+            ..script_event
+        };
+        let Some(NativeAiProjectileTerminalSpawn::Explosion(explosion)) =
+            native_ai_projectile_terminal_spawn(explosion_event)
+        else {
+            panic!("HT_Explosion terminal resource must enter the common Explosion host");
+        };
+        assert_eq!(explosion.explosion_uid, 0x5200_0006);
+        assert_eq!(explosion.position, Vec3::new(4.0, 5.0, 6.0));
+        assert!(!explosion.resolve_source_character_datums);
+        assert!(explosion.source_yaw_radians.is_some());
+
+        let disabled = NativeAiProjectileTerminalEvent {
+            requests_native_terminal_path: false,
+            ..script_event
+        };
+        assert!(native_ai_projectile_terminal_spawn(disabled).is_none());
+
+        let none = NativeAiProjectileTerminalEvent {
+            primary_terminal_resource: u32::MAX,
+            ..script_event
+        };
+        assert!(native_ai_projectile_terminal_spawn(none).is_none());
+    }
+
+    #[test]
     fn confirmed_player_query_hit_commits_serial_applies_twenty_hp_and_rearms_window() {
         let context = RobotsHitQueryCandidateContext {
             flags: 0,
@@ -619,6 +764,7 @@ mod tests {
             capability_flags: 0,
             health: 2,
             got_hit_latch: false,
+            turretbot_zero_health_latch_60c: false,
             owner_category: 5,
         };
         assert_eq!(
@@ -628,7 +774,10 @@ mod tests {
                 input,
                 false,
             ),
-            (true, false, false)
+            NativeAiCandidateReactionOutcome {
+                reaction_accepted: true,
+                ..Default::default()
+            }
         );
         assert_eq!(common.health, 1);
 
@@ -647,7 +796,11 @@ mod tests {
                 },
                 false,
             ),
-            (true, true, false)
+            NativeAiCandidateReactionOutcome {
+                reaction_accepted: true,
+                clear_roller_motion: true,
+                ..Default::default()
+            }
         );
         assert_eq!(roller.health, 0);
     }
@@ -662,6 +815,7 @@ mod tests {
             capability_flags: 0,
             health: 3,
             got_hit_latch: false,
+            turretbot_zero_health_latch_60c: false,
             owner_category: 5,
         };
         let input = RobotsAcceptedHitReactionInput {
@@ -679,7 +833,10 @@ mod tests {
                 input,
                 false,
             ),
-            (true, false, false)
+            NativeAiCandidateReactionOutcome {
+                reaction_accepted: true,
+                ..Default::default()
+            }
         );
         assert_eq!(dodgem.health, 0);
         assert_eq!(dodgem.query_serial_snapshot, 0x2a);
@@ -697,6 +854,7 @@ mod tests {
             capability_flags: 0,
             health: 2,
             got_hit_latch: false,
+            turretbot_zero_health_latch_60c: false,
             owner_category: 5,
         };
         let input = RobotsAcceptedHitReactionInput {
@@ -713,7 +871,11 @@ mod tests {
                 input,
                 false,
             ),
-            (true, false, false)
+            NativeAiCandidateReactionOutcome {
+                reaction_accepted: true,
+                transient_sound_uid: Some(ROBOTS_TURRET_HIT_SOUND_UID),
+                ..Default::default()
+            }
         );
         assert_eq!(turret.health, 1);
         assert!(turret.got_hit_latch);
@@ -732,10 +894,46 @@ mod tests {
                 },
                 false,
             ),
-            (true, false, false)
+            NativeAiCandidateReactionOutcome {
+                reaction_accepted: true,
+                transient_sound_uid: Some(ROBOTS_TURRET_HIT_SOUND_UID),
+                ..Default::default()
+            }
         );
         assert_eq!(turret.health, 0);
         assert!(turret.got_hit_latch);
+    }
+
+    #[test]
+    fn ai_candidate_reaction_dispatch_routes_turretbot_and_persists_60c_on_rejected_force_zero() {
+        let mut turretbot = RobotsAiHitReactionState {
+            query_flags_snapshot: 0,
+            query_serial_snapshot: u16::MAX,
+            hit_metadata_snapshot: 0,
+            last_query_serial: 0x40,
+            capability_flags: 0,
+            health: 3,
+            got_hit_latch: false,
+            turretbot_zero_health_latch_60c: false,
+            owner_category: 5,
+        };
+        let outcome = apply_native_ai_candidate_reaction(
+            Some(RobotsAiHitReactionKind::TurretBot),
+            &mut turretbot,
+            RobotsAcceptedHitReactionInput {
+                query_flags: 0x0040_0000,
+                query_serial: 0x40,
+                hit_metadata: 0,
+                source_is_candidate_owner: false,
+                secondary_source_is_candidate_owner: false,
+            },
+            false,
+        );
+
+        assert_eq!(outcome, NativeAiCandidateReactionOutcome::default());
+        assert_eq!(turretbot.health, 0);
+        assert!(!turretbot.got_hit_latch);
+        assert!(turretbot.turretbot_zero_health_latch_60c);
     }
 
     #[test]
@@ -748,6 +946,7 @@ mod tests {
             capability_flags: 0,
             health: 3,
             got_hit_latch: false,
+            turretbot_zero_health_latch_60c: false,
             owner_category: 5,
         };
         let input = RobotsAcceptedHitReactionInput {
@@ -765,7 +964,11 @@ mod tests {
                 input,
                 false,
             ),
-            (true, false, true)
+            NativeAiCandidateReactionOutcome {
+                reaction_accepted: true,
+                request_natural_death: true,
+                ..Default::default()
+            }
         );
         assert_eq!(mine.health, 3);
         assert_eq!(mine.last_query_serial, u16::MAX);
@@ -780,7 +983,7 @@ mod tests {
                 },
                 true,
             ),
-            (false, false, false)
+            NativeAiCandidateReactionOutcome::default()
         );
     }
 

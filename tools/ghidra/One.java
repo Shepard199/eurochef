@@ -1,0 +1,2 @@
+import ghidra.app.decompiler.*; import ghidra.app.script.GhidraScript; import ghidra.program.model.listing.*;
+public class One extends GhidraScript { public void run()throws Exception{DecompInterface d=new DecompInterface();d.openProgram(currentProgram);for(long x:new long[]{0x00425c70L,0x00425ef0L}){Function f=getFunctionAt(toAddr(x));println("=== "+toAddr(x)+" ===");DecompileResults r=d.decompileFunction(f,800,monitor);println(r.getDecompiledFunction().getC());}d.dispose();}}

@@ -21,12 +21,48 @@ pub struct RobotsCharacterAttachment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum RobotsCharacterAttachmentAction {
     Attach(RobotsCharacterAttachment),
+    AttachParticlesToSkeleton { args: [u32; 4] },
+    TriggerSpecialEffectZero,
     DetachFirst { kind: RobotsCharacterAttachmentKind },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RobotsCharacterAttachmentRuntimeEntry {
+    pub kind: RobotsCharacterAttachmentKind,
+    pub resource_uid: u32,
+    pub binding_uid: u32,
+    pub age_fixed_ticks: u32,
+}
+
+impl From<RobotsCharacterAttachment> for RobotsCharacterAttachmentRuntimeEntry {
+    fn from(attachment: RobotsCharacterAttachment) -> Self {
+        Self {
+            kind: attachment.kind,
+            resource_uid: attachment.resource_uid,
+            binding_uid: attachment.binding_uid,
+            age_fixed_ticks: 0,
+        }
+    }
+}
+
+impl PartialEq<RobotsCharacterAttachment> for RobotsCharacterAttachmentRuntimeEntry {
+    fn eq(&self, attachment: &RobotsCharacterAttachment) -> bool {
+        self.kind == attachment.kind
+            && self.resource_uid == attachment.resource_uid
+            && self.binding_uid == attachment.binding_uid
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct RobotsCharacterAttachmentRuntimeState {
-    pub attachments: Vec<RobotsCharacterAttachment>,
+    pub attachments: Vec<RobotsCharacterAttachmentRuntimeEntry>,
+    /// Native vslot +0xA8 (`0x00403B50`) requests. Keep the four serialized
+    /// arguments intact: arg2 may be an explicit binding UID, while arg3 selects
+    /// one of the native built-in binding sets when arg2 is -1.
+    pub skeleton_particle_requests: Vec<[u32; 4]>,
+    /// Native vslot +0xAC (`0x00403AF0`) only has a presentation side effect for
+    /// effect id 0. Count the requests deterministically; GUI/UE owns rendering.
+    pub special_effect_zero_requests: u32,
 }
 
 /// Native shared attachment factory `0x0042A180` derives the effect object type
@@ -67,6 +103,24 @@ pub fn classify_ai_character_attachment_event(
                 },
             ))
         }
+        event_type::ATTACH_PARTICLES_TO_SKELETON => {
+            let args = [
+                event.native_arg_word(0).unwrap_or(u32::MAX),
+                event.native_arg_word(1).unwrap_or(u32::MAX),
+                event.native_arg_word(2).unwrap_or(u32::MAX),
+                event.native_arg_word(3).unwrap_or(0),
+            ];
+            // 0x00403B50 releases/validates arg0+arg1 and creates nothing unless
+            // both resources are valid. Preserve arg2/arg3 for explicit/built-in bindings.
+            (args[0] != u32::MAX && args[1] != u32::MAX)
+                .then_some(RobotsCharacterAttachmentAction::AttachParticlesToSkeleton { args })
+        }
+        event_type::ATTACH_SPECIAL_EFFECT => {
+            // Generic dispatcher already rejects -1; common +0xAC 0x00403AF0
+            // has an actual side effect only for id 0.
+            (event.native_arg_word(0) == Some(0))
+                .then_some(RobotsCharacterAttachmentAction::TriggerSpecialEffectZero)
+        }
         event_type::DETTACH_SWOOSH => {
             let resource_uid = event.native_arg_word(0)?;
             if resource_uid == u32::MAX {
@@ -85,7 +139,16 @@ pub fn apply_character_attachment_action(
 ) -> bool {
     match action {
         RobotsCharacterAttachmentAction::Attach(attachment) => {
-            state.attachments.push(attachment);
+            state.attachments.push(attachment.into());
+            true
+        }
+        RobotsCharacterAttachmentAction::AttachParticlesToSkeleton { args } => {
+            state.skeleton_particle_requests.push(args);
+            true
+        }
+        RobotsCharacterAttachmentAction::TriggerSpecialEffectZero => {
+            state.special_effect_zero_requests =
+                state.special_effect_zero_requests.saturating_add(1);
             true
         }
         RobotsCharacterAttachmentAction::DetachFirst { kind } => {
@@ -99,6 +162,14 @@ pub fn apply_character_attachment_action(
             state.attachments.remove(index);
             true
         }
+    }
+}
+
+pub fn advance_character_attachments_fixed_tick(
+    state: &mut RobotsCharacterAttachmentRuntimeState,
+) {
+    for attachment in &mut state.attachments {
+        attachment.age_fixed_ticks = attachment.age_fixed_ticks.saturating_add(1);
     }
 }
 
@@ -201,6 +272,59 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn skeleton_and_special_effect_events_preserve_native_common_slot_semantics() {
+        let mut state = RobotsCharacterAttachmentRuntimeState::default();
+        let skeleton = [0x1100_0007, 0x1200_0001, u32::MAX, 2];
+        assert_eq!(
+            apply_ai_character_attachment_event(
+                &mut state,
+                event(event_type::ATTACH_PARTICLES_TO_SKELETON, &skeleton),
+            ),
+            Some(RobotsCharacterAttachmentAction::AttachParticlesToSkeleton { args: skeleton })
+        );
+        assert_eq!(state.skeleton_particle_requests, vec![skeleton]);
+
+        assert_eq!(
+            apply_ai_character_attachment_event(
+                &mut state,
+                event(event_type::ATTACH_SPECIAL_EFFECT, &[1]),
+            ),
+            None
+        );
+        assert_eq!(
+            apply_ai_character_attachment_event(
+                &mut state,
+                event(event_type::ATTACH_SPECIAL_EFFECT, &[0]),
+            ),
+            Some(RobotsCharacterAttachmentAction::TriggerSpecialEffectZero)
+        );
+        assert_eq!(state.special_effect_zero_requests, 1);
+    }
+
+    #[test]
+    fn fixed_step_age_starts_at_zero_and_advances_only_existing_attachments() {
+        let mut state = RobotsCharacterAttachmentRuntimeState::default();
+        apply_ai_character_attachment_event(
+            &mut state,
+            event(event_type::ATTACH_SWOOSH, &[0x1900_0018, u32::MAX]),
+        )
+        .expect("attach swoosh");
+        assert_eq!(state.attachments[0].age_fixed_ticks, 0);
+
+        advance_character_attachments_fixed_tick(&mut state);
+        advance_character_attachments_fixed_tick(&mut state);
+        assert_eq!(state.attachments[0].age_fixed_ticks, 2);
+
+        apply_ai_character_attachment_event(
+            &mut state,
+            event(event_type::ATTACH_PARTICLE, &[0x1100_0007, u32::MAX]),
+        )
+        .expect("attach particle");
+        assert_eq!(state.attachments[0].age_fixed_ticks, 2);
+        assert_eq!(state.attachments[1].age_fixed_ticks, 0);
     }
 
     #[test]

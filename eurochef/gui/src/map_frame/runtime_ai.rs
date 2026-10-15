@@ -1,12 +1,16 @@
-use super::{runtime_ai_explosion::native_common_monster_explosion_uid, MapFrame};
+use super::{
+    runtime_ai_explosion::native_common_monster_explosion_uid,
+    runtime_ai_motion::NativeAiAnimationPresentationSample,
+    runtime_script_xitem::NativeScriptXItemSpawnRequest, MapFrame,
+};
 use crate::{
     map_runtime::{
         runtime_character_animation_datum_world_shape,
-        runtime_character_animation_datum_world_transform, runtime_character_floor_contact_projection,
-        runtime_map_ai_environment_floor_contact, runtime_map_ai_environment_floor_y,
-        runtime_world_shape_for_collision_profile, RuntimeAiEnvironmentFloorContact,
-        RuntimeCharacterBodyState, RuntimeCharacterWorldShape, RuntimeNativeAiHitFatalState,
-        RuntimeRobotsGlobalRngState,
+        runtime_character_animation_datum_world_transform,
+        runtime_character_floor_contact_projection, runtime_map_ai_environment_floor_contact,
+        runtime_map_ai_environment_floor_y, runtime_world_shape_for_collision_profile,
+        RuntimeAiEnvironmentFloorContact, RuntimeCharacterBodyState, RuntimeCharacterWorldShape,
+        RuntimeNativeAiHitFatalState, RuntimeRobotsGlobalRngState,
     },
     maps::{
         robots_character_runtime_type, NativeSweeperBossGenericAiBootstrap,
@@ -31,23 +35,24 @@ use eurochef_shared::robots_runtime::{
         uses_base_monster_idle_only, RobotsBaseMonsterIdleRuntimeState,
         ROBOTS_BASE_MONSTER_IDLE_ANIM_MODE,
     },
+    blades_attachment::{step_blades_attachment_rotation, RobotsBladesAttachmentSpec},
     bounce_navmesh::{
         RobotsBounceNavMeshPhase, RobotsBounceNavMeshRuntimeState,
         ROBOTS_BOUNCE_NAVMESH_IMPACT_ANIM_MODE,
     },
     character_effects::{
-        apply_ai_character_attachment_event, RobotsCharacterAttachmentRuntimeState,
+        advance_character_attachments_fixed_tick, apply_ai_character_attachment_event,
+        RobotsCharacterAttachmentRuntimeState,
     },
     character_physics::RobotsCharacterPhysicsRuntimeState,
-    current_attacker::{
-        robots_current_attacker_candidate_eligible, robots_current_attacker_claim_active,
-        robots_current_attacker_player_environment_blocked,
-        RobotsCurrentAttackerCandidate, RobotsCurrentAttackerEligibilityInput,
-        ROBOTS_CURRENT_ATTACKER_WATCHBOT_DATUM_UID,
-    },
     circle_target::{
         circle_target_priority, enter_circle_target, step_circle_target,
         RobotsCircleTargetRuntimeState, ROBOTS_CIRCLE_TARGET_DIRECTION_RANDOM,
+    },
+    current_attacker::{
+        robots_current_attacker_candidate_eligible, robots_current_attacker_claim_active,
+        robots_current_attacker_player_environment_blocked, RobotsCurrentAttackerCandidate,
+        RobotsCurrentAttackerEligibilityInput, ROBOTS_CURRENT_ATTACKER_WATCHBOT_DATUM_UID,
     },
     dodgem::{
         dodgem_attack_config, dodgem_primary_winner, dodgem_secondary_scrambled_config,
@@ -64,24 +69,24 @@ use eurochef_shared::robots_runtime::{
         ef01_mine_behavior_winner, ef01_mine_first_update_effects, ef01_mine_first_update_route,
         ef01_mine_peer_contact_requests_monster_action, RobotsEf01MineFirstUpdateRoute,
     },
-    blades_attachment::{step_blades_attachment_rotation, RobotsBladesAttachmentSpec},
-    eq03_spider::{step_eq03_spider_attachment_rotation, RobotsEq03SpiderAttachmentRuntimeState},
     em07_piranha::{
-        em07_piranha_attack_config, em07_piranha_behavior_winner,
-        em07_piranha_cached_target_from_draws, em07_piranha_creator_retarget_ticks,
-        em07_piranha_creator_spawn_position_from_draws, em07_piranha_creator_target_radius,
-        em07_piranha_distance_radius_from_raw, em07_piranha_flight_reset_ready,
-        em07_piranha_height_transition,
-        em07_piranha_random_radius_modulus,
-        em07_piranha_attachment_rotation_per_fixed_tick, em07_piranha_height_transition_plan,
-        em07_piranha_owner_pitch_yaw_from_physics,
-        RobotsEm07PiranhaBehaviorWinner,
+        em07_piranha_attachment_rotation_per_fixed_tick, em07_piranha_attack_config,
+        em07_piranha_behavior_winner, em07_piranha_cached_target_from_draws,
+        em07_piranha_creator_retarget_ticks, em07_piranha_creator_spawn_position_from_draws,
+        em07_piranha_creator_target_radius, em07_piranha_distance_radius_from_raw,
+        em07_piranha_flight_reset_ready, em07_piranha_height_transition,
+        em07_piranha_height_transition_plan, em07_piranha_owner_pitch_yaw_from_physics,
+        em07_piranha_random_radius_modulus, RobotsEm07PiranhaBehaviorWinner,
         RobotsEm07PiranhaCachedPoint, RobotsEm07PiranhaFlightCycleState,
         RobotsEm07PiranhaHeightTransition, RobotsEm07PiranhaHeightTransitionPlan,
         ROBOTS_EM07_PIRANHA_FILE_UID, ROBOTS_EM07_PIRANHA_FIRST_UPDATE_COMPONENT_SCALAR,
         ROBOTS_EM07_PIRANHA_HEIGHT_OFFSET, ROBOTS_EM07_PIRANHA_LINK_END_INDEX,
-        ROBOTS_EM07_PIRANHA_LINK_FIRST_INDEX,
-        ROBOTS_EM07_PIRANHA_PERMANENT_SOUND_PARAMETER, ROBOTS_EM07_PIRANHA_PERMANENT_SOUND_UID,
+        ROBOTS_EM07_PIRANHA_LINK_FIRST_INDEX, ROBOTS_EM07_PIRANHA_PERMANENT_SOUND_PARAMETER,
+        ROBOTS_EM07_PIRANHA_PERMANENT_SOUND_UID,
+    },
+    eq03_spider::{
+        step_eq03_spider_attachment_rotation, RobotsEq03SpiderAttachmentConfig,
+        RobotsEq03SpiderAttachmentRuntimeState,
     },
     eq04_mine::{
         eq04_mine_behavior_winner, eq04_mine_patrol_config,
@@ -93,6 +98,8 @@ use eurochef_shared::robots_runtime::{
     ew09_armoured::{
         ew09_attack_character_physics_velocity, ew09_effective_handler_flags,
         ew09_follow_network_path_config, step_ew09_attachment_rotation,
+        ROBOTS_EW09_ATTACHMENT_ANIMATION_UID, ROBOTS_EW09_ATTACHMENT_BONE_UID,
+        ROBOTS_EW09_FILE_UID,
     },
     flee_navmesh::{
         enter_flee_navmesh, flee_navmesh_enter_needs_rng, flee_navmesh_priority,
@@ -129,8 +136,8 @@ use eurochef_shared::robots_runtime::{
     },
     hit_shapes::robots_hit_shapes_intersect,
     knightbot_animator::{
-        step_knightbot_animator, RobotsKnightBotAnimatorConfig,
-        RobotsKnightBotAnimatorRuntimeState,
+        knightbot_animator_rotation_from_points, step_knightbot_animator,
+        RobotsKnightBotAnimatorConfig, RobotsKnightBotAnimatorRuntimeState,
     },
     locomotion::{
         ai_character_physics_velocity_from_scalar, shortest_yaw_delta,
@@ -155,9 +162,7 @@ use eurochef_shared::robots_runtime::{
         RobotsMineBotMoveAttackWinner, RobotsMineBotMoveInput, RobotsMineBotMoveRuntimeState,
         ROBOTS_MINEBOT_ATTACK_TRACKING_MAX_YAW_PER_TICK,
     },
-    minion_attachment::{
-        step_minion_attachment_rotation, RobotsMinionAttachmentConfig,
-    },
+    minion_attachment::{step_minion_attachment_rotation, RobotsMinionAttachmentConfig},
     monster_navigation::{
         RobotsMonsterNavMeshView, RobotsMonsterNavigationRuntimeState,
         ROBOTS_MONSTER_NAV_BOUNDARY_PROBE_RADIUS,
@@ -206,16 +211,14 @@ use eurochef_shared::robots_runtime::{
     stalk_navmesh::{
         complete_stalk_navmesh_animation, enter_stalk_navmesh, leave_stalk_navmesh,
         stalk_navmesh_priority, stalk_navmesh_requests_event_throttle, step_stalk_navmesh,
-        tick_stalk_navmesh,
-        RobotsStalkNavMeshPriorityInput, RobotsStalkNavMeshRuntimeState,
+        tick_stalk_navmesh, RobotsStalkNavMeshPriorityInput, RobotsStalkNavMeshRuntimeState,
     },
     standard_monster::{
         eb07_minebot_behavior_winner, eq03_spider_behavior_winner, ew09_armoured_behavior_winner,
         flambe_behavior_winner, guardbot_behavior_winner, knightbot_behavior_winner,
         magnabot_behavior_winner, shieldbot_behavior_winner, standard_monster_behavior_winner,
         standard_monster_physics_locomotion_speed_range, sweeper_behavior_winner,
-        thiefbot_behavior_winner,
-        RobotsPermanentSoundConfig, RobotsStandardMonsterBehaviorConfig,
+        thiefbot_behavior_winner, RobotsPermanentSoundConfig, RobotsStandardMonsterBehaviorConfig,
         RobotsStandardMonsterBehaviorWinner, ROBOTS_STANDARD_MONSTER_MAX_ATTACKS,
     },
     target_behavior::{
@@ -231,7 +234,8 @@ use eurochef_shared::robots_runtime::{
     },
     thiefbot::{
         step_thiefbot_attachment, RobotsThiefBotAttachmentInput,
-        RobotsThiefBotAttachmentRuntimeState,
+        RobotsThiefBotAttachmentRuntimeState, ROBOTS_THIEFBOT_ATTACHMENT_BONE_UID,
+        ROBOTS_THIEFBOT_ATTACHMENT_ENTITY_UID, ROBOTS_THIEFBOT_ATTACHMENT_FILE_UID,
     },
     three_phase_attack::{
         enter_three_phase_attack, leave_three_phase_attack, step_three_phase_attack,
@@ -290,7 +294,22 @@ use super::{
     runtime_ai_projectile::resolve_ai_projectile_spawn_plan,
 };
 
-const ROBOTS_AI_MAX_FIXED_STEPS_PER_FRAME: usize = 200_000;
+// Maps is an interactive preview, not an offline catch-up runner. A large
+// wall-clock hitch must not fast-forward hundreds of AI/Physics ticks inside
+// one rendered frame (nor leave a backlog that keeps running at warp speed).
+pub(super) const ROBOTS_MAPS_MAX_FIXED_STEPS_PER_FRAME: usize = 8;
+
+pub(super) fn budget_maps_fixed_steps(
+    accumulator: &mut f64,
+    elapsed_seconds: f64,
+    fixed_seconds: f64,
+) -> usize {
+    let max_debt = fixed_seconds * ROBOTS_MAPS_MAX_FIXED_STEPS_PER_FRAME as f64;
+    *accumulator = (*accumulator + elapsed_seconds.max(0.0)).min(max_debt);
+    let steps = (*accumulator / fixed_seconds).floor() as usize;
+    *accumulator = (*accumulator - steps as f64 * fixed_seconds).max(0.0);
+    steps
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NativeAiHostScope {
@@ -317,48 +336,15 @@ pub(super) const fn native_ai_production_host_kind(
     use RobotsAiHandlerClass::*;
     match handler_class {
         MonsterBase => BaseMonster,
-        Monster2Rockets
-        | ConstructionBot
-        | Eb07MineBot
-        | Eb11MagnaBot
-        | Eb12EvilBot
-        | Eb13KnightBot
-        | Eb14Minion
-        | Eb15Launcher
-        | Eb16KnuckleBot
-        | Ef01Mine
-        | Ef03EvilBot
-        | Eq03Spider
-        | Ew08Flambe
-        | Ew08FlambeLarge
-        | Ew09Armoured
-        | Ew10Minion
-        | Ew11FatBot
-        | GuardBot
-        | JailBotLarge
-        | JailBotNormal
-        | MalfBot
-        | SawBot
-        | SecurityBot
-        | ShieldBot
-        | ShuntBot
-        | ShuntBotBoss
-        | SpikeBot
-        | Sweeper
-        | ThiefBot => StandardMonster,
-        DogBot
-        | Eb10RollerBot
-        | Em07PiranhaBot
-        | Ep02Turret
-        | Ep04Turret
-        | Ep05Turret
-        | Ep06Turret
-        | Eq02MineBot
-        | Eq04Mine
-        | Ew07Dodgem
-        | SpinTop
-        | TestAnimBot
-        | TurretBot => DedicatedAi,
+        Monster2Rockets | ConstructionBot | Eb07MineBot | Eb11MagnaBot | Eb12EvilBot
+        | Eb13KnightBot | Eb14Minion | Eb15Launcher | Eb16KnuckleBot | Ef01Mine | Ef03EvilBot
+        | Eq03Spider | Ew08Flambe | Ew08FlambeLarge | Ew09Armoured | Ew10Minion | Ew11FatBot
+        | GuardBot | JailBotLarge | JailBotNormal | MalfBot | SawBot | SecurityBot | ShieldBot
+        | ShuntBot | ShuntBotBoss | SpikeBot | Sweeper | ThiefBot => StandardMonster,
+        DogBot | Eb10RollerBot | Em07PiranhaBot | Ep02Turret | Ep04Turret | Ep05Turret
+        | Ep06Turret | Eq02MineBot | Eq04Mine | Ew07Dodgem | SpinTop | TestAnimBot | TurretBot => {
+            DedicatedAi
+        }
         Npc | NpcFender => NpcBehavior,
     }
 }
@@ -679,11 +665,22 @@ pub(super) struct NativeAiTransientSoundRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct NativeAiScriptSpawnRequest {
-    pub(super) owner_key: u64,
+pub(super) struct NativeAiEntityAttachmentPresentation {
     pub(super) file_uid: u32,
-    pub(super) script_uid: u32,
-    pub(super) position_xyzw: [f32; 4],
+    pub(super) entity_uid: u32,
+    pub(super) position: Vec3,
+    pub(super) rotation: Quat,
+    pub(super) scale: Vec3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct NativeAiAnimatorAttachmentPresentation {
+    pub(super) animation_file: u32,
+    pub(super) animation_uid: u32,
+    pub(super) position: Vec3,
+    pub(super) rotation: Quat,
+    pub(super) scale: Vec3,
+    pub(super) animation_seconds: f32,
 }
 
 fn apply_native_ew09_derived_attack_motion(
@@ -748,10 +745,8 @@ fn service_native_minion_attachment_post_common_update(
     runtime: &mut NativeStandardMonsterRuntime,
     config: RobotsMinionAttachmentConfig,
 ) {
-    runtime.minion_attachment_local_spin_xyzw = step_minion_attachment_rotation(
-        runtime.minion_attachment_local_spin_xyzw,
-        config,
-    );
+    runtime.minion_attachment_local_spin_xyzw =
+        step_minion_attachment_rotation(runtime.minion_attachment_local_spin_xyzw, config);
 }
 
 fn service_native_knightbot_pre_common_update(
@@ -895,6 +890,9 @@ pub(super) struct NativeStandardMonsterRuntime {
     /// class +0x34 overrides after common Monster update.
     minion_attachment_local_spin_xyzw: [f32; 4],
     thiefbot_attachment: RobotsThiefBotAttachmentRuntimeState,
+    /// Native attached Animator playback clock. Only ctor-proven AttachAnimator
+    /// classes consume this; presentation converts seconds through EXGeoAnim rate.
+    attached_animator_seconds: f32,
     /// EB13 builder-owned AttachAnimator entry at Handler+0x4FC[0]. The GUI/UE
     /// adapter materializes the child object; shared state owns its exact pose.
     knightbot_animator: Option<RobotsKnightBotAnimatorRuntimeState>,
@@ -954,6 +952,7 @@ impl NativeStandardMonsterRuntime {
             ew09_attachment_local_spin_xyzw: [0.0, 0.0, 0.0, 1.0],
             minion_attachment_local_spin_xyzw: [0.0, 0.0, 0.0, 1.0],
             thiefbot_attachment: RobotsThiefBotAttachmentRuntimeState::default(),
+            attached_animator_seconds: 0.0,
             knightbot_animator: (config.handler_class == RobotsAiHandlerClass::Eb13KnightBot)
                 .then_some(RobotsKnightBotAnimatorRuntimeState::default()),
             locomotion: RobotsAiLocomotionRuntimeState::default(),
@@ -1328,9 +1327,9 @@ fn commit_native_standard_physics_locomotion(
 }
 
 pub(super) fn monster_nav_regions(map: &ProcessedMap) -> Vec<RobotsMonsterNavMeshView<'_>> {
-    map.zone_navmeshes
+    map.navigation_regions
         .iter()
-        .flat_map(|zone| zone.iter())
+        .map(|region| &region.navmesh)
         .map(|navmesh| RobotsMonsterNavMeshView {
             vertices: &navmesh.vertices,
             faces: &navmesh.faces,
@@ -1392,15 +1391,248 @@ impl MapFrame {
         )
     }
 
+    /// Multi-draw behavior nodes consume the same ordered gameplay stream as
+    /// single-draw nodes; the editor preview is not a separate NPC-only RNG.
+    pub(super) fn take_native_ai_gameplay_rng_draws<const N: usize>(
+        &mut self,
+    ) -> Option<[u32; N]> {
+        let mut draws = [0u32; N];
+        for draw in &mut draws {
+            *draw = self.next_native_ai_gameplay_rng_u32()?;
+        }
+        Some(draws)
+    }
+
+    /// Resolve the full presentation sample from the shared live-AI key.
+    /// This is intentionally separate from gameplay `sample_by_key`: presentation may
+    /// consume transition provenance, while HitArea/AnimDatum keep the current mode/time API.
+    pub(super) fn native_ai_animation_presentation_sample_by_key(
+        &self,
+        key: u64,
+    ) -> Option<NativeAiAnimationPresentationSample> {
+        let sample = NativeAiAnimationRuntime::presentation_sample;
+        if let Some(animation) = self
+            .native_ai_fatal_runtime
+            .get(&key)
+            .map(|runtime| &runtime.animation)
+            .or_else(|| self.native_standard_monster_runtime.get(&key).map(|runtime| &runtime.animation))
+            .or_else(|| self.native_eq04_mine_runtime.get(&key).map(|runtime| &runtime.animation))
+            .or_else(|| self.native_minebot_runtime.get(&key).map(|runtime| &runtime.animation))
+            .or_else(|| self.native_dogbot_runtime.get(&key).map(|runtime| &runtime.animation))
+            .or_else(|| self.native_rollerbot_runtime.get(&key).map(|runtime| &runtime.animation))
+            .or_else(|| self.native_npc_behavior.get(&key).map(|runtime| &runtime.animation))
+        {
+            return sample(animation);
+        }
+        let turret = self.native_turret_runtime.get(&key)?;
+        match (
+            sample(&turret.primary_animation),
+            sample(&turret.secondary_animation),
+        ) {
+            (Some(sample), None) | (None, Some(sample)) => Some(sample),
+            _ => None,
+        }
+    }
+
+    /// Materialize the ctor-time `0x004543A0` AttachEntity contract against the
+    /// live animated root bone. The primary datum supplies local position; an
+    /// optional secondary datum defines the ctor-local aim quaternion.
+    fn native_ai_attached_entity_presentation_by_key(
+        &self,
+        map: &ProcessedMap,
+        key: u64,
+        file_uid: u32,
+        entity_uid: u32,
+        root_bone_uid: u32,
+        primary_datum_uid: u32,
+        secondary_datum_uid: Option<u32>,
+        local_spin_xyzw: [f32; 4],
+    ) -> Option<NativeAiEntityAttachmentPresentation> {
+        let visual = self.runtime_ai_visual_by_key(map, key)?;
+        let body = self.runtime_character_bodies.get(&key)?;
+        let bone = self.runtime_ai_animation_bone_world_transform_by_key(map, key, root_bone_uid)?;
+        let primary = visual.anim_datums.get(&primary_datum_uid)?;
+        let root_selector = *visual
+            .animation_bone_selectors
+            .get(&(primary.animskin, root_bone_uid))?;
+        if usize::from(primary.transform_selector) != root_selector {
+            return None;
+        }
+        let ctor_local_rotation = if let Some(secondary_datum_uid) = secondary_datum_uid {
+            let secondary = visual.anim_datums.get(&secondary_datum_uid)?;
+            if secondary.animskin != primary.animskin
+                || secondary.transform_selector != primary.transform_selector
+            {
+                return None;
+            }
+            Quat::from_array(knightbot_animator_rotation_from_points(
+                primary.local_center.to_array(),
+                secondary.local_center.to_array(),
+            ))
+            .normalize()
+        } else {
+            Quat::IDENTITY
+        };
+        let local_spin = Quat::from_array(local_spin_xyzw).normalize();
+        Some(NativeAiEntityAttachmentPresentation {
+            file_uid,
+            entity_uid,
+            position: bone.world_from_bone.transform_point3(primary.local_center),
+            rotation: (bone.rotation * ctor_local_rotation * local_spin).normalize(),
+            scale: body.native_transform_scale_xyz(),
+        })
+    }
+
+    pub(super) fn native_ai_blades_attachment_presentation_by_key(
+        &self,
+        map: &ProcessedMap,
+        key: u64,
+    ) -> Option<NativeAiEntityAttachmentPresentation> {
+        let runtime = self.native_standard_monster_runtime.get(&key)?;
+        let spec = RobotsBladesAttachmentSpec::for_handler_class(runtime.handler_class)?;
+        self.native_ai_attached_entity_presentation_by_key(
+            map, key, spec.file_uid, spec.entity_uid, spec.bone_uid, spec.anim_datum_uid, None,
+            runtime.blades_attachment_local_spin_xyzw,
+        )
+    }
+
+    pub(super) fn native_ai_minion_attachment_presentation_by_key(
+        &self,
+        map: &ProcessedMap,
+        key: u64,
+    ) -> Option<NativeAiEntityAttachmentPresentation> {
+        let runtime = self.native_standard_monster_runtime.get(&key)?;
+        let config = RobotsMinionAttachmentConfig::for_handler_class(runtime.handler_class)?;
+        self.native_ai_attached_entity_presentation_by_key(
+            map, key, config.owner_file_uid, config.entity_uid, config.root_datum,
+            config.primary_datum, config.secondary_datum, runtime.minion_attachment_local_spin_xyzw,
+        )
+    }
+
+    pub(super) fn native_ai_eq03_spider_attachment_presentation_by_key(
+        &self,
+        map: &ProcessedMap,
+        key: u64,
+    ) -> Option<NativeAiEntityAttachmentPresentation> {
+        let runtime = self.native_standard_monster_runtime.get(&key)?;
+        if runtime.handler_class != RobotsAiHandlerClass::Eq03Spider {
+            return None;
+        }
+        let config = RobotsEq03SpiderAttachmentConfig::native();
+        self.native_ai_attached_entity_presentation_by_key(
+            map,
+            key,
+            config.file_uid,
+            config.entity_uid,
+            config.root_bone_uid,
+            config.primary_datum_uid,
+            Some(config.secondary_datum_uid),
+            runtime.eq03_attachment.local_spin_xyzw,
+        )
+    }
+
+    pub(super) fn native_ai_thiefbot_attachment_presentation_by_key(
+        &self,
+        map: &ProcessedMap,
+        key: u64,
+    ) -> Option<NativeAiEntityAttachmentPresentation> {
+        let runtime = self.native_standard_monster_runtime.get(&key)?;
+        if runtime.handler_class != RobotsAiHandlerClass::ThiefBot {
+            return None;
+        }
+        let bone = self.runtime_ai_animation_bone_world_transform_by_key(
+            map,
+            key,
+            ROBOTS_THIEFBOT_ATTACHMENT_BONE_UID,
+        )?;
+        let body = self.runtime_character_bodies.get(&key)?;
+        let local_spin = Quat::from_array(runtime.thiefbot_attachment.local_spin_xyzw).normalize();
+        Some(NativeAiEntityAttachmentPresentation {
+            file_uid: ROBOTS_THIEFBOT_ATTACHMENT_FILE_UID,
+            entity_uid: ROBOTS_THIEFBOT_ATTACHMENT_ENTITY_UID,
+            position: bone.position,
+            rotation: (bone.rotation * local_spin).normalize(),
+            scale: body.native_transform_scale_xyz(),
+        })
+    }
+
+    pub(super) fn native_ai_entity_attachment_presentations(
+        &self,
+        map: &ProcessedMap,
+    ) -> Vec<NativeAiEntityAttachmentPresentation> {
+        self.native_standard_monster_runtime
+            .keys()
+            .filter_map(|key| {
+                self.native_ai_blades_attachment_presentation_by_key(map, *key)
+                    .or_else(|| self.native_ai_minion_attachment_presentation_by_key(map, *key))
+                    .or_else(|| {
+                        self.native_ai_eq03_spider_attachment_presentation_by_key(map, *key)
+                    })
+                    .or_else(|| self.native_ai_thiefbot_attachment_presentation_by_key(map, *key))
+            })
+            .collect()
+    }
+
+    pub(super) fn native_ai_attached_animator_presentation_by_key(
+        &self,
+        map: &ProcessedMap,
+        key: u64,
+    ) -> Option<NativeAiAnimatorAttachmentPresentation> {
+        let runtime = self.native_standard_monster_runtime.get(&key)?;
+        let body = self.runtime_character_bodies.get(&key)?;
+        match runtime.handler_class {
+            RobotsAiHandlerClass::Ew09Armoured => {
+                let bone = self.runtime_ai_animation_bone_world_transform_by_key(
+                    map,
+                    key,
+                    ROBOTS_EW09_ATTACHMENT_BONE_UID,
+                )?;
+                let local_spin =
+                    Quat::from_array(runtime.ew09_attachment_local_spin_xyzw).normalize();
+                Some(NativeAiAnimatorAttachmentPresentation {
+                    animation_file: ROBOTS_EW09_FILE_UID,
+                    animation_uid: ROBOTS_EW09_ATTACHMENT_ANIMATION_UID,
+                    position: bone.position,
+                    rotation: (bone.rotation * local_spin).normalize(),
+                    scale: body.native_transform_scale_xyz(),
+                    animation_seconds: runtime.attached_animator_seconds,
+                })
+            }
+            RobotsAiHandlerClass::Eb13KnightBot => {
+                let config = RobotsKnightBotAnimatorConfig::eb13();
+                let animator = runtime.knightbot_animator.as_ref()?;
+                if !animator.attached {
+                    return None;
+                }
+                Some(NativeAiAnimatorAttachmentPresentation {
+                    animation_file: config.file_uid,
+                    animation_uid: config.animation_uid,
+                    position: Vec3::from_array(animator.position_xyz),
+                    rotation: Quat::from_array(animator.rotation_xyzw).normalize(),
+                    scale: body.native_transform_scale_xyz(),
+                    animation_seconds: runtime.attached_animator_seconds,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn native_ai_attached_animator_presentations(
+        &self,
+        map: &ProcessedMap,
+    ) -> Vec<NativeAiAnimatorAttachmentPresentation> {
+        self.native_standard_monster_runtime
+            .keys()
+            .filter_map(|key| self.native_ai_attached_animator_presentation_by_key(map, *key))
+            .collect()
+    }
+
     /// Resolve the currently sampled AnimMode/time from the shared live-AI key.
     /// Fatal playback owns the XItem animation while present; otherwise each class
     /// host exposes its same common animation channel here. Ambiguous dual-turret
     /// playback fails closed rather than inventing one component as the owner.
     pub(super) fn native_ai_animation_sample_by_key(&self, key: u64) -> Option<(u32, f32)> {
-        let sample = |animation: &NativeAiAnimationRuntime| {
-            let mode = animation.current_anim_mode();
-            (mode != 0).then_some((mode, animation.sampled_pose_seconds()))
-        };
+        let sample = NativeAiAnimationRuntime::sample;
         if let Some(animation) = self
             .native_ai_fatal_runtime
             .get(&key)
@@ -1427,6 +1659,11 @@ impl MapFrame {
             })
             .or_else(|| {
                 self.native_rollerbot_runtime
+                    .get(&key)
+                    .map(|runtime| &runtime.animation)
+            })
+            .or_else(|| {
+                self.native_npc_behavior
                     .get(&key)
                     .map(|runtime| &runtime.animation)
             })
@@ -1461,6 +1698,7 @@ impl MapFrame {
                 capability_flags: visual.handler_flags_628,
                 health: initial_health,
                 got_hit_latch: false,
+                turretbot_zero_health_latch_60c: false,
                 owner_category: visual.runtime_type,
             });
     }
@@ -1552,12 +1790,12 @@ impl MapFrame {
         // 0x00455560 reads the same common environment-floor lane used by AI physics.
         // Unknown geometry is a host seam, not a native "no floor" result, so do not
         // mutate the process-global selection until that geometry is available.
-        let Some(target_floor) = runtime_map_ai_environment_floor_contact(map, target_position) else {
+        let Some(target_floor) = runtime_map_ai_environment_floor_contact(map, target_position)
+        else {
             return;
         };
-        let target_height_above_floor = target_floor.map(|contact| {
-            target_position.y - contact.point.y
-        });
+        let target_height_above_floor =
+            target_floor.map(|contact| target_position.y - contact.point.y);
         let watchbot_target = matches!(player_state, 0x2a | 0x35);
         let normal_environment_blocked = (!watchbot_target).then(|| {
             robots_current_attacker_player_environment_blocked(
@@ -1639,7 +1877,8 @@ impl MapFrame {
         }
 
         let mut live_gate_keys = FxHashSet::default();
-        let mut candidates = Vec::<RobotsCurrentAttackerCandidate>::with_capacity(host_candidates.len());
+        let mut candidates =
+            Vec::<RobotsCurrentAttackerCandidate>::with_capacity(host_candidates.len());
         for host in host_candidates {
             live_gate_keys.insert(host.key);
             let environment_blocked = if watchbot_target {
@@ -1657,8 +1896,8 @@ impl MapFrame {
             } else {
                 normal_environment_blocked.unwrap_or(false)
             };
-            let eligible = robots_current_attacker_candidate_eligible(
-                RobotsCurrentAttackerEligibilityInput {
+            let eligible =
+                robots_current_attacker_candidate_eligible(RobotsCurrentAttackerEligibilityInput {
                     handler_flags_628: host.handler_flags_628,
                     owner_region_ordinal: host.owner_region_ordinal,
                     owner_group_flags0: host.owner_group_flags0,
@@ -1666,8 +1905,7 @@ impl MapFrame {
                     target_region_ordinal,
                     target_group_flags0,
                     environment_blocked,
-                },
-            );
+                });
             candidates.push(RobotsCurrentAttackerCandidate {
                 owner_key: host.key,
                 eligible,
@@ -1679,16 +1917,14 @@ impl MapFrame {
             .retain(|key, _| live_gate_keys.contains(key));
 
         let mut state = self.native_current_attacker;
-        let bonus_owner = self.native_current_attacker_bonus_owner;
-        state.advance(
-            &candidates,
-            bonus_owner,
-            target_position.to_array(),
-            || {
-                self.next_native_ai_gameplay_rng_u32()
-                    .expect("AI preview RNG must remain anchored while simulation is active")
-            },
-        );
+        // Robots.exe manager +0x34 is initialized to null by 0x00456020 and the
+        // executable has no represented runtime writer for it. Keep the +2 branch
+        // in the shared native reducer, but production Robots selection supplies no
+        // synthetic bonus owner.
+        state.advance(&candidates, None, target_position.to_array(), || {
+            self.next_native_ai_gameplay_rng_u32()
+                .expect("AI preview RNG must remain anchored while simulation is active")
+        });
         self.native_current_attacker = state;
     }
 
@@ -1727,15 +1963,197 @@ impl MapFrame {
         self.sync_native_dynamic_ai_pose_back_to_registry(map);
     }
 
+    fn advance_native_watchbot_control_fixed(
+        &mut self,
+        map: &ProcessedMap,
+        player_yaw_radians: Option<f32>,
+        wall_time: f64,
+    ) {
+        let Some(pose) = self.native_watchbot_owner_pose else {
+            return;
+        };
+        if !self.native_watchbot_owner_runtime.owner_xitem_exists_550
+            || !self.native_watchbot_owner_runtime.handler_attached
+        {
+            return;
+        }
+
+        let input = self.native_watchbot_host_input;
+        let axis = input.watchbot_axis_xz;
+        let magnitude = (axis[0] * axis[0] + axis[1] * axis[1]).sqrt().min(1.0);
+        let owner_rotation = glam::Quat::from_array(
+            pose.rotation_xyzw.unwrap_or([0.0, 0.0, 0.0, 1.0]),
+        );
+        let (z, x, y) = owner_rotation.to_euler(glam::EulerRot::ZXY);
+        let owner_rotation_euler4 = [z, y, x, 0.0];
+        let controller_yaw = player_yaw_radians.unwrap_or(owner_rotation_euler4[1]);
+
+        if self.native_watchbot_owner_runtime.current_component_mode_4a0
+            == eurochef_shared::robots_runtime::watchbot::ROBOTS_WATCHBOT_CONTROL_COMPONENT_MODE
+        {
+            let _ = self.apply_native_watchbot_mode2_input(
+                eurochef_shared::robots_runtime::watchbot_mode2::RobotsWatchbotMode2InputSample {
+                    axis_xz: axis,
+                    action_0c: input.watchbot_action_0c,
+                    action_0d: input.watchbot_action_0d,
+                    action_0e: input.watchbot_action_0e,
+                    action_0f: input.watchbot_action_0f
+                        && self.native_watchbot_owner_runtime.current_component_mode_4a0
+                            != eurochef_shared::robots_runtime::watchbot::ROBOTS_WATCHBOT_TARGET_FOLLOW_COMPONENT_MODE,
+                    runtime_rate_scale: 1.0,
+                },
+            );
+            let stop = eurochef_shared::robots_runtime::watchbot_component::RobotsWatchbotComponentStopInput {
+                owner_position_xyz: pose.position_xyz,
+                handler_target_xz: [pose.position_xyz[0], pose.position_xyz[2]],
+                current_anim_mode_uid: 0,
+            };
+            let recovery_contact = self
+                .runtime_watchbot_recovery_contact_state(
+                    map,
+                    glam::Vec3::from_array(pose.position_xyz),
+                    owner_rotation_euler4,
+                    controller_yaw,
+                    self.native_watchbot_mode2_runtime.velocity_xyzw_30,
+                    wall_time,
+                )
+                .unwrap_or(None);
+            if let Some(step) = self.advance_native_watchbot_mode2_pre_physics(
+                eurochef_shared::robots_runtime::watchbot_mode2::RobotsWatchbotMode2FixedInput {
+                    owner_rotation_euler4,
+                    controller_yaw_radians: controller_yaw,
+                    runtime_rate_scale: 1.0,
+                    stop,
+                    recovery_contact,
+                },
+            ) {
+                let _ = self.advance_native_watchbot_owner_physics_fixed(
+                    map,
+                    step.world_motion_xyzw,
+                    step.owner_rotation_euler4,
+                );
+            }
+        } else if self.native_watchbot_owner_runtime.current_component_mode_4a0
+            == eurochef_shared::robots_runtime::watchbot::ROBOTS_WATCHBOT_TRIGGER_PATH_MODE
+        {
+            let _ = self.set_native_watchbot_mode3_control_input(
+                eurochef_shared::robots_runtime::watchbot_mode3::RobotsWatchbotMode3ControlInput {
+                    direction_xz: axis,
+                    magnitude,
+                },
+            );
+            let stop = eurochef_shared::robots_runtime::watchbot_component::RobotsWatchbotComponentStopInput {
+                owner_position_xyz: pose.position_xyz,
+                handler_target_xz: [pose.position_xyz[0], pose.position_xyz[2]],
+                current_anim_mode_uid: 0,
+            };
+            let recovery_contact = self
+                .runtime_watchbot_recovery_contact_state(
+                    map,
+                    glam::Vec3::from_array(pose.position_xyz),
+                    owner_rotation_euler4,
+                    controller_yaw,
+                    self.native_watchbot_mode3_runtime.velocity_xyzw_30,
+                    wall_time,
+                )
+                .unwrap_or(None);
+            if let Some(step) = self.advance_native_watchbot_mode3_pre_physics(
+                eurochef_shared::robots_runtime::watchbot_mode3::RobotsWatchbotMode3FixedInput {
+                    owner_position_xyz: pose.position_xyz,
+                    owner_rotation_euler4,
+                    controller_yaw_radians: controller_yaw,
+                    runtime_rate_scale: 1.0,
+                    stop,
+                    recovery_contact,
+                },
+            ) {
+                let _ = self.advance_native_watchbot_owner_physics_fixed(
+                    map,
+                    step.velocity_xyzw,
+                    step.owner_rotation_euler4,
+                );
+                if let Some(updated) = self.native_watchbot_owner_pose {
+                    let _ = self.finish_native_watchbot_mode3_physics(
+                        glam::Vec3::from_array(updated.position_xyz),
+                        controller_yaw,
+                    );
+                }
+            }
+        }
+
+        self.native_watchbot_host_input.watchbot_action_0c = false;
+        self.native_watchbot_host_input.watchbot_action_0d = false;
+        self.native_watchbot_host_input.watchbot_action_0e = false;
+        self.native_watchbot_host_input.watchbot_action_0f = false;
+    }
+
+    /// One cold reset for all AI/XItem-owned fixed-step state. Use the same
+    /// reset when a map changes or TriggerManager runtime is restarted.
+    pub(super) fn reset_native_ai_runtime_state(&mut self) {
+        // Physics/AI state must never outlive the owner body it was ticking.
+        self.runtime_character_bodies.clear();
+        self.native_npc_behavior.clear();
+        self.native_ai_fixed_last_time = None;
+        self.native_ai_fixed_accumulator = 0.0;
+        self.native_ai_engine_frame_counter = 0;
+        self.native_ai_explosion_fragment_phase_counter = 0;
+        self.native_eq04_mine_runtime.clear();
+        self.native_minebot_runtime.clear();
+        self.native_dogbot_runtime.clear();
+        self.native_turret_runtime.clear();
+        self.native_ep05_turret_runtime.clear();
+        self.native_ep06_turret_runtime.clear();
+        self.native_turretbot_runtime.clear();
+        self.native_standard_monster_runtime.clear();
+        self.native_base_monster_runtime.clear();
+        self.native_em07_piranha_runtime.clear();
+        self.native_test_anim_bot_runtime.clear();
+        self.native_dodgem_runtime.clear();
+        self.native_spintop_runtime.clear();
+        self.native_current_attacker = Default::default();
+        self.native_current_attacker_watchbot_gates.clear();
+        self.native_ai_permanent_sounds.clear();
+        self.native_ai_transient_sounds.clear();
+        self.native_script_xitem_spawns.clear();
+        self.native_transient_script_xitems.clear();
+        self.native_ai_event_throttle = Default::default();
+        self.native_monster_navigation.clear();
+        self.native_monster_physics.clear();
+        self.native_ai_fatal_runtime.clear();
+        self.native_ai_hit_reactions.clear();
+        self.native_ai_last_hit_source_yaw.clear();
+        self.native_ai_last_hit_source_position.clear();
+        self.native_ai_creator_runtime.clear();
+        self.native_ai_deferred_destroy.clear();
+        self.native_ai_projectiles.clear();
+        self.native_ai_explosion_spawns.clear();
+        self.native_ai_explosion_main_spawns.clear();
+        self.native_ai_explosions.clear();
+        self.native_ai_explosion_fragments.clear();
+        self.native_dynamic_pickup_spawns.clear();
+        self.native_dynamic_pickups.clear();
+        self.native_ai_projectile_terminal_events.clear();
+        self.native_ai_preview_live.clear();
+        self.native_ai_preview_map = None;
+        self.native_ai_preview_gameplay_rng =
+            RuntimeRobotsGlobalRngState::fresh_process_startup();
+        self.native_ai_preview_process_lcg_seed =
+            Some(eurochef_shared::robots_runtime::process_rng::ROBOTS_PROCESS_LCG_STARTUP_SEED);
+    }
+
     pub(super) fn advance_native_ai_simulation(&mut self, map: &ProcessedMap, wall_time: f64) {
-        self.native_ai_script_spawns.clear();
+        // Script-XItem spawn requests are class-independent and may have been
+        // produced earlier in this same GUI frame by TriggerManager/Pickup.
+        // Never clear that shared queue at the AI boundary.
         if !self.simulate_ai {
             self.native_ai_fixed_last_time = None;
             self.native_ai_fixed_accumulator = 0.0;
             return;
         }
 
-        if self.native_script_trigger_lifecycle_valid {
+        // Native TriggerManager controls real spawn/despawn. Do not activate
+        // every serialized character unless explicitly using editor diagnostics.
+        if self.native_script_trigger_lifecycle_valid || !self.preview_all_ai {
             self.native_ai_preview_live.clear();
             self.native_ai_preview_map = None;
         } else if self.native_ai_preview_map != Some(map.hashcode) {
@@ -1752,12 +2170,7 @@ impl MapFrame {
             self.native_ai_preview_map = Some(map.hashcode);
         }
 
-        let Some((player_position, player_yaw_radians)) = self.native_gameplay_player_pose(map)
-        else {
-            self.native_ai_fixed_last_time = None;
-            self.native_ai_fixed_accumulator = 0.0;
-            return;
-        };
+        let player_pose = self.native_gameplay_player_pose();
 
         // runtime_event_snapshots() has already updated TriggerManager/XItem
         // presence before this host runs. Recreate Handler hit state only across
@@ -1769,22 +2182,70 @@ impl MapFrame {
             .replace(wall_time)
             .map(|previous| (wall_time - previous).max(0.0))
             .unwrap_or_default();
-        let fixed_seconds = f64::from(ROBOTS_FIXED_STEP_SECONDS);
-        self.native_ai_fixed_accumulator += delta_seconds;
-        let steps = (self.native_ai_fixed_accumulator / fixed_seconds)
-            .floor()
-            .min(ROBOTS_AI_MAX_FIXED_STEPS_PER_FRAME as f64) as usize;
-        self.native_ai_fixed_accumulator -= steps as f64 * fixed_seconds;
+        let steps = budget_maps_fixed_steps(
+            &mut self.native_ai_fixed_accumulator,
+            delta_seconds,
+            f64::from(ROBOTS_FIXED_STEP_SECONDS),
+        );
         let nav_regions = monster_nav_regions(map);
 
         for _ in 0..steps {
+            self.advance_native_watchbot_control_fixed(
+                map,
+                player_pose.map(|(_, yaw)| yaw),
+                wall_time,
+            );
+
+            // Gameplay-created Script XItems registered during the previous
+            // native XItem tick enter service now. Requests emitted later in
+            // this tick are materialized at the tail and remain at frame 0.
+            self.advance_native_transient_script_xitems_fixed(map, wall_time);
+
+            // NPC owns a recovered AI behavior graph just like the Monster
+            // families below. Keep it on the AI fixed clock, not on the
+            // Platform/Camera runtime-path preview clock. Player-independent
+            // lanes (FollowPath / Flag2 / idle) continue without a Player pose;
+            // proximity itself remains fail-closed through the optional target.
+            self.advance_native_npc_behavior_fixed(
+                map,
+                player_pose.map(|(position, _)| position),
+            );
+
+            let Some((player_position, player_yaw_radians)) = player_pose else {
+                // A missing editor Player pose blocks target-dependent AI, not
+                // owner-local Monster idle, SpinTop patrol/bounce or fatal state.
+                // Keep this branch separate so a valid Player retains the exact
+                // existing class update/RNG order below.
+                self.native_monster_attack_cooldown
+                    .advance(ROBOTS_FIXED_STEP_SECONDS);
+                self.advance_native_ai_projectiles_fixed(map);
+                // Fragment ballistics, world collisions and AI hit queries are
+                // owner-local; only pickup attraction/collection needs Player.
+                self.advance_native_ai_explosion_fragments_fixed(map, None);
+                self.advance_native_ai_explosions_fixed(map);
+                self.advance_native_common_fatal_ai_fixed(map);
+                self.advance_native_base_monsters_fixed(map, &nav_regions);
+                self.advance_native_targetless_ef01_fixed(map, &nav_regions);
+                self.advance_native_spintop_fixed(map, &nav_regions);
+                self.native_ai_event_throttle.advance_fixed();
+                self.consume_native_ai_projectile_terminal_events();
+                self.consume_native_ai_explosion_spawns(map);
+                self.consume_native_dynamic_pickup_spawns();
+                self.consume_native_script_xitem_spawns();
+                self.flush_native_ai_explosion_fragment_destroy_fixed();
+                self.flush_native_ai_deferred_destroy_fixed(map.hashcode);
+                self.native_ai_engine_frame_counter =
+                    self.native_ai_engine_frame_counter.wrapping_add(1);
+                continue;
+            };
+
             if self.native_player_hit_runtime.advance_fixed(1.0) {
                 self.native_runtime_player_last_hit_query_serial = 0;
             }
             self.native_monster_attack_cooldown
                 .advance(ROBOTS_FIXED_STEP_SECONDS);
             self.advance_native_ai_projectiles_fixed(map);
-            self.advance_native_ai_explosion_fragments_fixed(map, player_position);
+            self.advance_native_ai_explosion_fragments_fixed(map, Some(player_position));
             self.advance_native_ai_explosions_fixed(map);
             self.advance_native_current_attacker_fixed(map, &nav_regions, player_position);
             self.advance_native_common_fatal_ai_fixed(map);
@@ -1795,12 +2256,7 @@ impl MapFrame {
             self.advance_native_turretbot_fixed(map, player_position, wall_time);
             self.advance_native_base_monsters_fixed(map, &nav_regions);
             self.advance_native_em07_piranha_fixed(map, player_position, wall_time);
-            self.advance_native_test_anim_bot_fixed(
-                map,
-                &nav_regions,
-                player_position,
-                wall_time,
-            );
+            self.advance_native_test_anim_bot_fixed(map, &nav_regions, player_position, wall_time);
             self.advance_native_standard_monsters_fixed(
                 map,
                 &nav_regions,
@@ -1827,9 +2283,18 @@ impl MapFrame {
                 player_position,
                 player_yaw_radians,
             );
+            // Projectile +0xD8 terminal generation runs from the projectile lane above.
+            // Materialize its Explosion/Script requests only at the tail so priority-0x14
+            // children cannot retroactively update in an already-passed manager lane.
+            self.consume_native_ai_projectile_terminal_events();
             // Native MonsterExplosion order is factory/init before the producer's
             // deferred destroy is physically unlinked at end of tick.
             self.consume_native_ai_explosion_spawns(map);
+            // GeneratePickupFromHash creates the owner immediately, but a child
+            // registered from this already-running XItem slice starts Handler
+            // service only on the following fixed tick.
+            self.consume_native_dynamic_pickup_spawns();
+            self.consume_native_script_xitem_spawns();
             self.flush_native_ai_explosion_fragment_destroy_fixed();
             self.flush_native_ai_deferred_destroy_fixed(map.hashcode);
             self.native_ai_engine_frame_counter =
@@ -1850,21 +2315,39 @@ impl MapFrame {
             } else if let Some(lifecycle) = self.native_ai_trigger_lifecycle.get_mut(&key) {
                 lifecycle.cleanup_zone_failed();
             }
-            self.native_ai_preview_live.remove(&key);
-            self.native_ai_hit_reactions.remove(&key);
-            self.native_ai_last_hit_source_yaw.remove(&key);
-            self.native_ai_fatal_runtime.remove(&key);
-            self.native_eq04_mine_runtime.remove(&key);
-            self.native_minebot_runtime.remove(&key);
-            self.native_dogbot_runtime.remove(&key);
-            self.native_test_anim_bot_runtime.remove(&key);
-            self.native_standard_monster_runtime.remove(&key);
-            self.native_rollerbot_runtime.remove(&key);
-            self.native_monster_navigation.remove(&key);
-            self.native_monster_physics.remove(&key);
-            if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
-                body.clear_collision_animation_track();
-            }
+            self.clear_native_ai_xitem_owner_runtime(key);
+        }
+    }
+
+    /// Clear a *particular* XItem owner's mutable Handler/Physics state. A
+    /// zone unload followed by a new CreateItem must start from a fresh brain;
+    /// the immutable decoded character data remains shared in the body cache.
+    pub(super) fn clear_native_ai_xitem_owner_runtime(&mut self, key: u64) {
+        self.native_ai_preview_live.remove(&key);
+        self.native_npc_behavior.remove(&key);
+        self.native_ai_hit_reactions.remove(&key);
+        self.native_ai_last_hit_source_yaw.remove(&key);
+        self.native_ai_last_hit_source_position.remove(&key);
+        self.native_ai_fatal_runtime.remove(&key);
+        self.native_eq04_mine_runtime.remove(&key);
+        self.native_minebot_runtime.remove(&key);
+        self.native_dogbot_runtime.remove(&key);
+        self.native_turret_runtime.remove(&key);
+        self.native_ep05_turret_runtime.remove(&key);
+        self.native_ep06_turret_runtime.remove(&key);
+        self.native_turretbot_runtime.remove(&key);
+        self.native_standard_monster_runtime.remove(&key);
+        self.native_base_monster_runtime.remove(&key);
+        self.native_em07_piranha_runtime.remove(&key);
+        self.native_test_anim_bot_runtime.remove(&key);
+        self.native_dodgem_runtime.remove(&key);
+        self.native_spintop_runtime.remove(&key);
+        self.native_rollerbot_runtime.remove(&key);
+        self.native_current_attacker_watchbot_gates.remove(&key);
+        self.native_monster_navigation.remove(&key);
+        self.native_monster_physics.remove(&key);
+        if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
+            body.clear_collision_animation_track();
         }
     }
 
@@ -4358,6 +4841,472 @@ impl MapFrame {
         }
     }
 
+    /// Shared native MagneticHit physics/AnimMode host, independent of Player pose.
+    /// A false result means no live hit record, matching the original loop skip.
+    fn advance_native_standard_magnetic_hit_fixed(
+        &mut self, map_hash: u32, key: u64, visual: &ProcessedCharacterVisual,
+        owner_position: Vec3,
+    ) -> bool {
+        let attachment_relation_matches =
+            self.native_player_magnetic_target_key == Some(key);
+        let owner_y = self
+            .runtime_character_bodies
+            .get(&key)
+            .map(|body| body.owner_position.y)
+            .unwrap_or(owner_position.y);
+        let plan = {
+            let runtimes = &mut self.native_standard_monster_runtime;
+            let hits = &mut self.native_ai_hit_reactions;
+            let runtime = runtimes.get_mut(&key).unwrap();
+            let Some(hit) = hits.get_mut(&key) else {
+                return false;
+            };
+            runtime.magnetic_hit.step(
+                &mut hit.got_hit_latch,
+                owner_y,
+                attachment_relation_matches,
+                ROBOTS_FIXED_STEP_SECONDS,
+            )
+        };
+
+        if let Some(value) = plan.set_handler_606 {
+            self.native_monster_physics
+                .entry(key)
+                .or_insert_with(
+                    RobotsCharacterPhysicsRuntimeState::monster_ctor_default,
+                )
+                .apply_handler_606_mode(value);
+        }
+
+        let mut magnetic_vertical_velocity_delta = None;
+        let effect_plan = if plan.service_magnetic_effect {
+            let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
+            let drop_charge_count = runtime
+                .magnetic_drop_charge_count
+                .unwrap_or_else(|| visual.pickup_drop_count.unwrap_or(0));
+            let effect_plan = runtime.magnetic_hit.step_attached_effect(
+                RobotsMalfBotMagneticEffectInput {
+                    owner_y,
+                    magnetic_mass: visual.magnetic_mass,
+                    drop_charge_count,
+                },
+            );
+            if effect_plan.serviced {
+                runtime.magnetic_drop_charge_count =
+                    Some(effect_plan.next_drop_charge_count);
+                magnetic_vertical_velocity_delta =
+                    Some(effect_plan.physics_vertical_velocity_delta);
+            }
+            Some(effect_plan)
+        } else {
+            None
+        };
+        if let Some(delta_y) = magnetic_vertical_velocity_delta {
+            self.native_monster_physics
+                .entry(key)
+                .or_insert_with(
+                    RobotsCharacterPhysicsRuntimeState::monster_ctor_default,
+                )
+                .add_vertical_velocity_delta(delta_y);
+        }
+
+        if let Some(requested_anim_mode) = plan.requested_anim_mode {
+            let events = {
+                let runtime =
+                    self.native_standard_monster_runtime.get_mut(&key).unwrap();
+                if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
+                    runtime.advance_animation(
+                        body,
+                        requested_anim_mode,
+                        None,
+                        ROBOTS_FIXED_STEP_SECONDS,
+                        NativeAiRootMotionPolicy::FULL,
+                    )
+                } else {
+                    Vec::new()
+                }
+            };
+            if events
+                .iter()
+                .any(|event| event.event_type == event_type::SETUP_IDLE)
+            {
+                self.native_standard_monster_runtime
+                    .get_mut(&key)
+                    .unwrap()
+                    .animation
+                    .setup_idle();
+            }
+        }
+        if effect_plan.is_some_and(|effect| effect.serviced) {
+            let physics = self.native_monster_physics.get(&key).copied();
+            if let (Some(physics), Some(body)) =
+                (physics, self.runtime_character_bodies.get_mut(&key))
+            {
+                if physics.object_flag_bit0 {
+                    let mut position = body.owner_position.to_array();
+                    physics
+                        .integrate_position(&mut position, ROBOTS_FIXED_STEP_SECONDS);
+                    body.owner_position = Vec3::from_array(position);
+                }
+            }
+        }
+        if plan.request_natural_death {
+            let death_position = self
+                .runtime_character_bodies
+                .get(&key)
+                .map(|body| body.owner_position)
+                .unwrap_or(owner_position);
+            self.request_native_ai_natural_death(map_hash, key, death_position);
+        }
+        true
+    }
+
+    /// Same status-hit animation/death host for targetful and targetless AI.
+    fn advance_native_standard_electro_hit_fixed(
+        &mut self,
+        map_hash: u32,
+        key: u64,
+        owner_position: Vec3,
+    ) {
+        let requested_anim_mode = self
+            .native_standard_monster_runtime
+            .get(&key)
+            .unwrap()
+            .electro_hit
+            .requested_anim_mode();
+        let events = {
+            let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
+            if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
+                runtime.advance_animation(
+                    body,
+                    requested_anim_mode,
+                    None,
+                    ROBOTS_FIXED_STEP_SECONDS,
+                    NativeAiRootMotionPolicy::FULL,
+                )
+            } else {
+                Vec::new()
+            }
+        };
+        if events.iter().any(|event| event.event_type == event_type::SETUP_IDLE) {
+            let plan = {
+                let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
+                let plan = runtime.electro_hit.setup_idle();
+                runtime.animation.setup_idle();
+                plan
+            };
+            if plan.request_natural_death {
+                let death_position = self
+                    .runtime_character_bodies
+                    .get(&key)
+                    .map(|body| body.owner_position)
+                    .unwrap_or(owner_position);
+                self.request_native_ai_natural_death(map_hash, key, death_position);
+            }
+        }
+    }
+
+    /// Owner-local Patrol is shared by targetful StandardMonster and EF01
+    /// Maps simulation with no Player. Physics and AnimMode remain one host.
+    fn advance_native_standard_patrol_fixed(
+        &mut self,
+        key: u64,
+        config: RobotsStandardMonsterBehaviorConfig,
+        effective_handler_flags: u32,
+        owner_yaw_radians: f32,
+    ) {
+        let locomotion = {
+            let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
+            let patrol = step_ai_patrol(&mut runtime.patrol, config.patrol);
+            let move_mode_active_on_entry =
+                runtime.animation.is_mode(ROBOTS_ANIM_MODE_MOVE);
+            runtime.step_standard_locomotion(RobotsAiLocomotionInput {
+                steering_target_yaw_radians: patrol.steering_target_yaw_radians,
+                target_locomotion_scalar: patrol.target_locomotion_scalar,
+                turn_rate: patrol.turn_rate,
+                handler_flags_628: effective_handler_flags,
+                move_mode_active_on_entry,
+                current_owner_yaw_radians: owner_yaw_radians,
+                runtime_rate_scale: 1.0,
+            })
+        };
+        if let Some(locomotion) = locomotion {
+            commit_native_standard_physics_locomotion(
+                &mut self.native_monster_physics,
+                key,
+                config.handler_class,
+                locomotion,
+            );
+            let owner_yaw_write = locomotion
+                .direct_owner_yaw_write
+                .then_some(locomotion.owner_yaw_radians);
+            let policy = locomotion_root_motion_policy(locomotion);
+            let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
+            if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
+                let _ = runtime.advance_animation(
+                    body,
+                    locomotion.requested_anim_mode,
+                    owner_yaw_write,
+                    ROBOTS_FIXED_STEP_SECONDS,
+                    policy,
+                );
+            }
+        }
+    }
+
+    /// Shared EF01 FollowFlyingPath host. Both the targetful selector and the
+    /// targetless owner-local lane commit the exact same spline/animation tick.
+    fn advance_native_ef01_flying_path_fixed(&mut self, key: u64, owner_yaw_radians: f32) {
+        let path_step = self
+            .native_standard_monster_runtime
+            .get_mut(&key)
+            .and_then(|runtime| {
+                runtime.follow_flying_path.advance_fixed(
+                    RobotsFollowFlyingPathConfig::ef01(),
+                    owner_yaw_radians,
+                    1.0,
+                )
+            });
+        if let Some(path_step) = path_step {
+            let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
+            if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
+                if let Some(position_xyz) = path_step.owner_position_xyz {
+                    body.owner_position = Vec3::from_array(position_xyz);
+                }
+                body.owner_rotation = Quat::from_rotation_y(path_step.owner_yaw_radians);
+                let _ = runtime.advance_animation(
+                    body,
+                    ROBOTS_ANIM_MODE_MOVE,
+                    Some(path_step.owner_yaw_radians),
+                    ROBOTS_FIXED_STEP_SECONDS,
+                    NativeAiRootMotionPolicy::NONE,
+                );
+            }
+        }
+    }
+
+    /// Owner-local EF01 flying-path lane for Maps without a resolved Player.
+    /// Keep it narrow: target-dependent attacks and pursue remain in the full
+    /// StandardMonster host; both routes share the same spline/animation commit.
+    fn advance_native_targetless_ef01_fixed(
+        &mut self,
+        map: &ProcessedMap,
+        nav_regions: &[RobotsMonsterNavMeshView<'_>],
+    ) {
+        let config = RobotsStandardMonsterBehaviorConfig::ef01_mine();
+        for (trigger_index, trigger) in map.triggers.iter().enumerate() {
+            let Some(visual) = trigger.character_visual.as_ref() else {
+                continue;
+            };
+            if visual.handler_class != RobotsAiHandlerClass::Ef01Mine {
+                continue;
+            }
+            let key = Self::runtime_character_body_key(map.hashcode, trigger_index);
+            if !self.runtime_ai_character_xitem_live(map.hashcode, trigger_index) {
+                self.native_standard_monster_runtime.remove(&key);
+                self.native_monster_navigation.remove(&key);
+                self.native_monster_physics.remove(&key);
+                continue;
+            }
+            if !self.runtime_character_bodies.contains_key(&key) {
+                self.native_standard_monster_runtime.remove(&key);
+                continue;
+            }
+            let route = ef01_mine_first_update_route(trigger.data.get(2).copied().flatten());
+            let RobotsEf01MineFirstUpdateRoute::FollowFlyingPath { path_uid } = route else {
+                continue;
+            };
+            let Some(path) = map.paths.iter().find(|path| path.hashcode == path_uid) else {
+                continue;
+            };
+
+            if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
+                advance_native_retained_horizontal_physics(
+                    self.native_monster_physics.get(&key),
+                    body,
+                );
+            }
+            if !self.native_standard_monster_runtime.contains_key(&key) {
+                // The native first update constrains Monster Physics before
+                // EF01 latches FollowFlyingPath and disables later nav refresh.
+                let allow_cross_group = trigger.data.get(7).and_then(|v| *v)
+                    .is_some_and(|flags| flags & 0x8000 != 0);
+                if self.apply_native_common_monster_nav_constraint(
+                    key, nav_regions, allow_cross_group, visual.handler_flags_628,
+                ).is_none() {
+                    continue;
+                }
+                let points = path.nodes.iter()
+                    .map(|node| (path.position + node.position).to_array())
+                    .collect::<Vec<_>>();
+                let mut runtime = NativeStandardMonsterRuntime::new(config);
+                if !runtime.follow_flying_path.bind_path(&points, path.path_type == 1) {
+                    continue;
+                }
+                if let Some(sound) = config.first_update_permanent_sound() {
+                    register_native_ai_permanent_sound(&mut self.native_ai_permanent_sounds, key, sound);
+                }
+                let periodic_draw = self.next_native_ai_gameplay_rng_u32();
+                if let Some(draw) = periodic_draw {
+                    initialize_periodic_idle(
+                        &mut runtime.periodic_idle, config.periodic_idle_base_delay_ticks, draw,
+                    );
+                }
+                let physics = self.native_monster_physics.entry(key)
+                    .or_insert_with(RobotsCharacterPhysicsRuntimeState::monster_ctor_default);
+                apply_native_ef01_first_update_effects(&mut runtime, physics, route);
+                self.native_standard_monster_runtime.insert(key, runtime);
+            } else {
+                self.native_monster_navigation.remove(&key);
+                if let Some(physics) = self.native_monster_physics.get_mut(&key) {
+                    physics.service_ef01_flying_path_bit2(true);
+                }
+            }
+            if self.native_ai_normal_fatal_condition(key) {
+                continue;
+            }
+            if let Some(runtime) = self.native_standard_monster_runtime.get_mut(&key) {
+                advance_character_attachments_fixed_tick(&mut runtime.character_attachments);
+            }
+
+            // Retain native EF01 node priority: a hit/periodic/patrol winner
+            // must not be overwritten by an unconditional path animation.
+            let hit = self.native_ai_hit_reactions.get(&key).copied();
+            let (got_hit, flags) = hit
+                .map(|state| (state.got_hit_latch, state.query_flags_snapshot))
+                .unwrap_or((false, 0));
+            let top_game_state = self.native_cutscene_host_runtime.game_state_stack.last().copied();
+            let runtime = self.native_standard_monster_runtime.get(&key).unwrap();
+            let winner = ef01_mine_behavior_winner(
+                ai_patrol_priority(top_game_state),
+                periodic_idle_priority(&runtime.periodic_idle),
+                runtime.electro_hit.priority(got_hit, flags),
+                runtime.magnetic_hit.priority(got_hit, flags),
+                1,
+                follow_flying_path_priority(RobotsFollowFlyingPathConfig::ef01()),
+                1,
+            );
+            let previous = runtime.active_node;
+            if previous != winner {
+                match previous {
+                    Some(RobotsStandardMonsterBehaviorWinner::PeriodicIdle) => {
+                        leave_periodic_idle(
+                            &mut self.native_standard_monster_runtime.get_mut(&key).unwrap().periodic_idle,
+                        );
+                    }
+                    Some(RobotsStandardMonsterBehaviorWinner::ElectroHit) => {
+                        self.native_standard_monster_runtime.get_mut(&key).unwrap().electro_hit.leave();
+                        if let Some(hit) = self.native_ai_hit_reactions.get_mut(&key) {
+                            hit.query_serial_snapshot = 0;
+                            hit.last_query_serial = 0;
+                        }
+                    }
+                    Some(RobotsStandardMonsterBehaviorWinner::MagneticHit) => {
+                        self.native_standard_monster_runtime.get_mut(&key).unwrap().magnetic_hit.leave();
+                        if let Some(hit) = self.native_ai_hit_reactions.get_mut(&key) {
+                            hit.query_serial_snapshot = 0;
+                            hit.last_query_serial = 0;
+                        }
+                    }
+                    _ => {}
+                }
+                let entered = if winner == Some(RobotsStandardMonsterBehaviorWinner::ElectroHit) {
+                    self.native_standard_monster_runtime.get_mut(&key).unwrap().electro_hit.enter();
+                    true
+                } else if winner == Some(RobotsStandardMonsterBehaviorWinner::MagneticHit) {
+                    let owner_y = self.runtime_character_bodies.get(&key)
+                        .map(|body| body.owner_position.y).unwrap_or_default();
+                    let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
+                    runtime.magnetic_hit.enter(owner_y);
+                    if runtime.magnetic_drop_charge_count.is_none() {
+                        runtime.magnetic_drop_charge_count = Some(visual.pickup_drop_count.unwrap_or(0));
+                    }
+                    true
+                } else if winner == Some(RobotsStandardMonsterBehaviorWinner::PeriodicIdle) {
+                    let select_draw = self.next_native_ai_gameplay_rng_u32();
+                    let delay_draw = select_draw.and_then(|_| self.next_native_ai_gameplay_rng_u32());
+                    match (select_draw, delay_draw) {
+                        (Some(select_draw), Some(delay_draw)) => enter_periodic_idle(
+                            &mut self.native_standard_monster_runtime.get_mut(&key).unwrap().periodic_idle,
+                            config.periodic_idle_base_delay_ticks,
+                            &config.periodic_idle_anim_modes,
+                            select_draw,
+                            delay_draw,
+                        ).is_some(),
+                        _ => false,
+                    }
+                } else {
+                    true
+                };
+                self.native_standard_monster_runtime.get_mut(&key).unwrap().active_node =
+                    entered.then_some(winner).flatten();
+            }
+
+            match self.native_standard_monster_runtime.get(&key).unwrap().active_node {
+                Some(RobotsStandardMonsterBehaviorWinner::FollowFlyingPath) => {
+                    let yaw = self.runtime_character_bodies.get(&key)
+                        .map(|body| horizontal_yaw(body.owner_rotation))
+                        .unwrap_or_default();
+                    self.advance_native_ef01_flying_path_fixed(key, yaw);
+                }
+                Some(RobotsStandardMonsterBehaviorWinner::Patrol) => {
+                    let yaw = self.runtime_character_bodies.get(&key)
+                        .map(|body| horizontal_yaw(body.owner_rotation))
+                        .unwrap_or_default();
+                    self.advance_native_standard_patrol_fixed(
+                        key, config, visual.handler_flags_628, yaw,
+                    );
+                }
+                Some(RobotsStandardMonsterBehaviorWinner::ElectroHit) => {
+                    let owner_position = self.runtime_character_bodies.get(&key)
+                        .map(|body| body.owner_position)
+                        .unwrap_or_default();
+                    self.advance_native_standard_electro_hit_fixed(
+                        map.hashcode, key, owner_position,
+                    );
+                }
+                Some(RobotsStandardMonsterBehaviorWinner::MagneticHit) => {
+                    let owner_position = self.runtime_character_bodies.get(&key)
+                        .map(|body| body.owner_position)
+                        .unwrap_or_default();
+                    if !self.advance_native_standard_magnetic_hit_fixed(
+                        map.hashcode, key, visual, owner_position,
+                    ) {
+                        continue;
+                    }
+                }
+                Some(RobotsStandardMonsterBehaviorWinner::PeriodicIdle) => {
+                    let requested = self.native_standard_monster_runtime.get(&key)
+                        .and_then(|runtime| runtime.periodic_idle.selected_anim_mode);
+                    if let Some(requested) = requested {
+                        let events = {
+                            let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
+                            if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
+                                runtime.advance_animation(
+                                    body, requested, None, ROBOTS_FIXED_STEP_SECONDS,
+                                    NativeAiRootMotionPolicy::NONE,
+                                )
+                            } else {
+                                Vec::new()
+                            }
+                        };
+                        if events.iter().any(|event| event.event_type == event_type::SETUP_IDLE) {
+                            let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
+                            complete_periodic_idle_setup_idle(&mut runtime.periodic_idle);
+                            runtime.animation.setup_idle();
+                        }
+                    }
+                }
+                // Status hits and patrol/nav require their own recovered node
+                // transitions; never replace them with an invented path winner.
+                _ => {}
+            }
+            let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
+            service_native_blades_post_common_update(runtime);
+            tick_periodic_idle(&mut runtime.periodic_idle);
+        }
+    }
+
     pub(super) fn advance_native_standard_monsters_fixed(
         &mut self,
         map: &ProcessedMap,
@@ -4676,6 +5625,13 @@ impl MapFrame {
                     .native_standard_monster_runtime
                     .entry(key)
                     .or_insert_with(|| NativeStandardMonsterRuntime::new(config));
+                advance_character_attachments_fixed_tick(&mut runtime.character_attachments);
+                if matches!(
+                    config.handler_class,
+                    RobotsAiHandlerClass::Ew09Armoured | RobotsAiHandlerClass::Eb13KnightBot
+                ) {
+                    runtime.attached_animator_seconds += ROBOTS_FIXED_STEP_SECONDS;
+                }
                 if config.handler_class == RobotsAiHandlerClass::Eb11MagnaBot {
                     runtime.magnabot_turn.begin_update();
                 }
@@ -4974,11 +5930,10 @@ impl MapFrame {
                             // Native 0x00455DA0 returns true when either the
                             // handler-local 0x100000 claim bit is set or the
                             // process-global current-attacker owner is this handler.
-                            attack_claim_suppresses_stalk:
-                                robots_current_attacker_claim_active(
-                                    effective_handler_flags,
-                                    self.native_current_attacker.current_owner_key == Some(key),
-                                ) && class_attack_allowed,
+                            attack_claim_suppresses_stalk: robots_current_attacker_claim_active(
+                                effective_handler_flags,
+                                self.native_current_attacker.current_owner_key == Some(key),
+                            ) && class_attack_allowed,
                         },
                     )
                 });
@@ -5590,72 +6545,12 @@ impl MapFrame {
 
             match active_node {
                 Some(RobotsStandardMonsterBehaviorWinner::FollowFlyingPath) => {
-                    let path_step =
-                        self.native_standard_monster_runtime
-                            .get_mut(&key)
-                            .and_then(|runtime| {
-                                runtime.follow_flying_path.advance_fixed(
-                                    RobotsFollowFlyingPathConfig::ef01(),
-                                    owner_yaw_radians,
-                                    1.0,
-                                )
-                            });
-                    if let Some(path_step) = path_step {
-                        let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
-                        if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
-                            if let Some(position_xyz) = path_step.owner_position_xyz {
-                                body.owner_position = Vec3::from_array(position_xyz);
-                            }
-                            body.owner_rotation =
-                                Quat::from_rotation_y(path_step.owner_yaw_radians);
-                            let _ = runtime.advance_animation(
-                                body,
-                                ROBOTS_ANIM_MODE_MOVE,
-                                Some(path_step.owner_yaw_radians),
-                                ROBOTS_FIXED_STEP_SECONDS,
-                                NativeAiRootMotionPolicy::NONE,
-                            );
-                        }
-                    }
+                    self.advance_native_ef01_flying_path_fixed(key, owner_yaw_radians);
                 }
                 Some(RobotsStandardMonsterBehaviorWinner::Patrol) => {
-                    let locomotion = {
-                        let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
-                        let patrol = step_ai_patrol(&mut runtime.patrol, config.patrol);
-                        let move_mode_active_on_entry =
-                            runtime.animation.is_mode(ROBOTS_ANIM_MODE_MOVE);
-                        runtime.step_standard_locomotion(RobotsAiLocomotionInput {
-                            steering_target_yaw_radians: patrol.steering_target_yaw_radians,
-                            target_locomotion_scalar: patrol.target_locomotion_scalar,
-                            turn_rate: patrol.turn_rate,
-                            handler_flags_628: effective_handler_flags,
-                            move_mode_active_on_entry,
-                            current_owner_yaw_radians: owner_yaw_radians,
-                            runtime_rate_scale: 1.0,
-                        })
-                    };
-                    if let Some(locomotion) = locomotion {
-                        commit_native_standard_physics_locomotion(
-                            &mut self.native_monster_physics,
-                            key,
-                            config.handler_class,
-                            locomotion,
-                        );
-                        let owner_yaw_write = locomotion
-                            .direct_owner_yaw_write
-                            .then_some(locomotion.owner_yaw_radians);
-                        let policy = locomotion_root_motion_policy(locomotion);
-                        let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
-                        if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
-                            let _ = runtime.advance_animation(
-                                body,
-                                locomotion.requested_anim_mode,
-                                owner_yaw_write,
-                                ROBOTS_FIXED_STEP_SECONDS,
-                                policy,
-                            );
-                        }
-                    }
+                    self.advance_native_standard_patrol_fixed(
+                        key, config, effective_handler_flags, owner_yaw_radians,
+                    );
                 }
                 Some(RobotsStandardMonsterBehaviorWinner::CircleTarget) => {
                     let circle_step = config.circle_target().and_then(|circle| {
@@ -6514,158 +7409,13 @@ impl MapFrame {
                     }
                 }
                 Some(RobotsStandardMonsterBehaviorWinner::ElectroHit) => {
-                    let requested_anim_mode = self
-                        .native_standard_monster_runtime
-                        .get(&key)
-                        .unwrap()
-                        .electro_hit
-                        .requested_anim_mode();
-                    let events = {
-                        let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
-                        if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
-                            runtime.advance_animation(
-                                body,
-                                requested_anim_mode,
-                                None,
-                                ROBOTS_FIXED_STEP_SECONDS,
-                                NativeAiRootMotionPolicy::FULL,
-                            )
-                        } else {
-                            Vec::new()
-                        }
-                    };
-                    if events
-                        .iter()
-                        .any(|event| event.event_type == event_type::SETUP_IDLE)
-                    {
-                        let plan = {
-                            let runtime =
-                                self.native_standard_monster_runtime.get_mut(&key).unwrap();
-                            let plan = runtime.electro_hit.setup_idle();
-                            runtime.animation.setup_idle();
-                            plan
-                        };
-                        if plan.request_natural_death {
-                            let death_position = self
-                                .runtime_character_bodies
-                                .get(&key)
-                                .map(|body| body.owner_position)
-                                .unwrap_or(owner_position);
-                            self.request_native_ai_natural_death(map.hashcode, key, death_position);
-                        }
-                    }
+                    self.advance_native_standard_electro_hit_fixed(map.hashcode, key, owner_position);
                 }
                 Some(RobotsStandardMonsterBehaviorWinner::MagneticHit) => {
-                    let attachment_relation_matches =
-                        self.native_player_magnetic_target_key == Some(key);
-                    let owner_y = self
-                        .runtime_character_bodies
-                        .get(&key)
-                        .map(|body| body.owner_position.y)
-                        .unwrap_or(owner_position.y);
-                    let plan = {
-                        let runtimes = &mut self.native_standard_monster_runtime;
-                        let hits = &mut self.native_ai_hit_reactions;
-                        let runtime = runtimes.get_mut(&key).unwrap();
-                        let Some(hit) = hits.get_mut(&key) else {
-                            continue;
-                        };
-                        runtime.magnetic_hit.step(
-                            &mut hit.got_hit_latch,
-                            owner_y,
-                            attachment_relation_matches,
-                            ROBOTS_FIXED_STEP_SECONDS,
-                        )
-                    };
-
-                    if let Some(value) = plan.set_handler_606 {
-                        self.native_monster_physics
-                            .entry(key)
-                            .or_insert_with(
-                                RobotsCharacterPhysicsRuntimeState::monster_ctor_default,
-                            )
-                            .apply_handler_606_mode(value);
-                    }
-
-                    let mut magnetic_vertical_velocity_delta = None;
-                    let effect_plan = if plan.service_magnetic_effect {
-                        let runtime = self.native_standard_monster_runtime.get_mut(&key).unwrap();
-                        let drop_charge_count = runtime
-                            .magnetic_drop_charge_count
-                            .unwrap_or_else(|| visual.pickup_drop_count.unwrap_or(0));
-                        let effect_plan = runtime.magnetic_hit.step_attached_effect(
-                            RobotsMalfBotMagneticEffectInput {
-                                owner_y,
-                                magnetic_mass: visual.magnetic_mass,
-                                drop_charge_count,
-                            },
-                        );
-                        if effect_plan.serviced {
-                            runtime.magnetic_drop_charge_count =
-                                Some(effect_plan.next_drop_charge_count);
-                            magnetic_vertical_velocity_delta =
-                                Some(effect_plan.physics_vertical_velocity_delta);
-                        }
-                        Some(effect_plan)
-                    } else {
-                        None
-                    };
-                    if let Some(delta_y) = magnetic_vertical_velocity_delta {
-                        self.native_monster_physics
-                            .entry(key)
-                            .or_insert_with(
-                                RobotsCharacterPhysicsRuntimeState::monster_ctor_default,
-                            )
-                            .add_vertical_velocity_delta(delta_y);
-                    }
-
-                    if let Some(requested_anim_mode) = plan.requested_anim_mode {
-                        let events = {
-                            let runtime =
-                                self.native_standard_monster_runtime.get_mut(&key).unwrap();
-                            if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
-                                runtime.advance_animation(
-                                    body,
-                                    requested_anim_mode,
-                                    None,
-                                    ROBOTS_FIXED_STEP_SECONDS,
-                                    NativeAiRootMotionPolicy::FULL,
-                                )
-                            } else {
-                                Vec::new()
-                            }
-                        };
-                        if events
-                            .iter()
-                            .any(|event| event.event_type == event_type::SETUP_IDLE)
-                        {
-                            self.native_standard_monster_runtime
-                                .get_mut(&key)
-                                .unwrap()
-                                .animation
-                                .setup_idle();
-                        }
-                    }
-                    if effect_plan.is_some_and(|effect| effect.serviced) {
-                        let physics = self.native_monster_physics.get(&key).copied();
-                        if let (Some(physics), Some(body)) =
-                            (physics, self.runtime_character_bodies.get_mut(&key))
-                        {
-                            if physics.object_flag_bit0 {
-                                let mut position = body.owner_position.to_array();
-                                physics
-                                    .integrate_position(&mut position, ROBOTS_FIXED_STEP_SECONDS);
-                                body.owner_position = Vec3::from_array(position);
-                            }
-                        }
-                    }
-                    if plan.request_natural_death {
-                        let death_position = self
-                            .runtime_character_bodies
-                            .get(&key)
-                            .map(|body| body.owner_position)
-                            .unwrap_or(owner_position);
-                        self.request_native_ai_natural_death(map.hashcode, key, death_position);
+                    if !self.advance_native_standard_magnetic_hit_fixed(
+                        map.hashcode, key, visual, owner_position,
+                    ) {
+                        continue;
                     }
                 }
                 Some(RobotsStandardMonsterBehaviorWinner::DirectTurnThenAttack) => {
@@ -9220,9 +9970,12 @@ impl MapFrame {
 mod tests {
     use super::*;
     use crate::map_runtime::RuntimeScriptTriggerLifecycleState;
+    use eurochef_edb::{edb::EdbFile, versions::Platform};
     use eurochef_shared::robots_runtime::{
         hit_reaction::RobotsAcceptedHitReactionInput, hit_shapes::RobotsHitShape,
     };
+    use nohash_hasher::IntMap;
+    use std::{fs::File, io::BufReader, path::Path};
 
     #[test]
     fn current_shipped_ai_handler_classes_have_exactly_one_production_host_family() {
@@ -9336,6 +10089,111 @@ mod tests {
         assert_eq!(base_count, 1);
         assert_eq!(specialized_count, 13);
         assert_eq!(external_count, 2);
+    }
+
+    #[test]
+    fn real_m02_city_character_corpus_spans_major_production_host_families_when_requested() {
+        let Ok(city_path) = std::env::var("EUROCHEF_REAL_M02_CITY_EDB") else {
+            return;
+        };
+        let city_path = Path::new(&city_path);
+        let root = city_path.parent().expect("m02_city fixture has no parent");
+
+        let mut path_cache = IntMap::default();
+        for entry in std::fs::read_dir(root).expect("could not scan Robots EDB folder") {
+            let path = entry.expect("bad EDB directory entry").path();
+            if path.extension().and_then(|value| value.to_str()) != Some("edb") {
+                continue;
+            }
+            let file = File::open(&path).expect("could not open indexed EDB");
+            let edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+                .expect("indexed EDB header did not parse");
+            path_cache.insert(edb.header.hashcode, path.to_string_lossy().into_owned());
+        }
+        let file = File::open(city_path).expect("could not open m02_city.edb");
+        let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+            .expect("m02_city.edb did not parse");
+        let mut maps = crate::maps::read_from_file(&mut edb);
+        let resolved = crate::maps::resolve_robots_character_visuals(
+            &mut edb,
+            &mut maps,
+            &path_cache,
+            Platform::Pc,
+        )
+        .expect("m02_city character visuals did not resolve");
+        assert_eq!(resolved, 77);
+
+        let mut base_monster = 0usize;
+        let mut standard_monster = 0usize;
+        let mut dedicated_ai = 0usize;
+        let mut npc_behavior = 0usize;
+        let mut classified = 0usize;
+        let mut has_dogbot = false;
+        let mut has_turretbot = false;
+        let mut has_spintop = false;
+        let mut has_jailbot_normal = false;
+        let mut has_npc = false;
+        for visual in maps
+            .iter()
+            .flat_map(|map| map.triggers.iter())
+            .filter_map(|trigger| trigger.character_visual.as_ref())
+        {
+            classified += 1;
+            has_dogbot |= visual.handler_class == RobotsAiHandlerClass::DogBot;
+            has_turretbot |= visual.handler_class == RobotsAiHandlerClass::TurretBot;
+            has_spintop |= visual.handler_class == RobotsAiHandlerClass::SpinTop;
+            has_jailbot_normal |= visual.handler_class == RobotsAiHandlerClass::JailBotNormal;
+            has_npc |= visual.handler_class == RobotsAiHandlerClass::Npc;
+            match native_ai_production_host_kind(visual.handler_class) {
+                NativeAiProductionHostKind::BaseMonster => base_monster += 1,
+                NativeAiProductionHostKind::StandardMonster => standard_monster += 1,
+                NativeAiProductionHostKind::DedicatedAi => dedicated_ai += 1,
+                NativeAiProductionHostKind::NpcBehavior => npc_behavior += 1,
+            }
+        }
+
+        assert_eq!(classified, 77);
+        assert!(
+            has_dogbot,
+            "shipped m02_city lost its DogBot representative"
+        );
+        assert!(
+            has_turretbot,
+            "shipped m02_city lost its TurretBot representative"
+        );
+        assert!(
+            has_spintop,
+            "shipped m02_city lost its SpinTop representative"
+        );
+        assert!(
+            has_jailbot_normal,
+            "shipped m02_city lost its JailBotNormal representative"
+        );
+        assert!(has_npc, "shipped m02_city lost its NPC representative");
+        assert!(standard_monster > 0);
+        assert!(dedicated_ai > 0);
+        assert!(npc_behavior > 0);
+        eprintln!(
+            "m02_city AI host matrix: base={base_monster} standard={standard_monster} dedicated={dedicated_ai} npc={npc_behavior}"
+        );
+    }
+
+    #[test]
+    fn maps_fixed_clock_caps_wall_time_hitches_without_keeping_fast_forward_debt() {
+        // Applies to both camera/TriggerManager and AI. Neither may replay
+        // hundreds of missing 60 Hz ticks in one GUI frame after a stall.
+        let tick = 1.0 / 60.0;
+        let mut accumulator = 0.0;
+        assert_eq!(budget_maps_fixed_steps(&mut accumulator, tick * 0.5, tick), 0);
+        assert_eq!(budget_maps_fixed_steps(&mut accumulator, tick * 0.5, tick), 1);
+        assert!(accumulator < 1.0e-10);
+        assert_eq!(
+            budget_maps_fixed_steps(&mut accumulator, 10.0, tick),
+            ROBOTS_MAPS_MAX_FIXED_STEPS_PER_FRAME,
+        );
+        assert!(accumulator < 1.0e-10, "hitch must not leave a warp-speed backlog");
+        assert_eq!(budget_maps_fixed_steps(&mut accumulator, tick, tick), 1);
+        assert!(accumulator < 1.0e-10);
     }
 
     #[test]
@@ -9458,7 +10316,9 @@ mod tests {
         apply_native_ef01_first_update_effects(
             &mut runtime,
             &mut physics,
-            RobotsEf01MineFirstUpdateRoute::FollowFlyingPath { path_uid: 0x0b00_0049 },
+            RobotsEf01MineFirstUpdateRoute::FollowFlyingPath {
+                path_uid: 0x0b00_0049,
+            },
         );
         assert!(runtime.ef01_flying_path_latch_644);
         assert!(!physics.handler_606);
@@ -9547,6 +10407,7 @@ mod tests {
             animation_modes: std::collections::BTreeMap::new(),
             animation_mode_scripts: std::collections::BTreeMap::new(),
             anim_datums: std::collections::BTreeMap::new(),
+            animation_bone_selectors: std::collections::BTreeMap::new(),
             animation_mode_datum_tracks: std::collections::BTreeMap::new(),
             move_animation: None,
             turn_on_spot_l_animation: None,
@@ -9591,13 +10452,14 @@ mod tests {
             Vec3::new(2.0, 3.0, 4.0),
             Vec3::new(2.0, 3.0, 5.0),
         );
-        let animator = knight.knightbot_animator.expect("EB13 AttachAnimator state");
+        let animator = knight
+            .knightbot_animator
+            .expect("EB13 AttachAnimator state");
         assert_eq!(animator.position_xyz, [2.0, 3.0, 4.0]);
         assert_eq!(animator.rotation_xyzw, [0.0, 0.0, 0.0, 1.0]);
 
-        let ordinary = NativeStandardMonsterRuntime::new(
-            RobotsStandardMonsterBehaviorConfig::eb14_minion(),
-        );
+        let ordinary =
+            NativeStandardMonsterRuntime::new(RobotsStandardMonsterBehaviorConfig::eb14_minion());
         assert!(ordinary.knightbot_animator.is_none());
     }
 
@@ -9667,6 +10529,7 @@ mod tests {
             capability_flags: 0,
             health: 3,
             got_hit_latch: false,
+            turretbot_zero_health_latch_60c: false,
             owner_category: 5,
         };
         for serial in 1..=3 {

@@ -10,7 +10,7 @@ use eurochef_shared::robots_runtime::{
         RobotsCutsceneEffect, RobotsCutsceneFinalizeEffect, RobotsCutsceneHandlerHostEffect,
         RobotsCutsceneHandlerHostInput, RobotsCutsceneHandlerStep, RobotsCutsceneScriptSelection,
         RobotsCutsceneStateMarkerEventResult, RobotsCutsceneStateMarkerRuntime,
-        RobotsCutsceneToggle,
+        RobotsCutsceneToggle, RobotsCutsceneWaitForTextRuntime,
     },
     door::RobotsDoorRuntimeState,
     fix_switch::{RobotsFixSwitchEventStep, RobotsFixSwitchRuntimeState},
@@ -177,15 +177,6 @@ pub(crate) fn runtime_player_trigger_state(
             ),
         }
     })
-}
-
-pub(crate) fn runtime_player_spawn_state(map: &ProcessedMap) -> Option<RuntimePlayerState> {
-    let (trigger_index, trigger) = map
-        .triggers
-        .iter()
-        .enumerate()
-        .find(|(_, trigger)| trigger.ttype == ROBOTS_TRIGGER_PLAYER)?;
-    runtime_player_trigger_state(trigger_index, trigger)
 }
 
 pub(crate) fn runtime_minebot_move_gate(
@@ -387,6 +378,10 @@ pub(crate) struct NativeCutsceneRuntimeState {
     pub(crate) pending_alternate_uid: Option<u32>,
     pub(crate) pending_activation: bool,
     pub(crate) active_alternate_uid: Option<u32>,
+    /// Native ScriptLifecycle Handler `+0x3B8`. `ChangeScript 0x16000031` and
+    /// InventoryCheck may update this while the current animator keeps running;
+    /// `0x00409730` consumes it only when a Script animator is (re)created.
+    pub(crate) handler_script_override_uid_3b8: Option<u32>,
     /// Exact `0x00409730` Script selection captured when the Cutscene XItem is
     /// created. `handler+0x3B8` overrides the default trigger Script UID but
     /// does not change the selected owner EDB/file.
@@ -407,6 +402,9 @@ pub(crate) struct NativeCutsceneRuntimeState {
     /// `+0x16B0`, `+0x16B8..+0x16BC`). This stays separate from the generic
     /// Script scheduler because the same held Event is revisited across Handler ticks.
     pub(crate) state_marker_runtime: RobotsCutsceneStateMarkerRuntime,
+    /// Native `WaitForText` Handler `+0x3C0/+0x16A8` latch. It is serviced by
+    /// the dedicated Cutscene tick, independently of opcode11 return values.
+    pub(crate) wait_for_text_runtime: RobotsCutsceneWaitForTextRuntime,
     /// Due Cutscene-specific host effects emitted by opcode11 commands reached
     /// during the most recent XItem update. The GUI/UE adapter consumes these;
     /// shared gameplay remains engine-neutral.
@@ -424,6 +422,11 @@ pub(crate) struct NativeCutsceneRuntimeState {
     pub(crate) message_enabled_16be: bool,
     pub(crate) saved_display_mask_16b4: u32,
     pub(crate) pending_swap_character_16bd: bool,
+    /// Shipped Cutscene `SetProperties 0x16000037` targets the handler's own
+    /// XItem (`Handler +0x04`) with selector 0. Preserve only the two native
+    /// fields touched by that command; linked-XItem mutation remains external.
+    pub(crate) own_xitem_flags_10: u16,
+    pub(crate) own_xitem_byte_7e: u8,
     pub(crate) audio_active_16c3: bool,
     pub(crate) music_audio_present_16c4: bool,
     pub(crate) script_audio_scan_initialized: bool,
@@ -493,6 +496,24 @@ impl NativeCutsceneRuntimeState {
         }
     }
 
+    pub(crate) fn apply_own_xitem_set_properties(&mut self, args: [Option<u32>; 4]) {
+        if args[0] != Some(0) {
+            return;
+        }
+        match args[1] {
+            Some(0) => {
+                self.own_xitem_flags_10 |= 1;
+                self.own_xitem_byte_7e = 0;
+            }
+            Some(_) => self.own_xitem_flags_10 &= !1,
+            None => {}
+        }
+    }
+
+    pub(crate) fn set_handler_script_override(&mut self, script_uid: Option<u32>) {
+        self.handler_script_override_uid_3b8 = script_uid;
+    }
+
     pub(crate) fn cleanup_zone_failed(&mut self) {
         self.lifecycle.cleanup_zone_failed();
         if !self.lifecycle.xitem_exists {
@@ -535,6 +556,7 @@ impl NativeCutsceneRuntimeState {
             self.script_audio_scan_initialized = false;
             if self.pending_activation {
                 self.active_alternate_uid = self.pending_alternate_uid.take();
+                self.handler_script_override_uid_3b8 = self.active_alternate_uid;
                 self.pending_activation = false;
             } else {
                 self.active_alternate_uid = None;
@@ -553,7 +575,8 @@ impl NativeCutsceneRuntimeState {
             current_file_uid,
             explicit_file_uid,
             default_script_uid,
-            self.active_alternate_uid,
+            self.handler_script_override_uid_3b8
+                .or(self.active_alternate_uid),
         );
         self.active_script_time_seconds = None;
         self.script_scheduler.reset();
@@ -632,7 +655,9 @@ impl NativeCutsceneRuntimeState {
         self.state_marker_runtime.bind_script(script);
         let creator_saved_time_bits_40 = self.creator_saved_time_bits_40;
         let state_marker_runtime = &mut self.state_marker_runtime;
-        advance_script_scheduler(script, &mut self.script_scheduler, 1.0, |event| {
+        let mut state_marker_end_time_bits = None;
+        let mut clear_creator_saved_time = false;
+        let step = advance_script_scheduler(script, &mut self.script_scheduler, 1.0, |event| {
             if event.event_type == eurochef_shared::robots_runtime::events::event_type::STATE_MARKER
             {
                 let Some(start) = event.start else {
@@ -648,6 +673,19 @@ impl NativeCutsceneRuntimeState {
                 };
             }
             if event.event_type
+                == eurochef_shared::robots_runtime::events::event_type::STATE_MARKER_END
+            {
+                state_marker_end_time_bits =
+                    state_marker_runtime.state_marker_end_time_bits(script.length);
+                return RobotsScriptNativeEventResult::Continue;
+            }
+            if event.event_type
+                == eurochef_shared::robots_runtime::events::event_type::CLEAR_STATE_MARKER
+            {
+                clear_creator_saved_time = state_marker_runtime.clear_state_marker();
+                return RobotsScriptNativeEventResult::Continue;
+            }
+            if event.event_type
                 == eurochef_shared::robots_runtime::events::event_type::SET_ALTERNATE_STATE
             {
                 return state_marker_runtime
@@ -657,7 +695,41 @@ impl NativeCutsceneRuntimeState {
                     });
             }
             event_handler(event)
-        })
+        });
+        if let Some(time_bits) = state_marker_end_time_bits {
+            // Native StateMarkerEnd mirrors Handler+0x3A0 into creator context +0x40.
+            self.creator_saved_time_bits_40 = time_bits;
+        }
+        if clear_creator_saved_time {
+            self.creator_saved_time_bits_40 = 0.0f32.to_bits();
+        }
+        step
+    }
+
+    /// Dedicated native Cutscene tick (0x00409970) service for WaitForText.
+    /// Message presentation remains external; this method only mutates the owned
+    /// Script scheduler/latch once the host supplies its current presentation state.
+    pub(crate) fn service_wait_for_text(
+        &mut self,
+        presentation_active: bool,
+        choice_result: i32,
+    ) -> Option<u8> {
+        if let Some(choice) = self
+            .wait_for_text_runtime
+            .completed_choice(presentation_active, choice_result)
+        {
+            self.wait_for_text_runtime.clear();
+            return Some(choice);
+        }
+        if let Some(frame_bits) = self.wait_for_text_runtime.rewind_frame_bits_if_waiting(
+            self.script_scheduler.frame,
+            presentation_active,
+            choice_result,
+        ) {
+            self.script_scheduler.frame = f32::from_bits(frame_bits);
+            self.script_scheduler.finished = false;
+        }
+        None
     }
 
     pub(crate) fn advance_xitem(&mut self, zone_visual_active: bool) {
@@ -1493,10 +1565,10 @@ pub(crate) fn runtime_minebot_move_attack_winner(
 }
 
 #[derive(Clone, Copy, Debug)]
-struct RuntimeRobotsRaycastHit {
-    t: f32,
-    face_mask: u16,
-    normal: Vec3,
+pub(crate) struct RuntimeRobotsRaycastHit {
+    pub(crate) t: f32,
+    pub(crate) face_mask: u16,
+    pub(crate) normal: Vec3,
 }
 
 /// Mirrors the static `EXGeoEntity::DoRayCast` face loop at Robots.exe
@@ -2039,20 +2111,20 @@ pub(crate) fn runtime_queued_entities_line_of_sight_clear(
 /// same Camera material predicate only to that winning face. Animation/Collision
 /// child animators are intentionally absent from the supplied queue because their
 /// native slot16 is the no-op `0x004E8A20`.
-pub(crate) fn runtime_queued_entities_camera_contact_nearest_t(
+pub(crate) fn runtime_queued_entities_nearest_raw_hit(
     queue: &[QueuedEntityRender],
     render_store: &RenderStore,
     start: Vec3,
     end: Vec3,
-) -> Option<Option<f32>> {
+    max_t: f32,
+) -> Option<Option<RuntimeRobotsRaycastHit>> {
     let delta = end - start;
     if delta.length_squared() == 0.0 {
         return Some(None);
     }
 
-    let mut nearest = 1.0f32;
-    let mut nearest_mask = 0u16;
-    let mut hit = false;
+    let mut nearest = max_t;
+    let mut nearest_hit = None;
     for queued in queue {
         if queued.entity_alt.is_some() {
             return None;
@@ -2072,20 +2144,32 @@ pub(crate) fn runtime_queued_entities_camera_contact_nearest_t(
                 face_mask: triangle.face_mask,
                 trailing_raw: triangle.trailing_raw,
             };
-            if let Some((t, face_mask)) = runtime_robots_mesh_raycast_nearest_hit(
+            if let Some(hit) = runtime_robots_mesh_raycast_nearest_hit_filtered(
                 std::slice::from_ref(&world),
                 start,
                 delta,
                 nearest,
+                |_| true,
             ) {
-                nearest = t;
-                nearest_mask = face_mask;
-                hit = true;
+                nearest = hit.t;
+                nearest_hit = Some(hit);
             }
         }
     }
 
-    Some((hit && runtime_robots_camera_contact_face_accepted(nearest_mask)).then_some(nearest))
+    Some(nearest_hit)
+}
+
+pub(crate) fn runtime_queued_entities_camera_contact_nearest_t(
+    queue: &[QueuedEntityRender],
+    render_store: &RenderStore,
+    start: Vec3,
+    end: Vec3,
+) -> Option<Option<f32>> {
+    let hit = runtime_queued_entities_nearest_raw_hit(queue, render_store, start, end, 1.0)?;
+    Some(hit.and_then(|hit| {
+        runtime_robots_camera_contact_face_accepted(hit.face_mask).then_some(hit.t)
+    }))
 }
 
 /// Camera mode-1 static Map stage from Robots.exe `0x00478E30 -> 0x004ECE9B`.
@@ -2094,31 +2178,29 @@ pub(crate) fn runtime_queued_entities_camera_contact_nearest_t(
 /// zone/placement geometry is unresolved. `Some(Some(t))` is an accepted static
 /// hit. `Some(None)` means the static stage produced no accepted hit and native
 /// code would continue with the separate mask-bit0 XItem fallback `0x00444B50`.
-pub(crate) fn runtime_map_camera_contact_nearest_t(
+pub(crate) fn runtime_map_static_nearest_raw_hit(
     map: &ProcessedMap,
     start: Vec3,
     end: Vec3,
-) -> Option<Option<f32>> {
+) -> Option<Option<RuntimeRobotsRaycastHit>> {
     let delta = end - start;
     if delta.length_squared() == 0.0 {
         return Some(None);
     }
 
     let mut nearest = 1.0f32;
-    let mut nearest_mask = 0u16;
-    let mut hit = false;
+    let mut nearest_hit = None;
     for zone_index in
         robots_map_zone_indices_for_segment_by_bsp(&map.bsp_nodes, map.zones.len(), start, end)
     {
         let Some(Some(zone_triangles)) = map.zone_raycast_triangles.get(zone_index) else {
             return None;
         };
-        if let Some((t, face_mask)) =
-            runtime_robots_mesh_raycast_nearest_hit(zone_triangles, start, delta, nearest)
+        if let Some(hit) =
+            runtime_robots_mesh_raycast_nearest_hit_filtered(zone_triangles, start, delta, nearest, |_| true)
         {
-            nearest = t;
-            nearest_mask = face_mask;
-            hit = true;
+            nearest = hit.t;
+            nearest_hit = Some(hit);
         }
 
         let Some(zone) = map.zones.get(zone_index) else {
@@ -2145,17 +2227,103 @@ pub(crate) fn runtime_map_camera_contact_nearest_t(
             else {
                 return None;
             };
-            if let Some((t, face_mask)) =
-                runtime_robots_mesh_raycast_nearest_hit(triangles, start, delta, nearest)
-            {
-                nearest = t;
-                nearest_mask = face_mask;
-                hit = true;
+            if let Some(hit) = runtime_robots_mesh_raycast_nearest_hit_filtered(
+                triangles, start, delta, nearest, |_| true,
+            ) {
+                nearest = hit.t;
+                nearest_hit = Some(hit);
             }
         }
     }
 
-    Some((hit && runtime_robots_camera_contact_face_accepted(nearest_mask)).then_some(nearest))
+    Some(nearest_hit)
+}
+
+pub(crate) fn runtime_map_camera_contact_nearest_t(
+    map: &ProcessedMap,
+    start: Vec3,
+    end: Vec3,
+) -> Option<Option<f32>> {
+    let hit = runtime_map_static_nearest_raw_hit(map, start, end)?;
+    Some(hit.and_then(|hit| {
+        runtime_robots_camera_contact_face_accepted(hit.face_mask).then_some(hit.t)
+    }))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RuntimeWatchbotRecoveryProbe {
+    pub(crate) start: Vec3,
+    pub(crate) end: Vec3,
+    pub(crate) recovery_yaw_radians: f32,
+}
+
+/// Static Map/placement portion of WatchBot component vslot +0x88 (`0x00495A10`).
+/// Native rotates component +0x30..+0x38 through the controller-frame orientation,
+/// normalizes the 3D result, drops world Y, and probes two units from owner position.
+/// On a hit whose surface metadata category is 0x20, the opposite probe vector is
+/// transformed back into that frame and stored at component +0x64 as recovery yaw.
+pub(crate) fn runtime_watchbot_recovery_probe(
+    owner_position: Vec3,
+    owner_rotation_euler4: [f32; 4],
+    controller_yaw_radians: f32,
+    local_velocity_xyzw: [f32; 4],
+) -> Option<RuntimeWatchbotRecoveryProbe> {
+    let frame_rotation = glam::Quat::from_euler(
+        glam::EulerRot::ZXY,
+        owner_rotation_euler4[0],
+        owner_rotation_euler4[2],
+        controller_yaw_radians,
+    );
+    let world = frame_rotation
+        * Vec3::new(
+            local_velocity_xyzw[0],
+            local_velocity_xyzw[1],
+            local_velocity_xyzw[2],
+        );
+    let length = world.length();
+    if !length.is_finite() || length <= 1.0e-5 {
+        return None;
+    }
+
+    let normalized = world / length;
+    let probe_delta = Vec3::new(normalized.x * 2.0, 0.0, normalized.z * 2.0);
+    if probe_delta.length_squared() == 0.0 {
+        return None;
+    }
+    let local_back = frame_rotation.conjugate() * -probe_delta;
+    Some(RuntimeWatchbotRecoveryProbe {
+        start: owner_position,
+        end: owner_position + probe_delta,
+        recovery_yaw_radians: local_back.x.atan2(local_back.z),
+    })
+}
+
+pub(crate) fn runtime_watchbot_recovery_face_accepted(face_mask: u16) -> bool {
+    face_mask & 0x0078 == 0x0020
+}
+
+pub(crate) fn runtime_watchbot_recovery_contact_from_hits(
+    probe: RuntimeWatchbotRecoveryProbe,
+    static_hit: Option<RuntimeRobotsRaycastHit>,
+    dynamic_hit: Option<RuntimeRobotsRaycastHit>,
+) -> Option<eurochef_shared::robots_runtime::watchbot_component::RobotsWatchbotComponentRecoveryContact> {
+    let nearest = match (static_hit, dynamic_hit) {
+        (Some(a), Some(b)) => Some(if b.t < a.t { b } else { a }),
+        (Some(hit), None) | (None, Some(hit)) => Some(hit),
+        (None, None) => None,
+    }?;
+    // 0x00494260 reports clear when the final query fraction is greater than 0.99.
+    // 0x00495A10 applies the surface category predicate only after that global nearest
+    // face has been selected across static and live-XItem passes.
+    if nearest.t > 0.99 || !runtime_watchbot_recovery_face_accepted(nearest.face_mask) {
+        return None;
+    }
+    Some(
+        eurochef_shared::robots_runtime::watchbot_component::RobotsWatchbotComponentRecoveryContact {
+            special_contact: true,
+            recovery_yaw_radians: probe.recovery_yaw_radians,
+        },
+    )
 }
 
 /// Mirrors the static-geometry portion of Robots.exe Map slot16 LOS:
@@ -2452,6 +2620,176 @@ pub(crate) struct RuntimePathSample {
     pub(crate) tangent: Vec3,
 }
 
+/// Native default `XPath` sample (`0x00420710`). The parameter is node based:
+/// integer `n` selects node `n`; the fractional part linearly interpolates toward
+/// node `n + 1`. This is deliberately separate from the older distance-based map
+/// preview because native gameplay handlers such as m08 BossRatchet store this
+/// fractional node parameter directly.
+pub(crate) fn runtime_native_path_position_at_parameter(
+    path: &ProcessedPath,
+    parameter: f32,
+) -> Option<Vec3> {
+    let last = path.nodes.len().checked_sub(1)?;
+    let parameter = parameter.clamp(0.0, last as f32);
+    let index = parameter.floor() as usize;
+    let current = path.nodes.get(index)?.position;
+    let Some(next) = path.nodes.get(index + 1) else {
+        return Some(current);
+    };
+    Some(current.lerp(next.position, parameter - index as f32))
+}
+
+/// Native default `XPath` tangent (`0x00420600`). At the final node the engine
+/// reuses the preceding segment instead of returning a zero vector.
+pub(crate) fn runtime_native_path_tangent_at_parameter(
+    path: &ProcessedPath,
+    parameter: f32,
+) -> Option<Vec3> {
+    if path.nodes.is_empty() {
+        return None;
+    }
+    if path.nodes.len() == 1 {
+        return Some(Vec3::ZERO);
+    }
+    let last = path.nodes.len() - 1;
+    let index = parameter.clamp(0.0, last as f32).floor() as usize;
+    let (start, end) = if index < last {
+        (path.nodes[index].position, path.nodes[index + 1].position)
+    } else {
+        (path.nodes[last - 1].position, path.nodes[last].position)
+    };
+    Some(end - start)
+}
+
+fn runtime_native_path_segment_projection(
+    start: Vec3,
+    end: Vec3,
+    position: Vec3,
+) -> (f32, Vec3, f32) {
+    let delta = end - start;
+    let length_squared = delta.length_squared();
+    if length_squared <= f32::EPSILON {
+        return (0.0, start, start.distance_squared(position));
+    }
+    let fraction = ((position - start).dot(delta) / length_squared).clamp(0.0, 1.0);
+    let point = start.lerp(end, fraction);
+    (fraction, point, point.distance_squared(position))
+}
+
+/// Native default `XPath::GetNearestPoint` (`0x0041FDF0`) parameter result.
+/// Native first chooses the nearest node, then compares only its previous and
+/// next segments; equal distances prefer the forward segment.
+pub(crate) fn runtime_native_path_nearest_parameter(
+    path: &ProcessedPath,
+    position: Vec3,
+) -> Option<f32> {
+    let mut nearest = 0usize;
+    let mut nearest_distance_squared = path.nodes.first()?.position.distance_squared(position);
+    for (index, node) in path.nodes.iter().enumerate().skip(1) {
+        let distance_squared = node.position.distance_squared(position);
+        // Native `0x0041FDF0` updates only on strict `<`, so equal-distance
+        // nodes preserve the earliest serialized ordinal.
+        if distance_squared < nearest_distance_squared {
+            nearest = index;
+            nearest_distance_squared = distance_squared;
+        }
+    }
+
+    let previous = nearest.checked_sub(1).map(|start| {
+        let (fraction, _, distance_squared) = runtime_native_path_segment_projection(
+            path.nodes[start].position,
+            path.nodes[nearest].position,
+            position,
+        );
+        (start as f32 + fraction, distance_squared)
+    });
+    let next = path.nodes.get(nearest + 1).map(|node| {
+        let (fraction, _, distance_squared) = runtime_native_path_segment_projection(
+            path.nodes[nearest].position,
+            node.position,
+            position,
+        );
+        (nearest as f32 + fraction, distance_squared)
+    });
+
+    match (previous, next) {
+        (Some(previous), Some(next)) => Some(if next.1 <= previous.1 { next.0 } else { previous.0 }),
+        (Some(previous), None) => Some(previous.0),
+        (None, Some(next)) => Some(next.0),
+        (None, None) => Some(nearest as f32),
+    }
+}
+
+/// Native default non-loop `XPath` distance advance (`0x00420B60`). The input
+/// and output are fractional node parameters, while `distance` is world-space
+/// distance. m08 BossRatchet uses the non-loop default path class: ctor
+/// `0x0041F880` leaves runtime path `+0x08 == 0` and loader `0x0042F3D0`
+/// does not change it.
+pub(crate) fn runtime_native_non_loop_path_advance_parameter(
+    path: &ProcessedPath,
+    parameter: f32,
+    distance: f32,
+) -> Option<f32> {
+    let last = path.nodes.len().checked_sub(1)?;
+    let mut parameter = parameter.clamp(0.0, last as f32);
+    if distance == 0.0 || last == 0 {
+        return Some(parameter);
+    }
+
+    let mut remaining = distance;
+    if remaining > 0.0 {
+        loop {
+            let index = parameter.floor() as usize;
+            if index >= last {
+                return Some(last as f32);
+            }
+            let current = runtime_native_path_position_at_parameter(path, parameter)?;
+            let next_parameter = (index + 1) as f32;
+            let next = path.nodes[index + 1].position;
+            let segment = current.distance(next);
+            if remaining <= segment {
+                if segment <= f32::EPSILON {
+                    return Some(next_parameter);
+                }
+                return Some(parameter + (remaining / segment) * (next_parameter - parameter));
+            }
+            remaining -= segment;
+            parameter = next_parameter;
+            if remaining <= 0.001 {
+                return Some(parameter);
+            }
+        }
+    }
+
+    let mut current = runtime_native_path_position_at_parameter(path, parameter)?;
+    let mut target_index = parameter.floor() as usize;
+    loop {
+        let previous_parameter = target_index as f32;
+        let previous = path.nodes[target_index].position;
+        let segment = current.distance(previous);
+        if -remaining <= segment {
+            if segment <= f32::EPSILON {
+                if target_index == 0 {
+                    return Some(0.0);
+                }
+                target_index -= 1;
+                continue;
+            }
+            return Some(parameter + (remaining / segment) * (parameter - previous_parameter));
+        }
+        remaining += segment;
+        parameter = previous_parameter;
+        current = previous;
+        if target_index == 0 {
+            return Some(0.0);
+        }
+        if remaining >= -0.001 {
+            return Some(parameter);
+        }
+        target_index -= 1;
+    }
+}
+
 pub(crate) fn runtime_path_segments_for_motion(route: &[Vec3], looping: bool) -> Vec<(Vec3, Vec3)> {
     let mut segments = route
         .windows(2)
@@ -2664,6 +3002,16 @@ pub(crate) const ROBOTS_CHARACTER_ANIMATION_FIXED_HZ: f32 = 60.0;
 pub(crate) const ROBOTS_CHARACTER_MOVE_BLEND_SECONDS: f32 =
     ROBOTS_CHARACTER_MOVE_BLEND_FIXED_TICKS / ROBOTS_CHARACTER_ANIMATION_FIXED_HZ;
 
+pub(crate) fn runtime_character_track_frame_position(
+    track: &ProcessedCharacterAnimationTrack,
+    seconds: f32,
+) -> Option<f32> {
+    if track.frame_count == 0 || !seconds.is_finite() {
+        return None;
+    }
+    Some((seconds.max(0.0) * f32::from(track.clip_rate)) % track.frame_count as f32)
+}
+
 fn runtime_character_track_local_poses(
     track: &ProcessedCharacterAnimationTrack,
     seconds: f32,
@@ -2676,7 +3024,7 @@ fn runtime_character_track_local_poses(
         return None;
     }
 
-    let frame_position = (seconds.max(0.0) * f32::from(track.clip_rate)) % track.frame_count as f32;
+    let frame_position = runtime_character_track_frame_position(track, seconds)?;
     let frame0 = frame_position.floor() as usize;
     let frame1 = (frame0 + 1) % track.frame_count;
     let fraction = frame_position - frame0 as f32;
@@ -2704,13 +3052,37 @@ fn runtime_character_track_root_motion_sample(
         return None;
     }
 
-    let frame_position = (seconds.max(0.0) * f32::from(track.clip_rate)) % track.frame_count as f32;
+    let frame_position = runtime_character_track_frame_position(track, seconds)?;
     let frame0 = frame_position.floor() as usize;
     let frame1 = (frame0 + 1) % track.frame_count;
     let fraction = frame_position - frame0 as f32;
     let sample0 = track.root_motion_samples[frame0];
     let sample1 = track.root_motion_samples[frame1];
-    let position = sample0.position.lerp(sample1.position, fraction);
+
+    // Root translations are accumulated locomotion, unlike the looped bone
+    // poses used to render a gait. Interpolating the final root sample directly
+    // back to frame zero undoes a whole stride and makes NPCs walk in place.
+    // Continue the last frame's displacement across the seam and carry the
+    // per-loop translation into subsequent cycles. Rotation keeps its native
+    // cyclic interpolation below.
+    let last = track.root_motion_samples[track.frame_count - 1].position;
+    let first = track.root_motion_samples[0].position;
+    let wrap_step = if track.frame_count > 1 {
+        last - track.root_motion_samples[track.frame_count - 2].position
+    } else {
+        Vec3::ZERO
+    };
+    let cycle_translation = last - first + wrap_step;
+    let cycle = ((seconds.max(0.0) * f32::from(track.clip_rate))
+        / track.frame_count as f32)
+        .floor();
+    let next_position = if frame1 == 0 {
+        last + wrap_step
+    } else {
+        sample1.position
+    };
+    let position = sample0.position.lerp(next_position, fraction)
+        + cycle_translation * cycle;
     let mut next_rotation = sample1.rotation;
     if sample0.rotation.dot(next_rotation) < 0.0 {
         next_rotation = -next_rotation;
@@ -2766,6 +3138,144 @@ fn runtime_character_chain_matrix(poses: &[ProcessedCharacterAnimationBonePose])
 pub(crate) struct RuntimeCharacterDatumWorldTransform {
     pub(crate) position: Vec3,
     pub(crate) rotation: Quat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RuntimeCharacterBoneWorldTransform {
+    pub(crate) position: Vec3,
+    pub(crate) rotation: Quat,
+    pub(crate) world_from_bone: Mat4,
+}
+
+fn runtime_character_animation_bone_chain_poses(
+    visual: &ProcessedCharacterVisual,
+    track: &ProcessedCharacterAnimationTrack,
+    bone_hashcode: Hashcode,
+    animation_seconds: f32,
+) -> Option<(usize, Vec<ProcessedCharacterAnimationBonePose>)> {
+    let selector = *visual
+        .animation_bone_selectors
+        .get(&(track.animskin, bone_hashcode))?;
+    let chain_index = track
+        .bone_chain
+        .iter()
+        .position(|bone_selector| *bone_selector == selector)?;
+    let poses = runtime_character_track_local_poses(track, animation_seconds)?;
+    Some((chain_index, poses.get(..=chain_index)?.to_vec()))
+}
+
+fn runtime_character_bone_world_transform_from_chain(
+    owner_position: Vec3,
+    owner_rotation: Quat,
+    owner_scale: Vec3,
+    poses: &[ProcessedCharacterAnimationBonePose],
+) -> RuntimeCharacterBoneWorldTransform {
+    let bone_matrix = runtime_character_chain_matrix(poses);
+    let owner_matrix =
+        Mat4::from_scale_rotation_translation(owner_scale, owner_rotation, owner_position);
+    let world_from_bone = owner_matrix * bone_matrix;
+    let (_, rotation, position) = world_from_bone.to_scale_rotation_translation();
+    RuntimeCharacterBoneWorldTransform {
+        position,
+        rotation: runtime_normalized_quat_or_identity(rotation),
+        world_from_bone,
+    }
+}
+
+pub(crate) fn runtime_character_animation_bone_world_transform(
+    owner_position: Vec3,
+    owner_rotation: Quat,
+    owner_scale: Vec3,
+    visual: &ProcessedCharacterVisual,
+    track: &ProcessedCharacterAnimationTrack,
+    bone_hashcode: Hashcode,
+    animation_seconds: f32,
+) -> Option<RuntimeCharacterBoneWorldTransform> {
+    let (_, poses) = runtime_character_animation_bone_chain_poses(
+        visual,
+        track,
+        bone_hashcode,
+        animation_seconds,
+    )?;
+    Some(runtime_character_bone_world_transform_from_chain(
+        owner_position,
+        owner_rotation,
+        owner_scale,
+        &poses,
+    ))
+}
+
+pub(crate) fn runtime_character_animation_bone_world_transform_blended(
+    owner_position: Vec3,
+    owner_rotation: Quat,
+    owner_scale: Vec3,
+    visual: &ProcessedCharacterVisual,
+    outgoing_track: &ProcessedCharacterAnimationTrack,
+    outgoing_seconds: f32,
+    incoming_track: &ProcessedCharacterAnimationTrack,
+    incoming_seconds: f32,
+    incoming_weight: f32,
+    bone_hashcode: Hashcode,
+) -> Option<RuntimeCharacterBoneWorldTransform> {
+    let (incoming_chain_index, incoming_poses) =
+        runtime_character_animation_bone_chain_poses(
+            visual,
+            incoming_track,
+            bone_hashcode,
+            incoming_seconds,
+        )?;
+    if incoming_weight >= 1.0 {
+        return Some(runtime_character_bone_world_transform_from_chain(
+            owner_position,
+            owner_rotation,
+            owner_scale,
+            &incoming_poses,
+        ));
+    }
+    let (outgoing_chain_index, outgoing_poses) =
+        runtime_character_animation_bone_chain_poses(
+            visual,
+            outgoing_track,
+            bone_hashcode,
+            outgoing_seconds,
+        )?;
+    if incoming_track.animskin != outgoing_track.animskin
+        || incoming_chain_index != outgoing_chain_index
+        || incoming_track.bone_chain.get(..=incoming_chain_index)?
+            != outgoing_track.bone_chain.get(..=outgoing_chain_index)?
+        || incoming_poses.len() != outgoing_poses.len()
+    {
+        return Some(runtime_character_bone_world_transform_from_chain(
+            owner_position,
+            owner_rotation,
+            owner_scale,
+            &incoming_poses,
+        ));
+    }
+    let alpha = incoming_weight.clamp(0.0, 1.0);
+    let blended = outgoing_poses
+        .iter()
+        .zip(&incoming_poses)
+        .map(|(outgoing, incoming)| {
+            let mut incoming_rotation = incoming.rotation;
+            if outgoing.rotation.dot(incoming_rotation) < 0.0 {
+                incoming_rotation = -incoming_rotation;
+            }
+            ProcessedCharacterAnimationBonePose {
+                position: outgoing.position.lerp(incoming.position, alpha),
+                rotation: outgoing
+                    .rotation
+                    .slerp(incoming_rotation, alpha)
+                    .normalize(),
+            }
+        })
+        .collect::<Vec<_>>();
+    Some(runtime_character_bone_world_transform_from_chain(
+        owner_position,
+        owner_rotation,
+        owner_scale,
+        &blended,
+    ))
 }
 
 /// Resolve one gameplay AnimDatum through the exact sampled bone chain belonging
@@ -3054,34 +3564,23 @@ impl RuntimeCharacterBodyState {
         )
     }
 
-    pub(crate) fn sync_initial_animation(&mut self, trigger: &ProcessedTrigger, seconds: f32) {
-        self.initial_animation = trigger
-            .character_visual
-            .as_ref()
-            .and_then(|visual| visual.initial_animation.clone());
-        self.animation_modes = trigger
-            .character_visual
-            .as_ref()
-            .map(|visual| visual.animation_modes.clone())
-            .unwrap_or_default();
-        self.animation_mode_scripts = trigger
-            .character_visual
-            .as_ref()
-            .map(|visual| visual.animation_mode_scripts.clone())
-            .unwrap_or_default();
-        self.move_animation = trigger
-            .character_visual
-            .as_ref()
-            .and_then(|visual| visual.move_animation.clone());
-        self.turn_on_spot_l_animation = trigger
-            .character_visual
-            .as_ref()
-            .and_then(|visual| visual.turn_on_spot_l_animation.clone());
-        self.turn_on_spot_r_animation = trigger
-            .character_visual
-            .as_ref()
-            .and_then(|visual| visual.turn_on_spot_r_animation.clone());
+    /// Map character resources are immutable between cold resets. Advancing the
+    /// editor's initial pose must not reconstruct/clone the entire AnimMode and
+    /// AnimScript catalog every frame or overwrite the live owner transform.
+    pub(crate) fn sync_initial_animation(&mut self, seconds: f32) {
         self.initial_animation_seconds = seconds.max(0.0);
+    }
+
+    /// A new native XItem is a fresh owner, even if its immutable AnimSkin and
+    /// AnimMode data remain cached by Maps. Zone unload/re-entry must not inherit
+    /// root motion, scale, hit-query serial or collision poses from an old XItem.
+    pub(crate) fn reset_owner_for_new_xitem(&mut self, position: Vec3, rotation: Quat) {
+        self.owner_position = position;
+        self.owner_rotation = rotation;
+        self.native_transform_scale = [1.0; 4];
+        self.last_hit_query_serial = u16::MAX;
+        self.initial_animation_seconds = 0.0;
+        self.clear_collision_animation_track();
     }
 
     pub(crate) fn initial_animation_bone_matrix(&self) -> Mat4 {
@@ -4650,6 +5149,33 @@ mod tests {
     }
 
     #[test]
+    fn cutscene_wait_for_text_host_service_rewinds_then_commits_choice() {
+        let mut state = NativeCutsceneRuntimeState::default();
+        state.wait_for_text_runtime.arm(12, 8);
+        state.script_scheduler.frame = 20.0;
+
+        assert_eq!(state.service_wait_for_text(true, -1), None);
+        assert_eq!(state.script_scheduler.frame, 12.0);
+        assert!(state.wait_for_text_runtime.active);
+
+        state.script_scheduler.frame = 20.0;
+        assert_eq!(state.service_wait_for_text(true, 1), Some(1));
+        assert!(!state.wait_for_text_runtime.active);
+        assert_eq!(state.script_scheduler.frame, 20.0);
+    }
+
+    #[test]
+    fn cutscene_wait_for_text_host_service_does_not_rewind_without_presentation() {
+        let mut state = NativeCutsceneRuntimeState::default();
+        state.wait_for_text_runtime.arm(12, 8);
+        state.script_scheduler.frame = 20.0;
+
+        assert_eq!(state.service_wait_for_text(false, -1), None);
+        assert_eq!(state.script_scheduler.frame, 20.0);
+        assert!(state.wait_for_text_runtime.active);
+    }
+
+    #[test]
     fn cutscene_runtime_consumes_pending_alternate_on_create_and_resolves_host_script() {
         let mut state = NativeCutsceneRuntimeState::default();
         state.prepare_npc_activation(
@@ -4740,6 +5266,28 @@ mod tests {
     }
 
     #[test]
+    fn cutscene_change_script_override_applies_only_on_next_bind() {
+        let mut state = NativeCutsceneRuntimeState::default();
+        state.bind_script_on_create(0x0100_00BB, Some(0x0100_00C9), Some(0x0400_028E));
+        assert_eq!(
+            state.active_script.unwrap().selected_script_uid,
+            0x0400_028E
+        );
+
+        state.set_handler_script_override(Some(0x0400_5678));
+        assert_eq!(
+            state.active_script.unwrap().selected_script_uid,
+            0x0400_028E
+        );
+
+        state.bind_script_on_create(0x0100_00BB, Some(0x0100_00C9), Some(0x0400_028E));
+        assert_eq!(
+            state.active_script.unwrap().selected_script_uid,
+            0x0400_5678
+        );
+    }
+
+    #[test]
     fn cutscene_finalize_routes_are_trigger_lifetime_state_and_setproperties_toggles_only_changelevel(
     ) {
         let mut state = NativeCutsceneRuntimeState::default();
@@ -4777,6 +5325,16 @@ mod tests {
         assert!(!state.message_enabled_16be);
         state.apply_message_toggle(RobotsCutsceneToggle::Enabled, 1);
         assert!(!state.message_enabled_16be);
+
+        state.own_xitem_flags_10 = 0x12;
+        state.own_xitem_byte_7e = 7;
+        state.apply_own_xitem_set_properties([Some(0), Some(0), Some(0), Some(0)]);
+        assert_eq!(state.own_xitem_flags_10, 0x13);
+        assert_eq!(state.own_xitem_byte_7e, 0);
+        state.apply_own_xitem_set_properties([Some(0), Some(1), Some(0), Some(0)]);
+        assert_eq!(state.own_xitem_flags_10, 0x12);
+        state.apply_own_xitem_set_properties([Some(1), Some(0), Some(0), Some(0)]);
+        assert_eq!(state.own_xitem_flags_10, 0x12);
 
         state.apply_swap_character_mode(Some(0));
         assert!(!state.pending_swap_character_16bd);
@@ -5470,6 +6028,80 @@ mod tests {
     }
 
     #[test]
+    fn watchbot_recovery_probe_matches_native_two_unit_horizontal_segment() {
+        let probe = runtime_watchbot_recovery_probe(
+            Vec3::new(10.0, 20.0, 30.0),
+            [0.0, 0.0, 0.0, 0.0],
+            0.0,
+            [1.0, 0.0, 0.0, 0.0],
+        )
+        .expect("non-zero WatchBot velocity must produce a probe");
+        assert_eq!(probe.start, Vec3::new(10.0, 20.0, 30.0));
+        assert!((probe.end - Vec3::new(12.0, 20.0, 30.0)).length() < 1.0e-6);
+        assert!((probe.recovery_yaw_radians + std::f32::consts::FRAC_PI_2).abs() < 1.0e-6);
+        assert!(runtime_watchbot_recovery_probe(
+            Vec3::ZERO,
+            [0.0; 4],
+            0.0,
+            [0.0; 4],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn watchbot_recovery_filter_accepts_only_native_surface_category_20() {
+        assert!(runtime_watchbot_recovery_face_accepted(0x0020));
+        assert!(runtime_watchbot_recovery_face_accepted(0x4020));
+        assert!(!runtime_watchbot_recovery_face_accepted(0x0000));
+        assert!(!runtime_watchbot_recovery_face_accepted(0x0030));
+        assert!(!runtime_watchbot_recovery_face_accepted(0x0048));
+    }
+
+    #[test]
+    fn watchbot_recovery_applies_material_gate_after_global_nearest_hit_selection() {
+        let probe = RuntimeWatchbotRecoveryProbe {
+            start: Vec3::ZERO,
+            end: Vec3::Z * 2.0,
+            recovery_yaw_radians: 0.75,
+        };
+        let accepted_static = RuntimeRobotsRaycastHit {
+            t: 0.5,
+            face_mask: 0x20,
+            normal: Vec3::Z,
+        };
+        let rejected_dynamic_nearer = RuntimeRobotsRaycastHit {
+            t: 0.25,
+            face_mask: 0x30,
+            normal: Vec3::X,
+        };
+        assert!(runtime_watchbot_recovery_contact_from_hits(
+            probe,
+            Some(accepted_static),
+            Some(rejected_dynamic_nearer),
+        )
+        .is_none());
+
+        let rejected_static = RuntimeRobotsRaycastHit {
+            t: 0.5,
+            face_mask: 0,
+            normal: Vec3::Z,
+        };
+        let accepted_dynamic_nearer = RuntimeRobotsRaycastHit {
+            t: 0.25,
+            face_mask: 0x20,
+            normal: Vec3::X,
+        };
+        let contact = runtime_watchbot_recovery_contact_from_hits(
+            probe,
+            Some(rejected_static),
+            Some(accepted_dynamic_nearer),
+        )
+        .expect("nearest dynamic category-0x20 face must trigger recovery");
+        assert!(contact.special_contact);
+        assert!((contact.recovery_yaw_radians - 0.75).abs() < 1.0e-6);
+    }
+
+    #[test]
     fn camera_contact_filter_matches_native_surface_metadata_gate() {
         assert!(runtime_robots_camera_contact_face_accepted(0x0000));
         assert!(runtime_robots_camera_contact_face_accepted(0x0040));
@@ -6064,6 +6696,23 @@ mod tests {
         assert!(delta.native_translation.distance(Vec3::new(5.0, 0.0, 0.0)) < 1.0e-6);
         let (_, angle) = delta.native_rotation.to_axis_angle();
         assert!((angle - 0.25).abs() < 1.0e-5);
+
+        // Move clips store cumulative root translation and reset their sample
+        // index for the next loop. Crossing that seam must NOT undo the stride.
+        for phase in [1.0, 2.0, 3.0, 4.0] {
+            let step = runtime_character_track_root_motion_delta(
+                &track,
+                phase / ROBOTS_CHARACTER_ANIMATION_FIXED_HZ,
+                1.0 / ROBOTS_CHARACTER_ANIMATION_FIXED_HZ,
+                1.0,
+            )
+            .expect("looped native root-motion delta");
+            assert!(
+                step.native_translation.distance(Vec3::new(10.0, 0.0, 0.0)) < 1.0e-5,
+                "root translation reversed at loop phase {phase}: {:?}",
+                step.native_translation
+            );
+        }
     }
 
     #[test]
@@ -6102,6 +6751,34 @@ mod tests {
         let forward = body.owner_rotation * Vec3::Z;
         let yaw = forward.x.atan2(forward.z);
         assert!((yaw - (std::f32::consts::FRAC_PI_2 + 0.25)).abs() < 1.0e-5);
+
+        // Reusing the owner across GUI frames must preserve movement, hit
+        // bookkeeping and the current animated collision-bone channel.
+        body.active_collision_bone_chain = Some(vec![7, 2]);
+        body.last_hit_query_serial = 0x1234;
+        let live_position = body.owner_position;
+        let live_rotation = body.owner_rotation;
+        body.sync_initial_animation(2.5);
+        assert_eq!(body.initial_animation_seconds, 2.5);
+        assert_eq!(body.owner_position, live_position);
+        assert_eq!(body.owner_rotation, live_rotation);
+        assert_eq!(body.active_collision_bone_chain.as_deref(), Some([7, 2].as_slice()));
+        assert_eq!(body.last_hit_query_serial, 0x1234);
+
+        // A brand-new TriggerManager XItem after zone unload/re-entry is a new
+        // mutable owner, not another frame of the old character instance.
+        body.native_transform_scale = [2.0; 4];
+        let spawned_position = Vec3::new(-3.0, 1.0, 8.0);
+        body.reset_owner_for_new_xitem(spawned_position, Quat::IDENTITY);
+        assert_eq!(body.owner_position, spawned_position);
+        assert_eq!(body.owner_rotation, Quat::IDENTITY);
+        assert_eq!(body.native_transform_scale, [1.0; 4]);
+        assert_eq!(body.last_hit_query_serial, u16::MAX);
+        assert_eq!(body.initial_animation_seconds, 0.0);
+        assert!(body.active_collision_bone_chain.is_none());
+        assert!(body.active_collision_local_poses.is_none());
+        assert!(body.collision_transition_snapshot.is_none());
+        assert!(body.animation_modes.is_empty()); // immutable shared data retained
     }
 
     #[test]

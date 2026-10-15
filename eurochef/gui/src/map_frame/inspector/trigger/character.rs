@@ -145,23 +145,23 @@ impl MapFrame {
                     readonly_input!(
                         ui,
                         "MineBot gameplay target",
-                        match crate::map_runtime::runtime_player_spawn_state(map) {
+                        match self.native_runtime_player_state {
                             Some(player) => format!(
-                                "XTrigger_Player #{} mode={} spawn=[{:.4}, {:.4}, {:.4}]",
+                                "XTrigger_Player #{} mode={} live=[{:.4}, {:.4}, {:.4}]",
                                 player.trigger_index,
                                 player.mode,
                                 player.position.x,
                                 player.position.y,
                                 player.position.z
                             ),
-                            None => "no XTrigger_Player (ttype 0) in this map".to_owned(),
+                            None => "no live gameplay Player XItem; serialized spawn locations are not AI targets".to_owned(),
                         }
                     );
                     ui.end_row();
                     readonly_input!(
                         ui,
                         "MineBot Move gate",
-                        match crate::map_runtime::runtime_player_spawn_state(map) {
+                        match self.native_runtime_player_state {
                             Some(player) => {
                                 let distance = trig.position.distance(player.position);
                                 let enter = crate::map_runtime::runtime_minebot_move_gate(
@@ -175,17 +175,17 @@ impl MapFrame {
                                     true,
                                 );
                                 format!(
-                                                            "spawn distance={distance:.4}; enter(<12)={enter}; continue(<16)={keep}; diagnostic only"
+                                                            "live Player distance={distance:.4}; enter(<12)={enter}; continue(<16)={keep}; diagnostic only"
                                                         )
                             }
-                            None => "unavailable without gameplay Player spawn owner".to_owned(),
+                            None => "unavailable until an actual gameplay Player XItem is created".to_owned(),
                         }
                     );
                     ui.end_row();
                     readonly_input!(
                         ui,
                         "MineBot Attack vs Move",
-                        match crate::map_runtime::runtime_player_spawn_state(map) {
+                        match self.native_runtime_player_state {
                             Some(player) => {
                                 let move_enter = crate::map_runtime::runtime_minebot_move_gate(
                                     trig.position,
@@ -237,7 +237,7 @@ impl MapFrame {
                                                             ),
                                                         }
                             }
-                            None => "unavailable without gameplay Player spawn owner".to_owned(),
+                            None => "unavailable until an actual gameplay Player XItem is created".to_owned(),
                         }
                     );
                     ui.end_row();

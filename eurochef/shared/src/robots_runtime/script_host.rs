@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{
     events::{
@@ -15,7 +15,7 @@ use super::{
     },
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RobotsScriptGameplayState {
     pub inventory: RobotsInventoryState,
     pub missions: RobotsMissionState,
@@ -168,7 +168,7 @@ pub fn execute_recovered_handler_script_command(
         | RobotsHandlerScriptCommandSemantic::WaitForMessage
         | RobotsHandlerScriptCommandSemantic::WaitForItemLandOn
         | RobotsHandlerScriptCommandSemantic::WaitForItemOff
-        | RobotsHandlerScriptCommandSemantic::WaitForMessageSpecific
+        | RobotsHandlerScriptCommandSemantic::WaitForMessageSpecific { .. }
         | RobotsHandlerScriptCommandSemantic::StateMarker { .. }
         | RobotsHandlerScriptCommandSemantic::SetAlternateState
         | RobotsHandlerScriptCommandSemantic::ClearStateMarker

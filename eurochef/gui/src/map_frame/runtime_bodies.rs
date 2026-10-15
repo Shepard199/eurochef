@@ -1,11 +1,13 @@
 use super::runtime_ai_explosion::native_common_monster_explosion_uid;
 use super::*;
 use crate::map_runtime::{
+    runtime_character_animation_bone_world_transform,
+    runtime_character_animation_bone_world_transform_blended,
     runtime_character_animation_datum_world_shape,
     runtime_character_animation_datum_world_transform, runtime_live_character_collision_shape,
-    runtime_test_live_character_hit_candidate, RuntimeCharacterDatumWorldTransform,
-    RuntimeCharacterHitCandidateResult, RuntimeCharacterHitQueryGeometry,
-    RuntimeCharacterWorldShape,
+    runtime_test_live_character_hit_candidate, RuntimeCharacterBoneWorldTransform,
+    RuntimeCharacterDatumWorldTransform, RuntimeCharacterHitCandidateResult,
+    RuntimeCharacterHitQueryGeometry, RuntimeCharacterWorldShape,
 };
 use crate::maps::{ProcessedCharacterVisual, ROBOTS_ANIM_MODE_DEFAULT};
 use eurochef_shared::robots_runtime::{
@@ -19,13 +21,17 @@ const RUNTIME_AI_DYNAMIC_ID_BIT: u32 = 0x8000_0000;
 fn runtime_ai_character_live_policy(
     native_lifecycle_valid: bool,
     simulate_ai: bool,
+    preview_all_ai: bool,
     native_xitem_live: bool,
     preview_live: bool,
 ) -> bool {
-    if !native_lifecycle_valid && simulate_ai {
-        preview_live
-    } else {
+    if native_lifecycle_valid {
+        // Valid gameplay scene: creation and destruction belong to TriggerManager.
         native_xitem_live
+    } else {
+        // In Fly/Orbit no native camera/zone lifetime is validated. Stale
+        // lifecycle entries must not activate characters; bulk preview is opt-in.
+        simulate_ai && preview_all_ai && preview_live
     }
 }
 
@@ -98,28 +104,25 @@ impl MapFrame {
     pub(super) fn sync_runtime_character_bodies(&mut self, map: &ProcessedMap, runtime_time: f32) {
         for (trigger_index, trigger) in map.triggers.iter().enumerate() {
             let key = Self::runtime_character_body_key(map.hashcode, trigger_index);
-            let Some(mut fresh) = RuntimeCharacterBodyState::from_trigger(trigger) else {
+            if trigger.character_visual.is_none() {
                 self.runtime_character_bodies.remove(&key);
                 continue;
-            };
-            fresh.initial_animation_seconds = runtime_time.max(0.0);
-            self.runtime_character_bodies
-                .entry(key)
-                .and_modify(|body| {
-                    // Owner pose is runtime state after XItem creation. Recopying
-                    // the serialized Trigger transform here would erase native
-                    // AI/Physics movement every canvas sync. Map/runtime reset
-                    // clears this table, so serialized pose remains bootstrap-only.
-                    body.sync_initial_animation(trigger, runtime_time);
-                    // Character EDB metadata is immutable for this ProcessedMap,
-                    // but refresh it too so future hot-reload/re-resolution does
-                    // not leave a stale shape behind.
-                    body.collision = fresh.collision;
-                    body.hit_area = fresh.hit_area;
-                    body.registration_mask = fresh.registration_mask;
-                    body.raw_hit_query_group = fresh.raw_hit_query_group;
-                })
-                .or_insert(fresh);
+            }
+            if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
+                // The ProcessedMap/visual is immutable for this lifetime. Copying
+                // all AnimMode tracks/AnimScripts and rebuilding a fresh physics
+                // body at 60 Hz added heavy allocations and frame-time hitches.
+                // Retain both the native owner pose and the attached collision
+                // animation channel; only the editor idle-preview clock changes.
+                body.sync_initial_animation(runtime_time);
+                continue;
+            }
+            // A new owner is initialized exactly once from the serialized pose.
+            // Switching/reloading maps cold-resets these cached bodies.
+            if let Some(mut fresh) = RuntimeCharacterBodyState::from_trigger(trigger) {
+                fresh.sync_initial_animation(runtime_time);
+                self.runtime_character_bodies.insert(key, fresh);
+            }
         }
     }
 
@@ -270,6 +273,68 @@ impl MapFrame {
         )
     }
 
+    pub(super) fn runtime_ai_animation_bone_world_transform_by_key(
+        &self,
+        map: &ProcessedMap,
+        key: u64,
+        bone_hashcode: u32,
+    ) -> Option<RuntimeCharacterBoneWorldTransform> {
+        let body = self.runtime_character_bodies.get(&key)?;
+        let visual = self.runtime_ai_visual_by_key(map, key)?;
+        let Some(sample) = self.native_ai_animation_presentation_sample_by_key(key) else {
+            let track = visual.initial_animation.as_ref()?.as_ref();
+            return runtime_character_animation_bone_world_transform(
+                body.owner_position,
+                body.owner_rotation,
+                body.native_transform_scale_xyz(),
+                visual,
+                track,
+                bone_hashcode,
+                body.initial_animation_seconds,
+            );
+        };
+        let incoming = visual.animation_modes.get(&sample.anim_mode)?.as_ref();
+        let Some((outgoing_mode, outgoing_seconds)) = sample.transition_from else {
+            return runtime_character_animation_bone_world_transform(
+                body.owner_position,
+                body.owner_rotation,
+                body.native_transform_scale_xyz(),
+                visual,
+                incoming,
+                bone_hashcode,
+                sample.pose_seconds,
+            );
+        };
+        if incoming.transition_fixed_ticks == 0 {
+            return runtime_character_animation_bone_world_transform(
+                body.owner_position,
+                body.owner_rotation,
+                body.native_transform_scale_xyz(),
+                visual,
+                incoming,
+                bone_hashcode,
+                sample.pose_seconds,
+            );
+        }
+        let outgoing = visual.animation_modes.get(&outgoing_mode)?.as_ref();
+        let transition_seconds = incoming.transition_fixed_ticks as f32
+            / crate::map_runtime::ROBOTS_CHARACTER_ANIMATION_FIXED_HZ;
+        let incoming_weight =
+            (sample.transition_elapsed_seconds.max(0.0) / transition_seconds).clamp(0.0, 1.0);
+        runtime_character_animation_bone_world_transform_blended(
+            body.owner_position,
+            body.owner_rotation,
+            body.native_transform_scale_xyz(),
+            visual,
+            outgoing,
+            outgoing_seconds,
+            incoming,
+            sample.pose_seconds,
+            incoming_weight,
+            bone_hashcode,
+        )
+    }
+
     pub(super) fn runtime_ai_animation_datum_world_shape_by_key(
         &self,
         map: &ProcessedMap,
@@ -307,27 +372,21 @@ impl MapFrame {
             else {
                 continue;
             };
-            let Some(fresh) = RuntimeCharacterBodyState::from_visual(
-                visual,
-                ROBOTS_HIT_QUERY_RAW_GROUP1,
-                snapshot.owner_position,
-                Quat::from_rotation_y(snapshot.owner_yaw),
-            ) else {
-                continue;
-            };
+            if !self.runtime_character_bodies.contains_key(&snapshot.key) {
+                // Factory spawn coordinates and immutable character metadata
+                // initialize the body once. Rebuilding it each UI frame cloned
+                // every animation track and would overwrite live collision state.
+                let Some(fresh) = RuntimeCharacterBodyState::from_visual(
+                    visual,
+                    ROBOTS_HIT_QUERY_RAW_GROUP1,
+                    snapshot.owner_position,
+                    Quat::from_rotation_y(snapshot.owner_yaw),
+                ) else {
+                    continue;
+                };
+                self.runtime_character_bodies.insert(snapshot.key, fresh);
+            }
             live_dynamic_keys.push(snapshot.key);
-            self.runtime_character_bodies
-                .entry(snapshot.key)
-                .and_modify(|body| {
-                    // Once created, the body is the mutable owner pose. Registry
-                    // spawn coordinates remain bootstrap evidence and must not erase
-                    // locomotion on every canvas sync.
-                    body.collision = fresh.collision;
-                    body.hit_area = fresh.hit_area;
-                    body.registration_mask = fresh.registration_mask;
-                    body.raw_hit_query_group = fresh.raw_hit_query_group;
-                })
-                .or_insert(fresh);
         }
 
         self.runtime_character_bodies.retain(|key, _| {
@@ -354,6 +413,7 @@ impl MapFrame {
         runtime_ai_character_live_policy(
             self.native_script_trigger_lifecycle_valid,
             self.simulate_ai,
+            self.preview_all_ai,
             self.native_ai_trigger_lifecycle
                 .get(&key)
                 .is_some_and(|state| state.xitem_exists),
@@ -361,18 +421,23 @@ impl MapFrame {
         )
     }
 
-    pub(super) fn runtime_ai_character_live_pose(
+    pub(super) fn runtime_ai_character_live_transform(
         &self,
         map_hash: u32,
         trigger_index: usize,
-    ) -> Option<(Vec3, Quat)> {
+    ) -> Option<(Vec3, Quat, Vec3, f32)> {
         if !self.runtime_ai_character_xitem_live(map_hash, trigger_index) {
             return None;
         }
         let body = self
             .runtime_character_bodies
             .get(&Self::runtime_character_body_key(map_hash, trigger_index))?;
-        Some((body.owner_position, body.owner_rotation))
+        Some((
+            body.owner_position,
+            body.owner_rotation,
+            body.native_transform_scale_xyz(),
+            body.initial_animation_seconds,
+        ))
     }
 
     /// Current live NPC MapCollision shape for physics/world-contact consumers.
@@ -459,12 +524,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_ai_preview_live_policy_is_independent_from_native_lifecycle() {
-        assert!(runtime_ai_character_live_policy(false, true, false, true));
-        assert!(!runtime_ai_character_live_policy(false, true, true, false));
-        assert!(runtime_ai_character_live_policy(true, true, true, false));
-        assert!(!runtime_ai_character_live_policy(true, true, false, true));
-        assert!(runtime_ai_character_live_policy(false, false, true, false));
+    fn runtime_ai_preview_is_opt_in_and_cannot_override_gameplay_lifecycle() {
+        // Gameplay simulation does not spawn every NPC when native camera/zone
+        // ownership is unavailable. Even stale native flags remain fail-closed.
+        assert!(!runtime_ai_character_live_policy(false, true, false, false, true));
+        assert!(!runtime_ai_character_live_policy(false, true, false, true, true));
+        // Bulk creation is confined to explicit editor diagnostic preview.
+        assert!(runtime_ai_character_live_policy(false, true, true, false, true));
+        assert!(!runtime_ai_character_live_policy(false, true, true, true, false));
+        assert!(!runtime_ai_character_live_policy(false, false, true, false, true));
+        // In a validated game frame, only TriggerManager decides XItem existence.
+        assert!(runtime_ai_character_live_policy(true, true, false, true, false));
+        assert!(!runtime_ai_character_live_policy(true, true, true, false, true));
+        assert!(runtime_ai_character_live_policy(true, false, false, true, false));
     }
 
     #[test]

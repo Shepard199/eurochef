@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const ROBOTS_PLAYER_ITEM_NAMESPACE: u32 = 0x4800_0000;
 pub const ROBOTS_PLAYER_ITEM_PERSISTENT_GROUP_ID: u32 = 1;
@@ -21,7 +21,7 @@ pub fn is_robots_player_item_uid(uid: u32) -> bool {
     uid != u32::MAX && uid & 0x7f00_0000 == ROBOTS_PLAYER_ITEM_NAMESPACE
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RobotsPlayerItemValue {
     pub uid: u32,
     pub raw_value: u32,
@@ -67,7 +67,7 @@ impl RobotsPlayerItemMutationOutcome {
 /// Definition-specific external hooks remain a host/database concern. This
 /// state therefore stores only values that have entered through a proved
 /// Player-item producer or the explicit persistent group1 restore boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RobotsPlayerItemState {
     pub values: Vec<RobotsPlayerItemValue>,
 }

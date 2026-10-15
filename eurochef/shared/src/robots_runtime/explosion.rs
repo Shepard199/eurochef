@@ -74,6 +74,12 @@ pub const ROBOTS_EXPLOSION_FRAGMENT_RUNTIME_PICKUP_HANDLED_FLAG: u32 = 0x0004_00
 /// `0x004DBEF0` sets this player-proximity/attraction latch. `0x004DB8B0` then
 /// suppresses the ordinary physical-contact teardown while the latch is active.
 pub const ROBOTS_EXPLOSION_FRAGMENT_RUNTIME_PLAYER_PICKUP_LATCH: u32 = 0x0008_0000;
+/// `XExplosionFragment::0x004DBF90` no-Script pickup branch tears down the
+/// collected fragment and creates this transient Script XItem through the
+/// owner-transform wrapper `0x00404480`. Shipped fragment XItems retain the
+/// generic `XItem+0x264 == -1`, so the native category-45 alternate `0x040002FA`
+/// is not reachable for the shipped fragment path.
+pub const ROBOTS_EXPLOSION_FRAGMENT_PICKUP_EFFECT_SCRIPT_UID: u32 = 0x0400_02F9;
 /// Terminal latch written by `0x004DBB20` / `0x004DC0F0` after XItem teardown.
 pub const ROBOTS_EXPLOSION_FRAGMENT_RUNTIME_TEARDOWN_FLAG: u32 = 0x0010_0000;
 /// Runtime-only branch flag seeded during fragment creation from the global

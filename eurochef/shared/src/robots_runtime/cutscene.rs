@@ -96,6 +96,72 @@ pub struct RobotsCutsceneStateMarkerRuntime {
     pub marker_active_16bc: bool,
 }
 
+/// Cutscene-local `WaitForText 0x16000029` latch serviced by native tick
+/// `0x00409970`. The opcode itself returns immediately; once the script reaches
+/// `start + length`, the dedicated tick rewinds to `start` while presentation is
+/// still active. Terminal choice branches remain a host/UI boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RobotsCutsceneWaitForTextRuntime {
+    pub start_frame: i16,
+    pub threshold_frame: i32,
+    pub active: bool,
+}
+
+impl Default for RobotsCutsceneWaitForTextRuntime {
+    fn default() -> Self {
+        Self {
+            start_frame: -1,
+            threshold_frame: -1,
+            active: false,
+        }
+    }
+}
+
+impl RobotsCutsceneWaitForTextRuntime {
+    pub fn arm(&mut self, start: i16, length: u16) {
+        self.start_frame = start;
+        self.threshold_frame = i32::from(start) + i32::from(length);
+        self.active = true;
+    }
+
+    pub fn clear(&mut self) {
+        self.start_frame = -1;
+        self.threshold_frame = -1;
+        self.active = false;
+    }
+
+    pub fn rewind_frame_bits_if_waiting(
+        &self,
+        current_frame: f32,
+        presentation_active: bool,
+        choice_result: i32,
+    ) -> Option<u32> {
+        (self.active
+            && presentation_active
+            && choice_result == -1
+            && current_frame >= self.threshold_frame as f32)
+            .then_some((self.start_frame as f32).to_bits())
+    }
+
+    /// `0x00409970`: a non-negative active-record +0x0C completes the wait.
+    pub fn completed_choice(&self, presentation_active: bool, choice_result: i32) -> Option<u8> {
+        (self.active && presentation_active && matches!(choice_result, 0 | 1))
+            .then_some(choice_result as u8)
+    }
+
+    /// `0x00409970` routes a completed message choice through the creator
+    /// `XTrigger_Cutscene +0xE8` link bits. Result 0 is the ChangeLevel route
+    /// (bit1), result 1 is the linked-Cutscene route (bit2). The concrete target
+    /// remains trigger-link owned; this helper only preserves native route choice.
+    pub const fn completed_choice_route_enabled(choice: u8, creator_flags_e8: u8) -> bool {
+        match choice {
+            0 => creator_flags_e8 & 0x02 != 0,
+            1 => creator_flags_e8 & 0x04 != 0,
+            _ => false,
+        }
+    }
+}
+
 impl Default for RobotsCutsceneStateMarkerRuntime {
     fn default() -> Self {
         Self {
@@ -136,6 +202,17 @@ impl RobotsCutsceneStateMarkerRuntime {
     /// current `EXItemAnimator_Script +0x20 = 0x004FB462` with creator
     /// `XTrigger_Cutscene +0x40` seconds. That vslot multiplies by Script FPS
     /// and seeks through `0x004FA74C`.
+    /// Native `ClearStateMarker 0x1600001B` clears Handler `+0x3A0` and the
+    /// creator's saved-time `+0x40` only while marker guard `+0x3A4 == -1`.
+    /// A live marker deliberately makes this command a zero-return no-op.
+    pub fn clear_state_marker(&mut self) -> bool {
+        if self.marker_guard_3a4 != -1 {
+            return false;
+        }
+        self.marker_time_bits_3a0 = 0.0f32.to_bits();
+        true
+    }
+
     pub fn set_alternate_state_seek_frame_bits(
         &self,
         creator_saved_time_bits_40: u32,
@@ -146,6 +223,63 @@ impl RobotsCutsceneStateMarkerRuntime {
         let fps = f32::from_bits(self.bound_script_framerate_bits);
         let saved_seconds = f32::from_bits(creator_saved_time_bits_40);
         Some((saved_seconds * fps).to_bits())
+    }
+
+    /// Native `PlayToStateMarker` owner vslot `0x00417CB0` resolves a marker UID
+    /// against the bound Script marker table and stores `(frame + 1) / FPS` in
+    /// Handler+0x3A0 (and animator+0x40). Keep that seek calculation shared so
+    /// trigger-linked compatible owners can reuse it without duplicating the table.
+    /// Native `StateMarkerEnd 0x1600004A` resolves the bound Script resource and
+    /// stores `(script.length - 1) / ScriptFPS` in Handler+0x3A0 (and creator
+    /// context +0x40 when present). The handler always returns native zero.
+    pub fn state_marker_end_time_bits(&mut self, script_length: u32) -> Option<u32> {
+        let fps = f32::from_bits(self.bound_script_framerate_bits);
+        if !fps.is_finite() || fps <= 0.0 || script_length == 0 {
+            return None;
+        }
+        let seconds = (script_length as f32 - 1.0) / fps;
+        self.marker_time_bits_3a0 = seconds.to_bits();
+        Some(self.marker_time_bits_3a0)
+    }
+
+    /// Native `0x004179C0` used by ScriptLifecycle InventoryCheck receives a
+    /// marker-table index, not a marker UID. It seeks to row.frame / ScriptFPS,
+    /// except native clamps frame 0/1 to zero seconds.
+    pub fn seek_state_marker_index_frame_bits(&mut self, index: u32) -> Option<u32> {
+        let entry = *self.marker_table.get(index as usize)?;
+        if entry.frame < 0 {
+            return None;
+        }
+        let fps = f32::from_bits(self.bound_script_framerate_bits);
+        if !fps.is_finite() || fps <= 0.0 {
+            return None;
+        }
+        let seconds = if entry.frame <= 1 {
+            0.0
+        } else {
+            entry.frame as f32 / fps
+        };
+        self.marker_time_bits_3a0 = seconds.to_bits();
+        Some((seconds * fps).to_bits())
+    }
+
+    pub fn play_to_state_marker_time_bits(&mut self, marker_uid: u32) -> Option<u32> {
+        if marker_uid == u32::MAX || marker_uid == 0x5600_0000 {
+            return None;
+        }
+        let index = self
+            .marker_table
+            .iter()
+            .position(|entry| entry.marker_uid == Some(marker_uid))?;
+        let entry = self.marker_table[index];
+        self.marker_guard_3a4 = i16::try_from(index).unwrap_or(-1);
+        let fps = f32::from_bits(self.bound_script_framerate_bits);
+        if !fps.is_finite() || fps <= 0.0 {
+            return None;
+        }
+        let seconds = (entry.frame as f32 + 1.0) / fps;
+        self.marker_time_bits_3a0 = seconds.to_bits();
+        Some(self.marker_time_bits_3a0)
     }
 
     /// Exact terminal/non-terminal split from `0x00407E40 -> 0x00416AB0`.
@@ -730,6 +864,48 @@ pub fn cutscene_player_action(mode: Option<u32>) -> Option<RobotsCutscenePlayerA
 /// Engine-neutral host effects for the Cutscene-specific `Handler +0x5C`
 /// command family (`0x00407E40`). These plans deliberately preserve raw native
 /// arguments whenever the host-side meaning is not yet fully reconstructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RobotsInventoryCheckOutcome {
+    pub marker_index: Option<u32>,
+    pub script_override_uid: Option<u32>,
+}
+
+pub fn inventory_check_outcome(
+    semantic: &RobotsHandlerScriptCommandSemantic,
+    inventory_current: impl FnOnce(u32) -> i32,
+) -> Option<RobotsInventoryCheckOutcome> {
+    let RobotsHandlerScriptCommandSemantic::InventoryCheck {
+        owner_selector,
+        item,
+        quantity,
+        fallback_check_uid,
+        on_true,
+        on_false,
+        comparison,
+    } = semantic
+    else {
+        return None;
+    };
+    if *owner_selector != Some(0) {
+        return None;
+    }
+    let mut item = (*item)?;
+    let mut requested = native_script_ftol((*quantity)?);
+    if item == u32::MAX {
+        item = fallback_check_uid.filter(|uid| *uid != u32::MAX)?;
+        requested = 1;
+    }
+    let matched = comparison
+        .unwrap_or(crate::robots_runtime::events::RobotsInventoryComparison::GreaterOrEqual)
+        .matches(inventory_current(item), requested);
+    let selected = if matched { on_true } else { on_false };
+    Some(RobotsInventoryCheckOutcome {
+        marker_index: selected[0].filter(|value| !matches!(*value, 0 | u32::MAX | 0x5600_0000)),
+        script_override_uid: selected[1]
+            .filter(|value| !matches!(*value, 0 | u32::MAX | 0x5600_0000)),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RobotsCutsceneEffect {
@@ -749,6 +925,7 @@ pub enum RobotsCutsceneEffect {
         start: Option<i16>,
         length: Option<u16>,
     },
+    MessageRelay,
     MessageRelaySpecific {
         event_mask: Option<u32>,
         link_mask: Option<u8>,
@@ -761,9 +938,14 @@ pub enum RobotsCutsceneEffect {
         raw_flags: Option<u32>,
     },
     SetAlternateState,
+    ChangeScript {
+        script_uid: Option<u32>,
+        owner_selector: Option<u32>,
+    },
     WaitForText {
         args: [Option<u32>; 4],
         start: Option<i16>,
+        length: Option<u16>,
     },
     ExitScript,
     PositionCharacter {
@@ -814,6 +996,9 @@ pub fn plan_cutscene_effect(
     semantic: &RobotsHandlerScriptCommandSemantic,
 ) -> Option<RobotsCutsceneEffect> {
     match semantic {
+        RobotsHandlerScriptCommandSemantic::MessageRelay => {
+            Some(RobotsCutsceneEffect::MessageRelay)
+        }
         RobotsHandlerScriptCommandSemantic::MessageRelaySpecific { arg0, arg1 } => {
             Some(RobotsCutsceneEffect::MessageRelaySpecific {
                 event_mask: *arg0,
@@ -832,6 +1017,13 @@ pub fn plan_cutscene_effect(
         RobotsHandlerScriptCommandSemantic::SetAlternateState => {
             Some(RobotsCutsceneEffect::SetAlternateState)
         }
+        RobotsHandlerScriptCommandSemantic::ChangeScript {
+            script,
+            owner_selector,
+        } => Some(RobotsCutsceneEffect::ChangeScript {
+            script_uid: *script,
+            owner_selector: *owner_selector,
+        }),
         RobotsHandlerScriptCommandSemantic::CutsceneCommand {
             command,
             args,
@@ -859,6 +1051,7 @@ pub fn plan_cutscene_effect(
                 RobotsCutsceneCommandKind::WaitForText => RobotsCutsceneEffect::WaitForText {
                     args: args4,
                     start: *start,
+                    length: *length,
                 },
                 RobotsCutsceneCommandKind::ExitScript => RobotsCutsceneEffect::ExitScript,
                 RobotsCutsceneCommandKind::PositionCharacter => {
@@ -960,6 +1153,51 @@ mod tests {
     }
 
     #[test]
+    fn inventory_check_selects_marker_or_script_and_honors_fallback_check_uid() {
+        let semantic = RobotsHandlerScriptCommandSemantic::InventoryCheck {
+            owner_selector: Some(0),
+            item: Some(0x4700_0010),
+            quantity: Some(3.0),
+            fallback_check_uid: None,
+            on_true: [Some(2), Some(0x0400_1111)],
+            on_false: [None, Some(0x0400_2222)],
+            comparison: Some(
+                crate::robots_runtime::events::RobotsInventoryComparison::GreaterOrEqual,
+            ),
+        };
+        assert_eq!(
+            inventory_check_outcome(&semantic, |uid| {
+                assert_eq!(uid, 0x4700_0010);
+                3
+            }),
+            Some(RobotsInventoryCheckOutcome {
+                marker_index: Some(2),
+                script_override_uid: Some(0x0400_1111),
+            })
+        );
+
+        let fallback = RobotsHandlerScriptCommandSemantic::InventoryCheck {
+            owner_selector: Some(0),
+            item: Some(u32::MAX),
+            quantity: Some(99.0),
+            fallback_check_uid: Some(0x4700_0042),
+            on_true: [None, Some(0x0400_3333)],
+            on_false: [None, Some(0x0400_4444)],
+            comparison: Some(crate::robots_runtime::events::RobotsInventoryComparison::Equal),
+        };
+        assert_eq!(
+            inventory_check_outcome(&fallback, |uid| {
+                assert_eq!(uid, 0x4700_0042);
+                1
+            }),
+            Some(RobotsInventoryCheckOutcome {
+                marker_index: None,
+                script_override_uid: Some(0x0400_3333),
+            })
+        );
+    }
+
+    #[test]
     fn audio_scan_matches_native_streamed_sfx_music_and_opcode18_cutoff() {
         let mut commands = vec![sound_command(1, 0x1AF0_0123), sound_command(2, 0x1B00_0042)];
         commands.push(UXGeoScriptCommand {
@@ -984,6 +1222,121 @@ mod tests {
         assert!(scan.streamed_sfx_present_16c3);
         assert!(scan.music_present_16c4);
         assert_eq!(visited, vec![0x1AF0_0123]);
+    }
+
+    #[test]
+    fn wait_for_text_latch_rewinds_only_after_threshold_while_presentation_is_active() {
+        let mut runtime = RobotsCutsceneWaitForTextRuntime::default();
+        assert!(!runtime.active);
+        assert_eq!(runtime.threshold_frame, -1);
+
+        runtime.arm(8, 12);
+        assert_eq!(runtime.threshold_frame, 20);
+        assert_eq!(runtime.rewind_frame_bits_if_waiting(19.0, true, -1), None);
+        assert_eq!(
+            runtime.rewind_frame_bits_if_waiting(20.0, true, -1),
+            Some(8.0f32.to_bits())
+        );
+        assert_eq!(runtime.rewind_frame_bits_if_waiting(20.0, false, -1), None);
+        assert_eq!(runtime.rewind_frame_bits_if_waiting(20.0, true, 0), None);
+        assert_eq!(runtime.completed_choice(true, -1), None);
+        assert_eq!(runtime.completed_choice(true, 0), Some(0));
+        assert_eq!(runtime.completed_choice(true, 1), Some(1));
+        assert!(RobotsCutsceneWaitForTextRuntime::completed_choice_route_enabled(0, 0x02));
+        assert!(!RobotsCutsceneWaitForTextRuntime::completed_choice_route_enabled(0, 0x04));
+        assert!(RobotsCutsceneWaitForTextRuntime::completed_choice_route_enabled(1, 0x04));
+        assert!(!RobotsCutsceneWaitForTextRuntime::completed_choice_route_enabled(1, 0x02));
+
+        runtime.clear();
+        assert!(!runtime.active);
+        assert_eq!(runtime.start_frame, -1);
+        assert_eq!(runtime.threshold_frame, -1);
+    }
+
+    #[test]
+    fn inventory_check_marker_index_seek_matches_native_004179c0() {
+        let mut runtime = RobotsCutsceneStateMarkerRuntime {
+            marker_table: vec![
+                RobotsCutsceneStateMarkerEntry {
+                    frame: 1,
+                    marker_uid: Some(0x10),
+                },
+                RobotsCutsceneStateMarkerEntry {
+                    frame: 60,
+                    marker_uid: Some(0x20),
+                },
+            ],
+            bound_script_framerate_bits: 30.0f32.to_bits(),
+            ..Default::default()
+        };
+        assert_eq!(
+            runtime.seek_state_marker_index_frame_bits(0),
+            Some(0.0f32.to_bits())
+        );
+        assert_eq!(runtime.marker_time_bits_3a0, 0.0f32.to_bits());
+        assert_eq!(
+            runtime.seek_state_marker_index_frame_bits(1),
+            Some(60.0f32.to_bits())
+        );
+        assert_eq!(runtime.marker_time_bits_3a0, 2.0f32.to_bits());
+        assert_eq!(runtime.seek_state_marker_index_frame_bits(2), None);
+    }
+
+    #[test]
+    fn clear_state_marker_only_clears_when_native_guard_is_minus_one() {
+        let mut runtime = RobotsCutsceneStateMarkerRuntime {
+            marker_time_bits_3a0: 2.5f32.to_bits(),
+            marker_guard_3a4: -1,
+            ..Default::default()
+        };
+        assert!(runtime.clear_state_marker());
+        assert_eq!(runtime.marker_time_bits_3a0, 0.0f32.to_bits());
+
+        runtime.marker_time_bits_3a0 = 3.5f32.to_bits();
+        runtime.marker_guard_3a4 = 2;
+        assert!(!runtime.clear_state_marker());
+        assert_eq!(runtime.marker_time_bits_3a0, 3.5f32.to_bits());
+    }
+
+    #[test]
+    fn state_marker_end_matches_native_script_terminal_time() {
+        let mut runtime = RobotsCutsceneStateMarkerRuntime {
+            bound_script_framerate_bits: 30.0f32.to_bits(),
+            ..Default::default()
+        };
+        assert_eq!(
+            runtime.state_marker_end_time_bits(61),
+            Some(2.0f32.to_bits())
+        );
+        assert_eq!(runtime.marker_time_bits_3a0, 2.0f32.to_bits());
+        assert_eq!(runtime.state_marker_end_time_bits(0), None);
+    }
+
+    #[test]
+    fn play_to_state_marker_matches_native_00417cb0_seek_time() {
+        let mut runtime = RobotsCutsceneStateMarkerRuntime {
+            marker_table: vec![
+                RobotsCutsceneStateMarkerEntry {
+                    frame: 29,
+                    marker_uid: Some(0x5600_0011),
+                },
+                RobotsCutsceneStateMarkerEntry {
+                    frame: 59,
+                    marker_uid: Some(0x5600_0012),
+                },
+            ],
+            bound_script_framerate_bits: 30.0f32.to_bits(),
+            ..Default::default()
+        };
+        assert_eq!(
+            runtime.play_to_state_marker_time_bits(0x5600_0012),
+            Some(2.0f32.to_bits())
+        );
+        assert_eq!(runtime.marker_guard_3a4, 1);
+        assert_eq!(runtime.marker_time_bits_3a0, 2.0f32.to_bits());
+        assert_eq!(runtime.play_to_state_marker_time_bits(0x5600_0000), None);
+        assert_eq!(runtime.play_to_state_marker_time_bits(u32::MAX), None);
+        assert_eq!(runtime.play_to_state_marker_time_bits(0x5600_0099), None);
     }
 
     #[test]
@@ -1384,6 +1737,10 @@ mod tests {
 
     #[test]
     fn m10_delegated_effects_decode_exact_relay_and_camera_shake_contracts() {
+        assert_eq!(
+            plan_cutscene_effect(&RobotsHandlerScriptCommandSemantic::MessageRelay),
+            Some(RobotsCutsceneEffect::MessageRelay)
+        );
         assert_eq!(
             plan_cutscene_effect(&RobotsHandlerScriptCommandSemantic::MessageRelaySpecific {
                 arg0: Some(1),

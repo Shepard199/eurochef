@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     io::{BufReader, Seek, SeekFrom},
     sync::Arc,
@@ -49,6 +49,7 @@ type RobotsCharacterVisualMetadata = (
     BTreeMap<Hashcode, Arc<ProcessedCharacterAnimationTrack>>,
     BTreeMap<Hashcode, Arc<UXGeoScript>>,
     BTreeMap<Hashcode, ProcessedCharacterAnimDatum>,
+    BTreeMap<(Hashcode, Hashcode), usize>,
     BTreeMap<(Hashcode, Hashcode), Arc<ProcessedCharacterAnimationTrack>>,
 );
 
@@ -451,6 +452,39 @@ fn preview_anim_datums(
         }
     }
     Ok(datums)
+}
+
+fn preview_anim_bone_selectors(
+    edb: &mut EdbFile,
+    animskin: Hashcode,
+) -> anyhow::Result<BTreeMap<(Hashcode, Hashcode), usize>> {
+    if edb.header.version != 248 || edb.platform != Platform::Pc {
+        return Ok(BTreeMap::new());
+    }
+    let Some(header) = edb
+        .header
+        .animskin_list
+        .data()
+        .iter()
+        .find(|header| header.common.hashcode == animskin)
+        .cloned()
+    else {
+        return Ok(BTreeMap::new());
+    };
+    edb.seek(SeekFrom::Start(header.common.address as u64))?;
+    let endian = edb.endian;
+    let skin = edb.read_type_args::<EXGeoBaseAnimSkin>(endian, (248,))?;
+    let mut selectors = BTreeMap::new();
+    for (selector, bone_hashcode) in skin
+        .read_robots_v248_bone_hashcodes(edb, endian)?
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(bone_hashcode) = bone_hashcode {
+            selectors.insert((animskin, bone_hashcode), selector);
+        }
+    }
+    Ok(selectors)
 }
 
 fn preview_animation_track(
@@ -1002,6 +1036,21 @@ fn load_robots_character_visual_metadata(
                 Some(profile) => preview_anim_datums(&mut external_edb, profile.animskin)?,
                 None => BTreeMap::new(),
             };
+            let mut animskins = BTreeSet::new();
+            if let Some(profile) = collision.as_ref() {
+                animskins.insert(profile.animskin);
+            }
+            if let Some(track) = initial_animation.as_ref() {
+                animskins.insert(track.animskin);
+            }
+            animskins.extend(animation_modes.values().map(|track| track.animskin));
+            let mut animation_bone_selectors = BTreeMap::new();
+            for animskin in animskins {
+                animation_bone_selectors.extend(preview_anim_bone_selectors(
+                    &mut external_edb,
+                    animskin,
+                )?);
+            }
             let animation_mode_datum_tracks = preview_anim_mode_datum_tracks(
                 &mut external_edb,
                 &animation_modes,
@@ -1016,6 +1065,7 @@ fn load_robots_character_visual_metadata(
                 animation_modes,
                 animation_mode_scripts,
                 anim_datums,
+                animation_bone_selectors,
                 animation_mode_datum_tracks,
             )
         }
@@ -1028,6 +1078,7 @@ fn load_robots_character_visual_metadata(
                 None,
                 None,
                 None,
+                BTreeMap::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
                 BTreeMap::new(),
@@ -1077,6 +1128,7 @@ fn build_robots_character_visual(
         animation_modes,
         animation_mode_scripts,
         anim_datums,
+        animation_bone_selectors,
         animation_mode_datum_tracks,
     ) = load_robots_character_visual_metadata(
         file,
@@ -1116,6 +1168,7 @@ fn build_robots_character_visual(
         animation_modes,
         animation_mode_scripts,
         anim_datums,
+        animation_bone_selectors,
         animation_mode_datum_tracks,
         move_animation,
         turn_on_spot_l_animation,
@@ -1231,14 +1284,39 @@ mod tests {
     use nohash_hasher::IntMap;
 
     use super::{
-        preview_anim_datums, preview_anim_mode_bindings, preview_anim_mode_datum_tracks,
-        preview_collision_profile, preview_move_animation_track,
+        preview_anim_bone_selectors, preview_anim_datums, preview_anim_mode_bindings,
+        preview_anim_mode_datum_tracks, preview_collision_profile, preview_move_animation_track,
         preview_turn_on_spot_l_animation_track, preview_turn_on_spot_r_animation_track,
         resolve_robots_character_visuals, robots_character_hit_query_raw_group,
         robots_character_runtime_type, RobotsCharacterDatabase, ROBOTS_ANIM_MODE_MOVE,
         ROBOTS_CHARACTER_INITIAL_ANIMATION, ROBOTS_MONSTER_DATABASE_FILE,
     };
     use crate::maps::ProcessedCharacterCollisionShape;
+
+    #[test]
+    fn real_robots_v248_watchbot_collision_probe_when_game_root_is_configured() {
+        let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
+            return;
+        };
+        let path = Path::new(&game_root)
+            .join("_eurotools_out/extracted_main/robots/binary/_bin_pc/p02_wat.edb");
+        let file = File::open(&path).expect("open p02_wat.edb");
+        let mut edb =
+            EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc).expect("parse p02_wat.edb");
+        let collision = preview_collision_profile(&mut edb)
+            .expect("parse WatchBot collision")
+            .expect("WatchBot MapCollision profile");
+        assert_eq!(collision.animskin, 0x0D00_0001);
+        let ProcessedCharacterCollisionShape::Sphere { radius } = collision.shape else {
+            panic!("WatchBot MapCollision must remain a sphere");
+        };
+        assert!((radius - 0.4).abs() < 1.0e-6);
+        assert!((collision.local_center.x - -0.0043789386).abs() < 1.0e-6);
+        assert!((collision.local_center.y - 0.06099643).abs() < 1.0e-6);
+        assert!((collision.local_center.z - 0.00076886715).abs() < 1.0e-6);
+        assert_eq!(collision.local_orientation, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(collision.transform_selector, 0);
+    }
 
     #[test]
     fn serialized_character_types_use_the_exact_runtime_database_sheets() {
@@ -1262,6 +1340,49 @@ mod tests {
             );
         }
         assert_eq!(robots_character_hit_query_raw_group(4), None);
+    }
+
+    #[test]
+    fn real_robots_v248_thiefbot_object01_attachment_bone_when_game_root_is_configured() {
+        let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
+            return;
+        };
+        let path = Path::new(&game_root)
+            .join("_eurotools_out/extracted_main/robots/binary/_bin_pc/ew05_thi.edb");
+        let file = File::open(&path).expect("open ew05_thi.edb");
+        let mut edb =
+            EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc).expect("parse ew05_thi.edb");
+        let collision = preview_collision_profile(&mut edb)
+            .expect("parse ThiefBot collision")
+            .expect("ThiefBot MapCollision profile");
+        let object01 = eurochef_shared::robots_runtime::thiefbot::ROBOTS_THIEFBOT_ATTACHMENT_BONE_UID;
+        let selectors = preview_anim_bone_selectors(&mut edb, collision.animskin)
+            .expect("decode ThiefBot AnimBone selectors");
+        let selector = *selectors
+            .get(&(collision.animskin, object01))
+            .expect("ThiefBot Object01 selector");
+        let initial = super::preview_initial_animation_track(&mut edb, &collision)
+            .expect("decode ThiefBot initial animation")
+            .expect("ThiefBot initial animation track");
+        assert!(
+            initial.bone_chain.contains(&selector),
+            "ThiefBot initial animation chain must contain Object01 selector {selector}"
+        );
+
+        let (animation_modes, _) = preview_anim_mode_bindings(&mut edb, &collision)
+            .expect("decode ThiefBot AnimMode tracks");
+        assert!(!animation_modes.is_empty());
+        for (anim_mode, track) in animation_modes {
+            let selectors = preview_anim_bone_selectors(&mut edb, track.animskin)
+                .expect("decode ThiefBot mode AnimBone selectors");
+            let selector = *selectors
+                .get(&(track.animskin, object01))
+                .unwrap_or_else(|| panic!("ThiefBot AnimMode 0x{anim_mode:08X} missing Object01"));
+            assert!(
+                track.bone_chain.contains(&selector),
+                "ThiefBot AnimMode 0x{anim_mode:08X} chain must contain Object01 selector {selector}"
+            );
+        }
     }
 
     #[test]
@@ -2063,6 +2184,85 @@ mod tests {
 
         assert!(tracks.contains_key(&0x0900_0003));
         assert!(scripts.contains_key(&0x0900_0003));
+    }
+
+    #[test]
+    fn real_robots_v248_m06_path_bound_monsters_share_exact_handler_when_game_root_is_configured() {
+        let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
+            return;
+        };
+        let path = Path::new(&game_root)
+            .join("_eurotools_out/extracted_main/robots/binary/_bin_pc/m06_sewr.edb");
+        let file = File::open(&path).expect("open m06_sewr.edb");
+        let mut edb =
+            EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc).expect("parse m06_sewr.edb");
+        let maps = crate::maps::read_from_file(&mut edb);
+        let mut path_cache = IntMap::default();
+        for entry in std::fs::read_dir(path.parent().unwrap()).expect("scan Robots EDB folder") {
+            let indexed_path = entry.expect("EDB directory entry").path();
+            if indexed_path.extension().and_then(|value| value.to_str()) != Some("edb") {
+                continue;
+            }
+            let file = File::open(&indexed_path).expect("open indexed EDB");
+            let indexed_edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+                .expect("read indexed EDB header");
+            path_cache.insert(indexed_edb.header.hashcode, indexed_path.to_string_lossy().into_owned());
+        }
+        let mut maps = maps;
+        let resolved = resolve_robots_character_visuals(
+            &mut edb, &mut maps, &path_cache, Platform::Pc,
+        ).expect("resolve m06 MonsterDatabase visuals");
+        assert!(resolved >= 5);
+        let map = maps.first().expect("m06 map");
+        let mut rows = Vec::new();
+        for (trigger_index, trigger) in map.triggers.iter().enumerate() {
+            if trigger.ttype != 74 {
+                continue;
+            }
+            let path_uid = trigger.data.get(2).copied().flatten();
+            if !path_uid.is_some_and(|uid| {
+                uid != 0x0B00_0000 && uid & 0xFF00_0000 == 0x0B00_0000
+            }) {
+                continue;
+            }
+            let visual = trigger
+                .character_visual
+                .as_ref()
+                .expect("path-bound Monster character visual");
+            rows.push((
+                trigger_index,
+                trigger.data.first().copied().flatten(),
+                path_uid,
+                visual.file,
+                visual.handler_class,
+            ));
+        }
+        eprintln!("M06_PATH_BOUND_MONSTERS={rows:?}");
+        assert_eq!(rows.len(), 5);
+        assert!(rows.iter().all(|row| row.1 == Some(1)));
+        assert!(rows.iter().all(|row| {
+            row.4 == eurochef_shared::robots_runtime::ai_character::RobotsAiHandlerClass::Ef01Mine
+        }));
+        for (_, _, path_uid, _, _) in &rows {
+            let path = map.paths.iter().find(|path| Some(path.hashcode) == *path_uid)
+                .expect("serialized EF01 flying path resolves in m06");
+            let points = path.nodes.iter()
+                .map(|node| (path.position + node.position).to_array())
+                .collect::<Vec<_>>();
+            let mut flight = eurochef_shared::robots_runtime::follow_flying_path::RobotsFollowFlyingPathRuntimeState::default();
+            assert!(flight.bind_path(&points, path.path_type == 1));
+            let step = flight.advance_fixed(
+                eurochef_shared::robots_runtime::follow_flying_path::RobotsFollowFlyingPathConfig::ef01(),
+                0.0,
+                1.0,
+            ).expect("EF01 first fixed path tick");
+            let position = step.owner_position_xyz.expect("flying path commits owner XYZ");
+            assert!(position.iter().all(|value| value.is_finite()));
+            assert!(step.path_parameter > 0.0);
+        }
+        assert!(rows
+            .windows(2)
+            .all(|pair| pair[0].3 == pair[1].3 && pair[0].4 == pair[1].4));
     }
 
     #[test]
@@ -3464,6 +3664,74 @@ mod tests {
     }
 
     #[test]
+    fn real_robots_v248_attach_entity_datums_share_object01_when_game_root_is_configured() {
+        let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
+            return;
+        };
+        let root =
+            Path::new(&game_root).join("_eurotools_out/extracted_main/robots/binary/_bin_pc");
+        let mut path_cache = IntMap::default();
+        for entry in std::fs::read_dir(&root).expect("could not scan Robots EDB folder") {
+            let path = entry.expect("bad EDB directory entry").path();
+            if path.extension().and_then(|value| value.to_str()) != Some("edb") {
+                continue;
+            }
+            let file = File::open(&path).expect("could not open indexed EDB");
+            let edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+                .expect("indexed EDB header did not parse");
+            path_cache.insert(edb.header.hashcode, path);
+        }
+
+        for (label, file_uid, needs_secondary) in [
+            ("EF01", 0x0100_0048, false),
+            ("EF03", 0x0100_0057, false),
+            ("EB14", 0x0100_0056, false),
+            ("EW10", 0x0100_004F, true),
+            ("EQ03", 0x0100_004B, true),
+        ] {
+            let path = path_cache
+                .get(&file_uid)
+                .unwrap_or_else(|| panic!("{label} EDB 0x{file_uid:08X} was not indexed"));
+            let file = File::open(path).unwrap_or_else(|_| panic!("open {label} EDB"));
+            let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+                .unwrap_or_else(|_| panic!("parse {label} EDB"));
+            let collision = preview_collision_profile(&mut edb)
+                .unwrap_or_else(|_| panic!("parse {label} collision"))
+                .unwrap_or_else(|| panic!("{label} MapCollision profile"));
+            let datums = preview_anim_datums(&mut edb, collision.animskin)
+                .unwrap_or_else(|_| panic!("decode {label} datums"));
+            let selectors = preview_anim_bone_selectors(&mut edb, collision.animskin)
+                .unwrap_or_else(|_| panic!("decode {label} bone selectors"));
+            let object01_selector = *selectors
+                .get(&(collision.animskin, 0x0E00_0070))
+                .unwrap_or_else(|| panic!("{label} Object01 selector"));
+            let primary = datums
+                .get(&0x1000_0019)
+                .unwrap_or_else(|| panic!("{label} AnimatorPosition"));
+            assert_eq!(
+                usize::from(primary.transform_selector),
+                object01_selector,
+                "{label} AnimatorPosition must be Object01-local for native AttachEntity"
+            );
+            if needs_secondary {
+                let secondary = datums
+                    .get(&0x1000_001A)
+                    .unwrap_or_else(|| panic!("{label} AnimatorRotation"));
+                assert_eq!(
+                    usize::from(secondary.transform_selector),
+                    object01_selector,
+                    "{label} AnimatorRotation must be Object01-local for native AttachEntity"
+                );
+            }
+            eprintln!(
+                "{label} Object01 selector={object01_selector} primary={:?} secondary={:?}",
+                primary.local_center,
+                datums.get(&0x1000_001A).map(|datum| datum.local_center)
+            );
+        }
+    }
+
+    #[test]
     fn real_robots_v248_ew10_eb14_attack_events_when_game_root_is_configured() {
         let Ok(game_root) = std::env::var("EUROCHEF_ROBOTS_GAME_ROOT") else {
             return;
@@ -4192,6 +4460,64 @@ mod tests {
                 .expect("indexed EDB header did not parse");
             path_cache.insert(edb.header.hashcode, path.to_string_lossy().into_owned());
         }
+        let path_bound_npcs = maps
+            .iter()
+            .flat_map(|map| {
+                map.triggers.iter().filter_map(move |trigger| {
+                    if trigger.ttype != 48 {
+                        return None;
+                    }
+                    let selector = trigger.data.first().copied().flatten()?;
+                    let path_uid = trigger.data.get(1).copied().flatten()?;
+                    if path_uid == 0x0B00_0000 || path_uid & 0xFF00_0000 != 0x0B00_0000 {
+                        return None;
+                    }
+                    let path_exists = map.paths.iter().any(|path| path.hashcode == path_uid);
+                    Some((selector, path_uid, path_exists))
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !path_bound_npcs.is_empty(),
+            "m98_npcs must retain shipped FollowNetworkPath NPCs"
+        );
+        for (selector, path_uid, path_exists) in path_bound_npcs.iter().copied() {
+            assert!(
+                path_exists,
+                "NPC selector {selector} references missing path 0x{path_uid:08X}"
+            );
+            let character_file = database
+                .file_for_runtime_selector(11, selector as usize)
+                .unwrap_or_else(|| panic!("NPC selector {selector} character file"));
+            let file = File::open(
+                path_cache
+                    .get(&character_file)
+                    .unwrap_or_else(|| panic!("NPC selector {selector} EDB was not indexed")),
+            )
+            .unwrap_or_else(|_| panic!("open NPC selector {selector} EDB"));
+            let mut character_edb =
+                EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+                    .unwrap_or_else(|_| panic!("parse NPC selector {selector} EDB"));
+            let collision = preview_collision_profile(&mut character_edb)
+                .unwrap_or_else(|_| panic!("decode NPC selector {selector} collision"))
+                .unwrap_or_else(|| panic!("NPC selector {selector} MapCollision profile"));
+            let move_track = preview_move_animation_track(&mut character_edb, &collision)
+                .unwrap_or_else(|_| panic!("decode NPC selector {selector} Move track"))
+                .unwrap_or_else(|| panic!("NPC selector {selector} Move AnimMode track"));
+            let root_motion_distance = move_track
+                .root_motion_samples
+                .windows(2)
+                .map(|samples| (samples[1].position - samples[0].position).length())
+                .sum::<f32>();
+            assert!(
+                root_motion_distance > 1.0e-4,
+                "NPC selector {selector} path 0x{path_uid:08X} Move track has no translational root motion"
+            );
+            eprintln!(
+                "NPC selector={selector} path=0x{path_uid:08X} Move root_motion_distance={root_motion_distance:.6}"
+            );
+        }
+
         let diner_file = database
             .file_for_runtime_selector(11, 8)
             .expect("NPC selector8 diner file");
@@ -4598,4 +4924,232 @@ mod tests {
                 .any(|(file, object)| *file == visual.file && *object == visual.script)
         }));
     }
+    #[test]
+    fn real_m03_hub1_flag2_npcs_have_live_move_root_motion_when_requested() {
+        let Ok(hub_path) = std::env::var("EUROCHEF_REAL_M03_HUB1_EDB") else {
+            return;
+        };
+        let hub_path = Path::new(&hub_path);
+        let root = hub_path.parent().expect("m03_hub1 fixture has no parent");
+
+        let mut path_cache = IntMap::default();
+        for entry in std::fs::read_dir(root).expect("could not scan Robots EDB folder") {
+            let path = entry.expect("bad EDB directory entry").path();
+            if path.extension().and_then(|value| value.to_str()) != Some("edb") {
+                continue;
+            }
+            let file = File::open(&path).expect("could not open indexed EDB");
+            let edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+                .expect("indexed EDB header did not parse");
+            path_cache.insert(edb.header.hashcode, path.to_string_lossy().into_owned());
+        }
+        assert!(path_cache.contains_key(&ROBOTS_MONSTER_DATABASE_FILE));
+
+        let hub_file = File::open(hub_path).expect("could not open m03_hub1.edb");
+        let mut hub_edb = EdbFile::new(Box::new(BufReader::new(hub_file)), Platform::Pc)
+            .expect("m03_hub1.edb did not parse");
+        let mut maps = crate::maps::read_from_file(&mut hub_edb);
+        resolve_robots_character_visuals(&mut hub_edb, &mut maps, &path_cache, Platform::Pc)
+            .expect("Hub character visuals did not resolve");
+
+        let entity_edb_file = File::open(hub_path).expect("could not reopen m03_hub1.edb");
+        let mut entity_edb = EdbFile::new(Box::new(BufReader::new(entity_edb_file)), Platform::Pc)
+            .expect("m03_hub1 entities fixture did not parse");
+        let (entities, _, _) = crate::entities::read_from_file(&mut entity_edb, None)
+            .expect("m03_hub1 entities did not parse");
+        let regions = crate::maps::processed_navigation_regions_from_placements(
+            &maps.first().expect("m03_hub1 map missing").placements,
+            &entities,
+        );
+        let nav_views = regions
+            .iter()
+            .map(|region| eurochef_shared::robots_runtime::monster_navigation::RobotsMonsterNavMeshView {
+                vertices: &region.navmesh.vertices,
+                faces: &region.navmesh.faces,
+                adjacency: &region.navmesh.adjacency,
+                groups: &region.navmesh.groups,
+            })
+            .collect::<Vec<_>>();
+
+        let flag2_npcs = maps
+            .iter()
+            .flat_map(|map| &map.triggers)
+            .filter(|trigger| {
+                trigger.ttype == 48
+                    && crate::maps::robots_npc_flags(trigger.ttype, &trigger.data)
+                        .unwrap_or_default()
+                        & 0x2
+                        != 0
+            })
+            .collect::<Vec<_>>();
+        assert!(!flag2_npcs.is_empty(), "m03_hub1 has no Flag2 NPC fixtures");
+
+        for trigger in flag2_npcs {
+            let visual = trigger
+                .character_visual
+                .as_ref()
+                .expect("Flag2 NPC visual was not resolved");
+            assert!(visual.collision.is_some(), "Flag2 NPC has no gameplay collision body");
+            let track = visual
+                .animation_modes
+                .get(&ROBOTS_ANIM_MODE_MOVE)
+                .expect("Flag2 NPC has no Move AnimMode track");
+            let first_root = track.root_motion_samples.first().map(|sample| sample.position);
+            let last_root = track.root_motion_samples.last().map(|sample| sample.position);
+            let full_cycle_delta = (0..track.frame_count)
+                .filter_map(|tick| crate::map_runtime::runtime_character_track_root_motion_delta(
+                    track, tick as f32 / track.clip_rate as f32,
+                    1.0 / track.clip_rate as f32, 1.0,
+                ))
+                .fold(glam::Vec3::ZERO, |sum, delta| sum + delta.native_translation);
+            let shipped_clip_stride = last_root.unwrap().distance(first_root.unwrap());
+            assert!(
+                full_cycle_delta.length() >= shipped_clip_stride * 0.75,
+                "Flag2 NPC selector {} reversed its Move root trajectory at the animation loop: cycle={full_cycle_delta:?} stored_stride={shipped_clip_stride}",
+                visual.config_index
+            );
+            let mut nonzero_root_motion = false;
+            let ticks = track.frame_count.saturating_mul(2).max(1);
+            for tick in 0..ticks {
+                let seconds = tick as f32 / 60.0;
+                if let Some(delta) = crate::map_runtime::runtime_character_track_root_motion_delta(
+                    track,
+                    seconds,
+                    1.0 / 60.0,
+                    1.0,
+                ) {
+                    if delta.native_translation.length_squared() > 1.0e-12 {
+                        nonzero_root_motion = true;
+                        break;
+                    }
+                }
+            }
+            assert!(
+                nonzero_root_motion,
+                "Flag2 NPC file 0x{:08X} selector {} has Move but no translational root motion",
+                visual.file,
+                visual.config_index
+            );
+
+            let mut nav_state = eurochef_shared::robots_runtime::monster_navigation::RobotsMonsterNavigationRuntimeState::default();
+            assert!(nav_state.maintain(&nav_views, trigger.position.to_array()));
+            let region_ordinal = nav_state.region_ordinal.expect("Flag2 NPC region missing");
+            let current_face = nav_state.face_index.expect("Flag2 NPC face missing");
+            let group_flags0 = nav_state.group_flags0.expect("Flag2 NPC group missing");
+            let nav = nav_views[region_ordinal];
+            let mut flag2 = eurochef_shared::robots_runtime::npc_behavior::RobotsNpcFlag2RuntimeState::default();
+            eurochef_shared::robots_runtime::npc_behavior::enter_npc_flag2(
+                &mut flag2,
+                nav,
+                current_face,
+                group_flags0,
+                Some([1, 2, 3, 3, 1]),
+            );
+            let action = eurochef_shared::robots_runtime::npc_behavior::step_npc_flag2(
+                &mut flag2,
+                nav,
+                trigger.position.to_array(),
+                current_face,
+                group_flags0,
+                0.0,
+                None,
+            );
+            let (target_yaw_radians, target_locomotion_scalar, turn_rate_radians_per_second) =
+                match action {
+                    eurochef_shared::robots_runtime::npc_behavior::RobotsNpcFlag2Action::SteerToWaypoint {
+                        target_yaw_radians,
+                        target_locomotion_scalar,
+                        turn_rate_radians_per_second,
+                    } => (
+                        target_yaw_radians,
+                        target_locomotion_scalar,
+                        turn_rate_radians_per_second,
+                    ),
+                    other => panic!(
+                        "Flag2 NPC file 0x{:08X} selector {} did not produce steering action: {other:?}",
+                        visual.file,
+                        visual.config_index
+                    ),
+                };
+            let mut locomotion = eurochef_shared::robots_runtime::locomotion::RobotsAiLocomotionRuntimeState::default();
+            let locomotion_step = eurochef_shared::robots_runtime::locomotion::step_ai_locomotion_after_steering_prepass(
+                &mut locomotion,
+                eurochef_shared::robots_runtime::locomotion::RobotsAiLocomotionInput {
+                    steering_target_yaw_radians: target_yaw_radians,
+                    target_locomotion_scalar,
+                    turn_rate: eurochef_shared::robots_runtime::locomotion::RobotsAiTurnRateInput::Explicit(
+                        turn_rate_radians_per_second,
+                    ),
+                    handler_flags_628: visual.handler_flags_628,
+                    move_mode_active_on_entry: false,
+                    current_owner_yaw_radians: trigger.rotation[1],
+                    runtime_rate_scale: 1.0,
+                },
+            );
+            assert!(
+                matches!(
+                    locomotion_step.requested_anim_mode,
+                    0x0900_0003 | 0x0900_0028 | 0x0900_0035 | 0x0900_0036
+                ),
+                "Flag2 steering requested unexpected AnimMode 0x{:08X}",
+                locomotion_step.requested_anim_mode
+            );
+            let requested_track = visual
+                .animation_modes
+                .get(&locomotion_step.requested_anim_mode)
+                .expect("Flag2 locomotion requested an AnimMode with no decoded track");
+            if locomotion_step.requested_anim_mode == ROBOTS_ANIM_MODE_MOVE {
+                assert_eq!(
+                    locomotion_step.locomotion_scalar,
+                    eurochef_shared::robots_runtime::npc_behavior::ROBOTS_NPC_FLAG2_TARGET_LOCOMOTION_SCALAR
+                );
+            } else {
+                assert!(locomotion_step.turn_in_place_active);
+                if !locomotion_step.direct_owner_yaw_write {
+                    let rotational_root_motion = requested_track
+                        .root_motion_samples
+                        .windows(2)
+                        .any(|pair| {
+                            let q0 = pair[0].rotation;
+                            let mut q1 = pair[1].rotation;
+                            if q0.dot(q1) < 0.0 {
+                                q1 = -q1;
+                            }
+                            (q1 * q0.conjugate()).normalize().angle_between(glam::Quat::IDENTITY)
+                                > 1.0e-6
+                        });
+                    assert!(
+                        rotational_root_motion,
+                        "directional Flag2 TurnOnSpot track has no rotational root motion"
+                    );
+                }
+            }
+
+            let mut body = crate::map_runtime::RuntimeCharacterBodyState::from_trigger(trigger)
+                .expect("Flag2 NPC could not create RuntimeCharacterBodyState");
+            let start = body.owner_position;
+            let mut moved = false;
+            for tick in 0..ticks {
+                let seconds = tick as f32 / 60.0;
+                let Some(delta) = crate::map_runtime::runtime_character_track_root_motion_delta(
+                    track,
+                    seconds,
+                    1.0 / 60.0,
+                    1.0,
+                ) else {
+                    continue;
+                };
+                if delta.native_translation.length_squared() <= 1.0e-12 {
+                    continue;
+                }
+                body.apply_local_root_motion_delta(delta);
+                moved = body.owner_position.distance_squared(start) > 1.0e-12;
+                if moved {
+                    break;
+                }
+            }
+            assert!(moved, "Flag2 NPC Move root motion did not change owner position");
+        }
+    }
+
 }

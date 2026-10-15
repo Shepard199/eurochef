@@ -1,4 +1,7 @@
-use super::{runtime_ai::horizontal_yaw, MapFrame};
+use super::{
+    runtime_ai::horizontal_yaw, runtime_pickup::NativeDynamicPickupSpawnRequest,
+    runtime_script_xitem::NativeScriptXItemSpawnRequest, MapFrame,
+};
 use crate::{
     map_runtime::{
         runtime_map_projectile_static_world_contact_detail, RuntimeCharacterDatumWorldTransform,
@@ -22,6 +25,7 @@ use eurochef_shared::robots_runtime::{
         RobotsExplosionRuntimeState, ROBOTS_EXPLOSION_FRAGMENT_ANIM_DATUM,
         ROBOTS_EXPLOSION_FRAGMENT_HIT_QUERY_FLAG, ROBOTS_EXPLOSION_FRAGMENT_HIT_QUERY_RADIUS,
         ROBOTS_EXPLOSION_FRAGMENT_MAX_HANDLER_UPDATES,
+        ROBOTS_EXPLOSION_FRAGMENT_PICKUP_EFFECT_SCRIPT_UID,
         ROBOTS_EXPLOSION_FRAGMENT_RUNTIME_PLAYER_PICKUP_LATCH,
         ROBOTS_EXPLOSION_FRAGMENT_RUNTIME_TEARDOWN_FLAG, ROBOTS_EXPLOSION_GENERATION_ANIM_DATUM,
     },
@@ -36,7 +40,7 @@ use eurochef_shared::robots_runtime::{
     },
     projectile::RobotsProjectilePhysicsRuntimeState,
 };
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 /// UE-facing spawn request for native `0x004DC510` explosion creation.
 ///
@@ -49,6 +53,11 @@ pub(super) struct NativeAiExplosionSpawnRequest {
     pub(super) source_body_key: u64,
     pub(super) explosion_uid: u32,
     pub(super) position: Vec3,
+    /// Monster-owned explosions may replace the owner position with animation datums.
+    /// Projectile terminal explosions originate from the projectile XItem itself and must not.
+    pub(super) resolve_source_character_datums: bool,
+    /// Explicit source yaw when the creator is not represented by a character body.
+    pub(super) source_yaw_radians: Option<f32>,
 }
 
 impl NativeAiExplosionSpawnRequest {
@@ -57,6 +66,23 @@ impl NativeAiExplosionSpawnRequest {
             source_body_key,
             explosion_uid,
             position,
+            resolve_source_character_datums: true,
+            source_yaw_radians: None,
+        }
+    }
+
+    pub(super) const fn projectile_terminal(
+        source_body_key: u64,
+        explosion_uid: u32,
+        position: Vec3,
+        source_yaw_radians: f32,
+    ) -> Self {
+        Self {
+            source_body_key,
+            explosion_uid,
+            position,
+            resolve_source_character_datums: false,
+            source_yaw_radians: Some(source_yaw_radians),
         }
     }
 }
@@ -127,19 +153,6 @@ pub(super) struct NativeAiExplosionFragmentSpawnRequest {
     /// Exact initial `XItemPhysics_Projectile` state when the shipped ballistic branch
     /// is representable. Collision/contact remains owned by the common host layer.
     pub(super) physics: Option<RobotsProjectilePhysicsRuntimeState>,
-}
-
-/// Dynamic Pickup/resource spawn emitted by generic fragment teardown `0x004DBB20`.
-/// This deliberately does not pretend to be a serialized XTrigger_Pickup: UE/host
-/// owns the spawned XItem/Actor while the request preserves native UID/quantity/position.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct NativeAiExplosionFragmentPickupSpawnRequest {
-    pub(super) source_body_key: u64,
-    pub(super) explosion_uid: u32,
-    pub(super) fragment_uid: u32,
-    pub(super) pickup_uid: u32,
-    pub(super) quantity: i32,
-    pub(super) position: Vec3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -220,6 +233,23 @@ impl NativeAiExplosionFragmentRuntime {
             .unwrap_or_else(|| Vec3::from_array(self.physics.position_xyz))
     }
 
+    /// Native `0x004DBF90 -> 0x00404480` inherits the collected fragment's file
+    /// and current owner transform when it creates the short pickup effect.
+    /// Shipped Scrap starts with zero orientation/angular lanes, so the common
+    /// transient Script host's identity presentation is exact for this producer.
+    fn pickup_effect_script_spawn(&self) -> NativeScriptXItemSpawnRequest {
+        let position = self.position();
+        NativeScriptXItemSpawnRequest {
+            // The common Script host keeps this field as provenance only. The
+            // fragment has no separate Maps body key yet, so retain its source.
+            owner_key: self.source_body_key,
+            file_uid: self.definition.file_uid,
+            script_uid: ROBOTS_EXPLOSION_FRAGMENT_PICKUP_EFFECT_SCRIPT_UID,
+            position_xyzw: [position.x, position.y, position.z, 0.0],
+            rotation: glam::Quat::IDENTITY,
+        }
+    }
+
     fn hit_query_shape(&self) -> RuntimeCharacterWorldShape {
         RobotsHitShape::Sphere {
             center_xyz: self.position().to_array(),
@@ -237,26 +267,27 @@ impl NativeAiExplosionFragmentRuntime {
     fn teardown_with_pickup_position(
         &mut self,
         pickup_position: Option<Vec3>,
-    ) -> Option<NativeAiExplosionFragmentPickupSpawnRequest> {
+    ) -> Option<NativeDynamicPickupSpawnRequest> {
         if self.pending_destroy {
             return None;
         }
         let pickup = pickup_position
             .filter(|_| self.definition.pickup_uid != u32::MAX)
-            .map(|position| NativeAiExplosionFragmentPickupSpawnRequest {
-                source_body_key: self.source_body_key,
-                explosion_uid: self.explosion_uid,
-                fragment_uid: self.fragment_uid,
+            .map(|position| NativeDynamicPickupSpawnRequest {
+                source_owner_key: self.source_body_key,
+                resource_file_uid: self.definition.file_uid,
+                resource_uid: self.definition.script_uid,
                 pickup_uid: self.definition.pickup_uid,
-                quantity: i32::from(self.definition.pickup_quantity()),
+                owner_datum_264: i32::from(self.definition.pickup_quantity()),
                 position,
+                rotation: glam::Quat::IDENTITY,
             });
         self.handler_flags |= ROBOTS_EXPLOSION_FRAGMENT_RUNTIME_TEARDOWN_FLAG;
         self.pending_destroy = true;
         pickup
     }
 
-    fn generic_teardown(&mut self) -> Option<NativeAiExplosionFragmentPickupSpawnRequest> {
+    fn generic_teardown(&mut self) -> Option<NativeDynamicPickupSpawnRequest> {
         let pickup_position = robots_explosion_fragment_teardown_emits_pickup(self.handler_flags)
             .then(|| self.position());
         self.teardown_with_pickup_position(pickup_position)
@@ -265,7 +296,7 @@ impl NativeAiExplosionFragmentRuntime {
     fn apply_static_world_contact(
         &mut self,
         contact: RuntimeProjectileStaticWorldContact,
-    ) -> Option<NativeAiExplosionFragmentPickupSpawnRequest> {
+    ) -> Option<NativeDynamicPickupSpawnRequest> {
         if self.pending_destroy || contact.contact_bits & 0x0001 == 0 {
             return None;
         }
@@ -288,12 +319,14 @@ impl NativeAiExplosionFragmentRuntime {
         None
     }
 
-    fn advance_physics_fixed(&mut self, player_position: Vec3, game_control_mode: u8) {
+    fn advance_physics_fixed(&mut self, player_position: Option<Vec3>, game_control_mode: u8) {
         if self.pending_destroy {
             return;
         }
         if let Some(physics) = self.pickup_attract_physics.as_mut() {
-            let _ = physics.advance_fixed(player_position.to_array(), game_control_mode, 1.0);
+            if let Some(player_position) = player_position {
+                let _ = physics.advance_fixed(player_position.to_array(), game_control_mode, 1.0);
+            }
             return;
         }
         self.physics.advance_fixed(1.0, false);
@@ -367,7 +400,7 @@ impl NativeAiExplosionFragmentRuntime {
     fn advance_handler_fixed(
         &mut self,
         engine_frame_counter: u32,
-    ) -> Option<NativeAiExplosionFragmentPickupSpawnRequest> {
+    ) -> Option<NativeDynamicPickupSpawnRequest> {
         if self.pending_destroy {
             return None;
         }
@@ -410,7 +443,7 @@ impl NativeAiExplosionFragmentRuntime {
         // Test/helper wrapper preserving the native Physics -> Handler order. Runtime
         // hosting calls the split methods so world contact can run between them. Frame
         // value 1 deliberately misses the default test phase 0.
-        self.advance_physics_fixed(Vec3::ZERO, 0);
+        self.advance_physics_fixed(Some(Vec3::ZERO), 0);
         let _ = self.advance_handler_fixed(1);
     }
 }
@@ -588,7 +621,8 @@ impl MapFrame {
         &mut self,
         fragment: NativeAiExplosionFragmentSpawnRequest,
     ) {
-        self.native_ai_explosion_fragment_spawns.push(fragment);
+        // Materialize directly into retained child-XItem runtime below; do not mirror
+        // this into a second producer-only queue. UE can consume retained runtime state.
         // Native 0x004DD1D7 consumes the Handler+0x478 serial first; the nested
         // 0x00425A70 then consumes the immediately following embedded-query serial.
         let cadence_phase_48c = robots_explosion_fragment_allocate_cadence_phase(
@@ -621,16 +655,26 @@ impl MapFrame {
             let Some(definition) = database.definition(request.explosion_uid).copied() else {
                 continue;
             };
-            let generation_transform = self.runtime_ai_animation_datum_world_transform_by_key(
-                map,
-                request.source_body_key,
-                ROBOTS_EXPLOSION_GENERATION_ANIM_DATUM,
-            );
-            let fragment_generation_shape = self.runtime_ai_animation_datum_world_shape_by_key(
-                map,
-                request.source_body_key,
-                ROBOTS_EXPLOSION_FRAGMENT_ANIM_DATUM,
-            );
+            let generation_transform = request
+                .resolve_source_character_datums
+                .then(|| {
+                    self.runtime_ai_animation_datum_world_transform_by_key(
+                        map,
+                        request.source_body_key,
+                        ROBOTS_EXPLOSION_GENERATION_ANIM_DATUM,
+                    )
+                })
+                .flatten();
+            let fragment_generation_shape = request
+                .resolve_source_character_datums
+                .then(|| {
+                    self.runtime_ai_animation_datum_world_shape_by_key(
+                        map,
+                        request.source_body_key,
+                        ROBOTS_EXPLOSION_FRAGMENT_ANIM_DATUM,
+                    )
+                })
+                .flatten();
             self.native_ai_explosion_main_spawns
                 .push(NativeAiExplosionMainSpawnRequest {
                     source_body_key: request.source_body_key,
@@ -650,10 +694,11 @@ impl MapFrame {
                 ),
                 None => (None, None),
             };
-            let source_yaw_radians = self
-                .runtime_character_bodies
-                .get(&request.source_body_key)
-                .map(|body| horizontal_yaw(body.owner_rotation));
+            let source_yaw_radians = request.source_yaw_radians.or_else(|| {
+                self.runtime_character_bodies
+                    .get(&request.source_body_key)
+                    .map(|body| horizontal_yaw(body.owner_rotation))
+            });
             // `0x004DC510` seeds the generic factory position from owner +0xD0..+0xDC,
             // then replaces that vec4 with HT_AnimDatum_ExplosionGeneration when present.
             // The companion orientation vec4 passed to the factory is explicitly zeroed.
@@ -699,6 +744,26 @@ impl MapFrame {
             }
             self.native_ai_explosions.push(runtime);
         }
+
+        // `0x004DC510` creates the FX03 main Script as a generic Script XItem.
+        // Route it into the existing shared Script-XItem host instead of retaining
+        // a producer-only queue that can never execute its gameplay commands.
+        let main_spawns = std::mem::take(&mut self.native_ai_explosion_main_spawns);
+        self.native_script_xitem_spawns
+            .extend(main_spawns.into_iter().filter_map(|spawn| {
+                if spawn.script_uid == u32::MAX || spawn.file_uid == u32::MAX {
+                    return None;
+                }
+                let position =
+                    native_explosion_main_position(spawn.position, spawn.generation_transform);
+                Some(NativeScriptXItemSpawnRequest {
+                    owner_key: spawn.source_body_key,
+                    file_uid: spawn.file_uid,
+                    script_uid: spawn.script_uid,
+                    position_xyzw: [position.x, position.y, position.z, 1.0],
+                    rotation: Quat::IDENTITY,
+                })
+            }));
     }
 
     /// Common `XItemPhysics_Projectile::Update` followed by the later
@@ -707,10 +772,11 @@ impl MapFrame {
     pub(super) fn advance_native_ai_explosion_fragments_fixed(
         &mut self,
         map: &ProcessedMap,
-        player_position: Vec3,
+        player_position: Option<Vec3>,
     ) {
         let mut fragments = std::mem::take(&mut self.native_ai_explosion_fragments);
         let mut pickup_spawns = Vec::new();
+        let mut script_spawns = Vec::new();
         let engine_frame_counter = self.native_ai_engine_frame_counter;
         let game_control_mode = self.native_game_control_runtime.mode_50f;
         for fragment in &mut fragments {
@@ -780,16 +846,22 @@ impl MapFrame {
                     .iter()
                     .copied()
                     .find(|definition| definition.uid == fragment.definition.pickup_uid);
-                let _ = fragment.service_player_pickup_tail(
+                if player_position.is_some_and(|player_position| fragment.service_player_pickup_tail(
                     player_position,
                     definition,
                     &mut self.native_script_gameplay_state.inventory,
-                );
+                )) {
+                    // `0x004DBF90` no-Script branch destroys the fragment and then
+                    // immediately creates `0x040002F9` through generic Script-XItem
+                    // ownership. Materialization happens in the existing common
+                    // consumer later in this same fixed tick.
+                    script_spawns.push(fragment.pickup_effect_script_spawn());
+                }
             }
         }
         self.native_ai_explosion_fragments = fragments;
-        self.native_ai_explosion_fragment_pickup_spawns
-            .extend(pickup_spawns);
+        self.native_dynamic_pickup_spawns.extend(pickup_spawns);
+        self.native_script_xitem_spawns.extend(script_spawns);
     }
 
     /// Native fragment teardown uses the same deferred XItem destruction model as other
@@ -918,6 +990,7 @@ mod tests {
             animation_modes: Default::default(),
             animation_mode_scripts: Default::default(),
             anim_datums: Default::default(),
+            animation_bone_selectors: Default::default(),
             animation_mode_datum_tracks: Default::default(),
             move_animation: None,
             turn_on_spot_l_animation: None,
@@ -1137,11 +1210,11 @@ mod tests {
         };
         let mut runtime = NativeAiExplosionFragmentRuntime::from_spawn(spawn, 6, 11, 12).unwrap();
         let pickup = runtime.generic_teardown().expect("dynamic pickup spawn");
-        assert_eq!(pickup.source_body_key, 0x1234);
-        assert_eq!(pickup.explosion_uid, 0x5200_003A);
-        assert_eq!(pickup.fragment_uid, 0x5300_0001);
+        assert_eq!(pickup.source_owner_key, 0x1234);
+        assert_eq!(pickup.resource_file_uid, u32::MAX);
+        assert_eq!(pickup.resource_uid, u32::MAX);
         assert_eq!(pickup.pickup_uid, 0x4700_0001);
-        assert_eq!(pickup.quantity, 3);
+        assert_eq!(pickup.owner_datum_264, 3);
         assert_eq!(pickup.position, Vec3::new(1.0, 2.0, 3.0));
         assert!(runtime.pending_destroy);
         assert_ne!(
@@ -1157,11 +1230,55 @@ mod tests {
     }
 
     #[test]
+    fn fragment_ballistics_continue_without_player_but_pickup_attraction_waits() {
+        let definition = RobotsExplosionFragmentDefinition::from_native_words([
+            0x5300_0001, 0x0400_0024, 0x0100_0003, u32::MAX,
+            u32::MAX, 0x4700_0001, 3, 0,
+        ]);
+        let mut fragment = NativeAiExplosionFragmentRuntime::from_spawn(
+            NativeAiExplosionFragmentSpawnRequest {
+                source_body_key: 7,
+                explosion_uid: 0x5200_003A,
+                ordinal: 0,
+                fragment_uid: definition.selector,
+                position: Vec3::new(1.0, 2.0, 0.0),
+                definition,
+                uniform_scale: 1.0,
+                pickup_variant_unit_draw: None,
+                ballistic_plan: None,
+                physics: Some(RobotsProjectilePhysicsRuntimeState {
+                    position_xyz: [1.0, 2.0, 0.0],
+                    linear_velocity_xyz: [6.0, 0.0, 0.0],
+                    gravity_velocity_y: 0.0,
+                    gravity_acceleration: 9.8,
+                    updates_completed: 0,
+                }),
+            },
+            1,
+            0,
+            0,
+        ).unwrap();
+
+        let initial = fragment.position();
+        fragment.advance_physics_fixed(None, 0);
+        assert!(fragment.position().x > initial.x);
+        assert_eq!(fragment.physics.updates_completed, 1);
+
+        fragment.pickup_attract_physics = Some(RobotsPickupAttractPhysicsState::new(
+            fragment.position().to_array(),
+        ));
+        let held_position = fragment.pickup_attract_physics.unwrap().position_xyz;
+        fragment.advance_physics_fixed(None, 0);
+        assert_eq!(fragment.pickup_attract_physics.unwrap().position_xyz, held_position);
+        assert_eq!(fragment.physics.updates_completed, 1);
+    }
+
+    #[test]
     fn fragment_pickup_tail_switches_to_attract_then_commits_inventory() {
         let definition = RobotsExplosionFragmentDefinition::from_native_words([
             0x5300_0001,
-            0,
-            0,
+            0x0400_0024,
+            0x0100_0003,
             u32::MAX,
             u32::MAX,
             0x4700_0001,
@@ -1221,6 +1338,14 @@ mod tests {
             0
         );
         assert!(runtime.pending_destroy);
+        let effect = runtime.pickup_effect_script_spawn();
+        assert_eq!(effect.owner_key, 7);
+        assert_eq!(effect.file_uid, 0x0100_0003);
+        assert_eq!(
+            effect.script_uid,
+            ROBOTS_EXPLOSION_FRAGMENT_PICKUP_EFFECT_SCRIPT_UID
+        );
+        assert_eq!(effect.position_xyzw, [0.0, 0.5, 0.0, 0.0]);
         assert!(!runtime.service_player_pickup_tail(
             Vec3::ZERO,
             inventory_definition,
@@ -1308,7 +1433,7 @@ mod tests {
             .expect("staggered fall pickup");
         assert!(due.pending_destroy);
         assert_eq!(pickup.pickup_uid, 0x4700_0001);
-        assert_eq!(pickup.quantity, 3);
+        assert_eq!(pickup.owner_datum_264, 3);
         assert_eq!(pickup.position, Vec3::new(1.0, 5.0, 3.0));
     }
 

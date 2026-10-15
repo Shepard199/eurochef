@@ -187,9 +187,10 @@ mod tests {
 
     #[test]
     fn first_update_flying_path_applies_handler606_physics_bit2_and_644_latch() {
-        let flying = ef01_mine_first_update_effects(
-            RobotsEf01MineFirstUpdateRoute::FollowFlyingPath { path_uid: 0x0b00_0049 },
-        );
+        let flying =
+            ef01_mine_first_update_effects(RobotsEf01MineFirstUpdateRoute::FollowFlyingPath {
+                path_uid: 0x0b00_0049,
+            });
         assert_eq!(flying.handler_606_mode, Some(false));
         assert!(flying.physics_object_flag_bit2);
         assert!(flying.flying_path_latch_644);

@@ -39,5 +39,13 @@ public class AiHandlerBehaviorMatrix extends GhidraScript {
             for(int s:slots) print(String.format("\t%08X",ptr(r.vt+s)));
             println("");
         }
+        println("\nUNIQUE +034 OVERRIDES (common Monster +034 = 0x004517A0)");
+        for(Row r:rows){
+            long update=ptr(r.vt+0x34);
+            if(update!=0x004517A0L){
+                println(String.format("%s\tvt=%08X\t+034=%08X\t+100=%08X\t+108=%08X",
+                    r.name,r.vt,update,ptr(r.vt+0x100),ptr(r.vt+0x108)));
+            }
+        }
     }
 }

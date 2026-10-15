@@ -1,5 +1,6 @@
 param(
     [switch]$Trace,
+    [switch]$DebugBuild,
     [switch]$BuildOnly,
 
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -43,7 +44,7 @@ function Set-RobotsManifestEnvironment {
 
 Set-RobotsManifestEnvironment
 
-$profile = if ($Trace) { 'debug' } else { 'release' }
+$profile = if ($Trace -or $DebugBuild) { 'debug' } else { 'release' }
 $env:RUST_BACKTRACE = if ($Trace) { 'full' } else { '1' }
 $env:RUST_LOG = if ($Trace) { 'debug' } else { 'info' }
 
@@ -53,7 +54,7 @@ Write-Host "Cargo target: $env:CARGO_TARGET_DIR" -ForegroundColor DarkGray
 Write-Host "Mode: $profile" -ForegroundColor DarkGray
 
 $buildArgs = @('build', '--locked', '-p', 'eurochef-gui', '--bin', 'eurochef')
-if (-not $Trace) {
+if ($profile -eq 'release') {
     $buildArgs += '--release'
 }
 

@@ -312,11 +312,17 @@ mod tests {
         assert!(stalk_navmesh_requests_event_throttle(state, config));
         let denied = step_stalk_navmesh(&mut state, config, 0.0, 0.0, false);
         assert_eq!(state.phase, RobotsStalkNavMeshPhase::Facing);
-        assert_eq!(denied.requested_anim_mode, ROBOTS_STALK_NAVMESH_IDLE_ANIM_MODE);
+        assert_eq!(
+            denied.requested_anim_mode,
+            ROBOTS_STALK_NAVMESH_IDLE_ANIM_MODE
+        );
 
         let granted = step_stalk_navmesh(&mut state, config, 0.0, 0.0, true);
         assert_eq!(state.phase, RobotsStalkNavMeshPhase::PendingAnimation);
-        assert_eq!(granted.requested_anim_mode, ROBOTS_STALK_NAVMESH_IDLE_ANIM_MODE);
+        assert_eq!(
+            granted.requested_anim_mode,
+            ROBOTS_STALK_NAVMESH_IDLE_ANIM_MODE
+        );
     }
 
     #[test]

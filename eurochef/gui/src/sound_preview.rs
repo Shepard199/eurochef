@@ -870,6 +870,25 @@ impl SoundPreview {
         }
     }
 
+    /// Native ScriptLifecycle `SoundStop` (0x1600003B) resolves a live sound
+    /// object by its sound UID and sets the immediate kill bit. Mirror that
+    /// ownership across all preview voice groups instead of guessing a key type.
+    pub fn stop_sound_uid(&mut self, sound_uid: u32) {
+        if sound_uid == 0 || sound_uid == u32::MAX {
+            return;
+        }
+        self.pending_voices
+            .retain(|_, pending| pending.spec.hashcode != sound_uid);
+        let keys = self
+            .voices
+            .iter()
+            .filter_map(|(key, voice)| (voice.hashcode == sound_uid).then_some(*key))
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.stop_voice(key, 0.0);
+        }
+    }
+
     pub fn stop_group(&mut self, group: SoundVoiceGroup, fade_seconds: f32) {
         self.pending_voices.retain(|key, _| key.group() != group);
         self.completed_one_shots.retain(|key| key.group() != group);

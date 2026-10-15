@@ -52,6 +52,12 @@ impl MapFrame {
                     .show(ui, |ui| {
                         if let Some(Some(trig)) = self.selected_trigger.map(|v| map.triggers.get(v))
                         {
+                            let native_ef01_flying_path = trig.ttype == 74
+                                && trig.character_visual.as_ref().is_some_and(|visual| {
+                                    visual.handler_class == eurochef_shared::robots_runtime::ai_character::RobotsAiHandlerClass::Ef01Mine
+                                })
+                                && map_trigger_runtime_path(map, trig)
+                                    .is_some_and(|(_, _, path)| !path.nodes.is_empty());
                             self.draw_trigger_overview(ui, map, trig);
 
                             egui::CollapsingHeader::new(format!(
@@ -541,19 +547,18 @@ impl MapFrame {
                                             .map(|target| format_cutscene_target(index, target))
                                     })
                                     .unwrap_or_else(|| "controller link6 unresolved".to_string());
-                                let ratchet_death_link_summary = map
-                                    .triggers
-                                    .iter()
-                                    .enumerate()
-                                    .find(|(_, trigger)| trigger.ttype == 0)
-                                    .and_then(|(_, player)| player.links.first().copied())
+                                let ratchet_death_link_summary = self
+                                    .native_runtime_player_state
+                                    .and_then(|owner| map.triggers.get(owner.trigger_index))
+                                    .filter(|player| player.ttype == ROBOTS_TRIGGER_PLAYER)
+                                    .and_then(|player| player.links.first().copied())
                                     .and_then(|link| usize::try_from(link).ok())
                                     .and_then(|index| {
                                         map.triggers
                                             .get(index)
                                             .map(|target| format_cutscene_target(index, target))
                                     })
-                                    .unwrap_or_else(|| "Player-owner link0 unresolved".to_string());
+                                    .unwrap_or_else(|| "Live Player-owner link0 unresolved (no Player XItem or missing link)".to_string());
                                 ui.separator();
                                 ui.strong("Native Sweeper Boss Controller Diagnostics");
                                 quick_grid!(ui, "t_native_sweeper_boss_controller", |ui| {
@@ -997,8 +1002,12 @@ impl MapFrame {
                                     readonly_input!(
                                         ui,
                                         "Runtime Boundary",
-                                        "native trigger getters and proximity/path context are diagnostic; navigation, target selection, combat, damage and AI timing are not simulated"
-                                            .to_string()
+                                        if native_ef01_flying_path {
+                                            "Resolved Ef01Mine: native 60 Hz FollowFlyingPath drives the live CharacterBody with an active AI XItem; its owner-local path, Patrol and hit nodes also advance without Player pose"
+                                        } else {
+                                            "Trigger getters/path context are diagnostic here; no general Monster path simulation is inferred"
+                                        }
+                                        .to_string()
                                     );
                                     ui.end_row();
                                 });
@@ -1479,6 +1488,7 @@ impl MapFrame {
                                     60 => "Native Watchbot Path Context",
                                     72 => "Native BossRatchet Path Context",
                                     73 => "Native Transporter Path Context",
+                                    74 if native_ef01_flying_path => "Native EF01 Mine Flying Path",
                                     74 => "Native Monster Path Context",
                                     _ => "Runtime Path",
                                 });
@@ -1598,8 +1608,9 @@ impl MapFrame {
                                                 1 => "Camera mode/context reference; no fabricated path motion",
                                                 20 => "Camera Marker setup context; no fabricated path motion",
                                                 60 => "Watchbot controller path context; no fabricated path motion",
-                                                72 => "BossRatchet runtime path context; no fabricated path motion",
-                                                73 => "Monster Transporter route context; no fabricated path motion",
+                                                72 => "BossRatchet native path runtime: 10% parameter follow + 8% Physics commit",
+                                                73 => "Monster Transporter native 60 Hz path/turn and node-event runtime",
+                                                74 if native_ef01_flying_path => "Ef01Mine native 60 Hz FollowFlyingPath spline, 3 units/s and endpoint turns",
                                                 74 => "Monster actor path context; no fabricated path motion",
                                                 _ => "Unsupported path consumer",
                                             }
@@ -1612,8 +1623,9 @@ impl MapFrame {
                                             match trig.ttype {
                                                 1 | 20 => "Native camera activation, player state and interpolation are not simulated",
                                                 60 => "Watchbot player state, controller traversal and path timing are not simulated",
-                                                72 => "Ratchet boss AI traversal and timing are not simulated",
-                                                73 => "Transporter actor traversal and spawn timing are not simulated",
+                                                72 => "BossRatchet path/Script clocks run; generic world-contact Physics is not yet reproduced",
+                                                73 => "Transporter fixed-step route and node events run; remaining carried-actor collision and lifecycle need validation",
+                                                74 if native_ef01_flying_path => "EF01 fixed-step path runs with a live AI XItem even without Player pose; target-dependent nodes and other Monster classes retain their own AI contracts",
                                                 74 => "Monster actor traversal, path state and timing are not simulated",
                                                 _ => "Activation/events and exact node-state waits are not simulated",
                                             }

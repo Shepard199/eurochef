@@ -27,6 +27,8 @@ impl eframe::App for EurochefApp {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 println!("[Robots] opening EDB via path-aware loader: {}", load_path);
+                // A manual EDB open cannot inherit a previous gameplay entry.
+                self.pending_native_level_entry = None;
                 match self.load_file_with_path(&load_path) {
                     Ok(_) => {}
                     Err(e) => {
@@ -46,8 +48,43 @@ impl eframe::App for EurochefApp {
             if let Some(platform) = platform {
                 let cur = Cursor::new(data.clone()); // FIXME: Cloning the data hurts my soul
                 match self.load_file(*platform, Box::new(cur), &ctx) {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        if let Some(entry) = self.pending_native_level_entry.take() {
+                            let loaded_uid = self.fileinfo.as_ref().map(|f| f.header.hashcode);
+                            if entry.matches_loaded_edb(loaded_uid) {
+                                let wall_time = ctx.input(|input| input.time);
+                                if let Some((map_index, trigger_index)) = self.maps
+                                    .as_mut()
+                                    .and_then(|panel| panel.initialise_loaded_level_player(
+                                        entry.player_entry_context, wall_time,
+                                        entry.progress,
+                                    ))
+                                {
+                                    self.current_panel = Panel::Maps;
+                                    if self.game_mode == GamePresentationMode::Launching {
+                                        self.game_mode.commit_player_entry();
+                                        self.game_session_live = true;
+                                    }
+                                    tracing::info!(
+                                        "ChangeLevel committed EDB {:#010x}, context {}, map #{map_index}, Player #{trigger_index}",
+                                        entry.target_edb_uid, entry.player_entry_context,
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "ChangeLevel EDB {:#010x} loaded, but context {} has no unique usable Player owner; keeping editor mode",
+                                        entry.target_edb_uid, entry.player_entry_context,
+                                    );
+                                }
+                            } else {
+                                tracing::warn!(
+                                    "ChangeLevel UID mismatch: expected {:#010x}, loaded {:?}; Player not created",
+                                    entry.target_edb_uid, loaded_uid,
+                                );
+                            }
+                        }
+                    }
                     Err(e) => {
+                        self.pending_native_level_entry = None;
                         self.state = AppState::Error(e);
                     }
                 }
@@ -57,6 +94,93 @@ impl eframe::App for EurochefApp {
             }
         }
 
+        // Game shell runs the exact same native Player/TriggerManager/AI
+        // runtime, without editor tabs and diagnostic controls.
+        if self.auto_launch_game_once {
+            self.auto_launch_game_once = false;
+            self.game_mode = GamePresentationMode::TitleScreen;
+        }
+        if self.game_mode == GamePresentationMode::TitleScreen && ctx.input(|input| input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)) {
+            self.game_mode = GamePresentationMode::MainMenu;
+        }
+        if self.game_mode.is_running()
+            && ctx.input(|input| input.key_pressed(egui::Key::Escape))
+        {
+            self.game_mode = GamePresentationMode::Paused;
+        }
+        if self.game_mode == GamePresentationMode::Launching
+            && self.pending_native_level_entry.is_none()
+            && self.pending_file.is_none()
+            && !self.game_session_live
+        {
+            self.game_mode = GamePresentationMode::MainMenu;
+            self.game_menu_notice = Some(
+                "Game launch failed: loaded EDB has no verified destination Player".to_string()
+            );
+        }
+        if self.game_mode.show_frontend() {
+            self.ensure_original_menu_assets(&ctx);
+            let slots = [
+                checkpoint::slot_exists(1),
+                checkpoint::slot_exists(2),
+                checkpoint::slot_exists(3),
+            ];
+            let mut audio_levels = self.sound_preview.as_ref().map(|shared| {
+                let audio = shared.lock();
+                [audio.master_volume, audio.ambient_volume, audio.object_audio_volume]
+            }).unwrap_or([0.8, 0.65, 0.8]);
+            let action = game_mode::draw_game_menu(
+                ui, self.game_mode,
+                self.maps.as_ref().is_some_and(|m| m.has_unique_player_entry_context(0)),
+                self.game_session_live, slots, self.pending_new_game_slot,
+                self.game_menu_notice.as_deref(), &mut audio_levels,
+                self.game_menu_assets.as_ref(),
+                self.frontend_scene3d.as_ref(),
+                &mut self.game_menu_navigation,
+            );
+            if let Some(shared) = &self.sound_preview {
+                let mut audio = shared.lock();
+                audio.master_volume = audio_levels[0];
+                audio.ambient_volume = audio_levels[1];
+                audio.object_audio_volume = audio_levels[2];
+            }
+            if let Some(action) = action {
+                self.game_menu_notice = None;
+                if let Err(error) = self.handle_game_menu_action(action, &ctx) {
+                    self.game_menu_notice = Some(error.to_string());
+                }
+            }
+            ctx.request_repaint();
+            return;
+        }
+        if self.game_mode.is_running() {
+            egui::CentralPanel::default().show(ui, |ui| {
+                if let Some(panel) = self.maps.as_mut() {
+                    if let Err(error) = panel.show_game(&ctx, ui) {
+                        self.game_menu_notice = Some(error.to_string());
+                        self.game_mode = GamePresentationMode::Paused;
+                    }
+                } else {
+                    self.game_menu_notice = Some("No gameplay map loaded".to_string());
+                    self.game_mode = GamePresentationMode::MainMenu;
+                }
+            });
+            self.try_write_initial_game_slot();
+            if let Some((request, progress)) = self.maps.as_mut()
+                .and_then(|panel| panel.take_gameplay_change_level_request())
+            {
+                if let Err(error) = self.queue_native_change_level(
+                    request, Some(progress), ctx.input(|i| i.time)
+                ) {
+                    tracing::warn!("Game Mode ChangeLevel refused: {error:#}");
+                }
+            }
+            ctx.request_repaint();
+            return;
+        }
+
+        let mut enter_game_mode_requested = false;
+        let mut start_loaded_game_requested = false;
         let Self {
             state,
             current_panel,
@@ -144,6 +268,20 @@ impl eframe::App for EurochefApp {
                         ui.close()
                     }
                 });
+
+                if *current_panel == Panel::Maps {
+                    if ui.button("Game Mode · Title Screen").clicked() {
+                        enter_game_mode_requested = true;
+                    }
+                    let can_start = maps.as_ref()
+                        .is_some_and(|panel| panel.has_unique_player_entry_context(0));
+                    if ui.add_enabled(can_start, egui::Button::new("Start gameplay (new session)"))
+                        .on_hover_text("Uses native initial GameWnd context 0. Starts the currently loaded EDB, not a reconstructed game menu or save slot.")
+                        .clicked()
+                    {
+                        start_loaded_game_requested = true;
+                    }
+                }
 
                 if ui.button("Profiler").clicked() {
                     self.show_profiler = true;
@@ -414,6 +552,28 @@ impl eframe::App for EurochefApp {
             Panel::Textures => textures.as_mut().map(|s| s.show_enlarged_window(&ctx)),
             _ => None,
         };
+
+        // Consume gameplay ChangeLevel only after all borrowed panel controls
+        // are finished. The path-aware EDB load happens next UI frame.
+        if enter_game_mode_requested {
+            self.game_mode = GamePresentationMode::TitleScreen;
+            self.game_menu_notice = None;
+        } else if start_loaded_game_requested {
+            let request = eurochef_shared::robots_runtime::change_level::RobotsChangeLevelRequest {
+                target: eurochef_shared::robots_runtime::change_level::RobotsChangeLevelTarget::CurrentLevel,
+                player_entry_context: 0,
+            };
+            if let Err(error) = self.queue_native_change_level(request, None, ctx.input(|i| i.time)) {
+                self.state = AppState::Error(error);
+            }
+        } else if let Some((request, progress)) = self.maps.as_mut()
+            .and_then(|panel| panel.take_gameplay_change_level_request())
+        {
+            if let Err(error) = self.queue_native_change_level(request, Some(progress), ctx.input(|i| i.time)) {
+                // Do not destroy the running level for an unsupported route.
+                tracing::warn!("ChangeLevel refused; gameplay retained: {error:#}");
+            }
+        }
     }
 }
 

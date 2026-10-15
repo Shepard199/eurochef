@@ -22,8 +22,7 @@ pub const ROBOTS_EM07_PIRANHA_ABOVE_SOUND_UID: u32 = 0x1AF0_0387;
 pub const ROBOTS_EM07_PIRANHA_TRANSITION_SOUND_UID: u32 = 0x1AF0_0389;
 pub const ROBOTS_EM07_PIRANHA_TRANSITION_EFFECT_UID_1: u32 = 0x0400_029C;
 pub const ROBOTS_EM07_PIRANHA_TRANSITION_EFFECT_UID_2: u32 = 0x0400_029D;
-pub const ROBOTS_EM07_PIRANHA_FIRST_UPDATE_COMPONENT_SCALAR: f32 =
-    f32::from_bits(0x414B_D70A);
+pub const ROBOTS_EM07_PIRANHA_FIRST_UPDATE_COMPONENT_SCALAR: f32 = f32::from_bits(0x414B_D70A);
 pub const ROBOTS_EM07_PIRANHA_RANDOM_ANGLE_MODULUS: u32 = 0x274;
 pub const ROBOTS_EM07_PIRANHA_RANDOM_SCALE: f32 = 0.01;
 pub const ROBOTS_EM07_PIRANHA_DISTANCE_RADIUS_SCALE: f32 = 0.1;
@@ -38,11 +37,7 @@ pub fn em07_piranha_random_radius_modulus(radius: f32) -> u32 {
     (radius.max(0.0) * ROBOTS_EM07_PIRANHA_RANDOM_RADIUS_MODULUS_SCALE).trunc() as u32
 }
 
-pub fn em07_piranha_random_xz_offset(
-    angle_draw: u32,
-    radius_draw: u32,
-    radius: f32,
-) -> [f32; 2] {
+pub fn em07_piranha_random_xz_offset(angle_draw: u32, radius_draw: u32, radius: f32) -> [f32; 2] {
     let angle = (angle_draw % ROBOTS_EM07_PIRANHA_RANDOM_ANGLE_MODULUS) as f32
         * ROBOTS_EM07_PIRANHA_RANDOM_SCALE;
     let modulus = em07_piranha_random_radius_modulus(radius);
@@ -64,8 +59,7 @@ pub fn em07_piranha_cached_target_from_draws(
         return None;
     }
     let point = points[point_draw as usize % points.len()];
-    let offset =
-        em07_piranha_random_xz_offset(angle_draw, radius_draw, point.native_radius);
+    let offset = em07_piranha_random_xz_offset(angle_draw, radius_draw, point.native_radius);
     let mut target = point.position_xyzw;
     target[0] += offset[0];
     target[2] += offset[1];
@@ -226,13 +220,12 @@ pub fn em07_piranha_owner_pitch_yaw_from_physics(
     velocity_xyz: [f32; 3],
     gravity_velocity_y: f32,
 ) -> [f32; 2] {
-    let horizontal = (velocity_xyz[0] * velocity_xyz[0]
-        + velocity_xyz[2] * velocity_xyz[2])
+    let horizontal = (velocity_xyz[0] * velocity_xyz[0] + velocity_xyz[2] * velocity_xyz[2])
         .max(0.0)
         .sqrt();
     let yaw = velocity_xyz[0].atan2(velocity_xyz[2]);
-    let pitch = horizontal.atan2(gravity_velocity_y + velocity_xyz[1])
-        - std::f32::consts::FRAC_PI_2;
+    let pitch =
+        horizontal.atan2(gravity_velocity_y + velocity_xyz[1]) - std::f32::consts::FRAC_PI_2;
     [pitch, yaw]
 }
 
@@ -346,19 +339,15 @@ mod tests {
 
     #[test]
     fn height_transition_plan_matches_00467b50_loop_switch_one_shot_and_splash_table() {
-        let above = em07_piranha_height_transition_plan(
-            RobotsEm07PiranhaHeightTransition::EnteredAbove,
-            1,
-        );
+        let above =
+            em07_piranha_height_transition_plan(RobotsEm07PiranhaHeightTransition::EnteredAbove, 1);
         assert_eq!(above.stop_loop_sound_uid, 0x1AF0_0388);
         assert_eq!(above.start_loop_sound_uid, 0x1AF0_0387);
         assert_eq!(above.one_shot_sound_uid, 0x1AF0_0389);
         assert_eq!(above.script_uid, Some(0x0400_029C));
 
-        let below = em07_piranha_height_transition_plan(
-            RobotsEm07PiranhaHeightTransition::EnteredBelow,
-            2,
-        );
+        let below =
+            em07_piranha_height_transition_plan(RobotsEm07PiranhaHeightTransition::EnteredBelow, 2);
         assert_eq!(below.stop_loop_sound_uid, 0x1AF0_0387);
         assert_eq!(below.start_loop_sound_uid, 0x1AF0_0388);
         assert_eq!(below.one_shot_sound_uid, 0x1AF0_0389);
@@ -418,10 +407,7 @@ mod tests {
             em07_piranha_creator_target_radius((-3.5f32).to_bits()).to_bits(),
             0.0f32.to_bits()
         );
-        assert_eq!(
-            em07_piranha_creator_retarget_ticks(12.9f32.to_bits()),
-            12
-        );
+        assert_eq!(em07_piranha_creator_retarget_ticks(12.9f32.to_bits()), 12);
 
         let spawn =
             em07_piranha_creator_spawn_position_from_draws([5.0, 7.0, 11.0, 0.0], 2.0, 0, 99);

@@ -225,10 +225,11 @@ impl MapFrame {
                 });
                 let _ = query.step(source_shape.is_some(), hit, 0, 1.0);
                 if let Some(runtime) = self.native_test_anim_bot_runtime.get_mut(&key) {
-                    runtime.hit_query = query.is_active().then_some(NativeTestAnimHitQueryRuntime {
-                        query,
-                        source_anim_mode: entry.source_anim_mode,
-                    });
+                    runtime.hit_query =
+                        query.is_active().then_some(NativeTestAnimHitQueryRuntime {
+                            query,
+                            source_anim_mode: entry.source_anim_mode,
+                        });
                 }
             }
 
@@ -393,7 +394,9 @@ impl MapFrame {
                             leave_periodic_idle(&mut runtime.periodic_idle)
                         }
                         RobotsTestAnimBehaviorWinner::AttackGroup => {
-                            if let Some(selected_available_index) = runtime.attack_group.selected_index {
+                            if let Some(selected_available_index) =
+                                runtime.attack_group.selected_index
+                            {
                                 if let Some(mode) = attack_modes.get(selected_available_index) {
                                     if let Some(native_index) = ROBOTS_TEST_ANIM_ATTACK_ANIM_MODES
                                         .iter()
@@ -446,7 +449,8 @@ impl MapFrame {
                             let select_draw = self.next_native_ai_gameplay_rng_u32();
                             let delay_draw =
                                 select_draw.and_then(|_| self.next_native_ai_gameplay_rng_u32());
-                            if let (Some(select_draw), Some(delay_draw)) = (select_draw, delay_draw) {
+                            if let (Some(select_draw), Some(delay_draw)) = (select_draw, delay_draw)
+                            {
                                 entered = enter_periodic_idle(
                                     &mut self
                                         .native_test_anim_bot_runtime
@@ -557,13 +561,8 @@ impl MapFrame {
                 .get(&key)
                 .and_then(|runtime| runtime.active_node);
             let mut pending_hit_query: Option<(RobotsHitQueryInitPlan, u32)> = None;
-            let mut projectile_events = Vec::<(
-                RobotsCreateProjectileRequest,
-                u32,
-                f32,
-                Vec3,
-                Quat,
-            )>::new();
+            let mut projectile_events =
+                Vec::<(RobotsCreateProjectileRequest, u32, f32, Vec3, Quat)>::new();
 
             match active_node {
                 Some(RobotsTestAnimBehaviorWinner::CommonIdle) => {
@@ -654,8 +653,7 @@ impl MapFrame {
                         .and_then(|runtime| runtime.periodic_idle.selected_anim_mode);
                     if let Some(requested_mode) = requested_mode {
                         let events = {
-                            let runtime =
-                                self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
+                            let runtime = self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
                             if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
                                 runtime.advance_animation(
                                     body,
@@ -671,8 +669,7 @@ impl MapFrame {
                             .iter()
                             .any(|event| event.event_type == event_type::SETUP_IDLE)
                         {
-                            let runtime =
-                                self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
+                            let runtime = self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
                             complete_periodic_idle_setup_idle(&mut runtime.periodic_idle);
                             runtime.animation.setup_idle();
                         }
@@ -699,7 +696,8 @@ impl MapFrame {
                                 let events = {
                                     let runtime =
                                         self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
-                                    if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
+                                    if let Some(body) = self.runtime_character_bodies.get_mut(&key)
+                                    {
                                         runtime.advance_animation(
                                             body,
                                             requested_mode,
@@ -770,8 +768,7 @@ impl MapFrame {
                             self.native_ai_last_hit_source_yaw.get(&key).copied(),
                             self.native_ai_hit_reactions.get(&key).copied(),
                         ) {
-                            let runtime =
-                                self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
+                            let runtime = self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
                             runtime.animation.setup_idle();
                             runtime.common_hit.enter_configured(
                                 test_anim_common_hit_config(),
@@ -832,8 +829,7 @@ impl MapFrame {
                     };
                     if requested_mode != 0 {
                         let events = {
-                            let runtime =
-                                self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
+                            let runtime = self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
                             if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
                                 runtime.advance_animation(
                                     body,
@@ -885,18 +881,13 @@ impl MapFrame {
                         .any(|event| event.event_type == event_type::SETUP_IDLE)
                     {
                         let plan = {
-                            let runtime =
-                                self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
+                            let runtime = self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
                             let plan = runtime.electro_hit.setup_idle();
                             runtime.animation.setup_idle();
                             plan
                         };
                         if plan.request_natural_death {
-                            self.request_native_ai_natural_death(
-                                map.hashcode,
-                                key,
-                                owner_position,
-                            );
+                            self.request_native_ai_natural_death(map.hashcode, key, owner_position);
                         }
                     }
                 }
@@ -933,8 +924,7 @@ impl MapFrame {
 
                     let mut magnetic_vertical_velocity_delta = None;
                     let effect_plan = if plan.service_magnetic_effect {
-                        let runtime =
-                            self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
+                        let runtime = self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
                         let drop_charge_count = runtime
                             .magnetic_drop_charge_count
                             .unwrap_or_else(|| visual.pickup_drop_count.unwrap_or(0));
@@ -966,8 +956,7 @@ impl MapFrame {
 
                     if let Some(requested_mode) = plan.requested_anim_mode {
                         let events = {
-                            let runtime =
-                                self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
+                            let runtime = self.native_test_anim_bot_runtime.get_mut(&key).unwrap();
                             if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
                                 runtime.advance_animation(
                                     body,
@@ -997,20 +986,14 @@ impl MapFrame {
                         {
                             if physics.object_flag_bit0 {
                                 let mut position = body.owner_position.to_array();
-                                physics.integrate_position(
-                                    &mut position,
-                                    ROBOTS_FIXED_STEP_SECONDS,
-                                );
+                                physics
+                                    .integrate_position(&mut position, ROBOTS_FIXED_STEP_SECONDS);
                                 body.owner_position = Vec3::from_array(position);
                             }
                         }
                     }
                     if plan.request_natural_death {
-                        self.request_native_ai_natural_death(
-                            map.hashcode,
-                            key,
-                            owner_position,
-                        );
+                        self.request_native_ai_natural_death(map.hashcode, key, owner_position);
                     }
                 }
                 None => {}

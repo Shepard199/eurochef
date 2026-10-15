@@ -1,0 +1,2 @@
+import ghidra.app.decompiler.*; import ghidra.app.script.GhidraScript; import ghidra.program.model.address.*; import ghidra.program.model.listing.*;
+public class WatchBotOwner150Focus extends GhidraScript { public void run()throws Exception{DecompInterface d=new DecompInterface();d.openProgram(currentProgram);long[] a={0x00493800L,0x00495ED0L,0x00496C60L};for(long x:a){Function f=getFunctionContaining(toAddr(x));println("=== "+toAddr(x)+" "+f.getName()+" ===");DecompileResults r=d.decompileFunction(f,180,monitor);println(r.getDecompiledFunction().getC());}d.dispose();}}

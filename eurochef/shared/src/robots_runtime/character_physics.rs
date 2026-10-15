@@ -5,9 +5,14 @@ use serde::Serialize;
 /// it owns only fields whose writers/readers are already proven in Robots.exe.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct RobotsCharacterPhysicsRuntimeState {
-    /// Character Physics +0x1B8/+0x1BC/+0x1C0 (the local Physics object sees the
-    /// same XYZ velocity lanes at +0x2C/+0x30/+0x34).
+    /// Persistent Character-Physics locomotion/root-motion lane used by recovered
+    /// AI handlers. Keep it distinct from base Physics' transient +0x2C..+0x34
+    /// accumulator below.
     pub velocity_xyz: [f32; 3],
+    /// Base Physics +0x2C/+0x30/+0x34 secondary per-tick motion accumulator.
+    /// Writers such as WatchBot 0x00493800 add to this lane. Base slot0
+    /// 0x00419400 adds it to the primary motion channel and clears it every tick.
+    pub secondary_motion_xyz: [f32; 3],
     /// Base Physics +0x124 gravity accumulator. `0x00419400` subtracts
     /// `Physics+0x128 / 60` before owner-pose integration while Physics+0x08 bit0
     /// clears this lane instead. Keep it separate from handler-authored velocity.
@@ -44,6 +49,7 @@ impl Default for RobotsCharacterPhysicsRuntimeState {
     fn default() -> Self {
         Self {
             velocity_xyz: [0.0; 3],
+            secondary_motion_xyz: [0.0; 3],
             gravity_velocity_y: 0.0,
             gravity_acceleration: 9.8,
             contact_response_bits: 0,
@@ -66,6 +72,7 @@ impl RobotsCharacterPhysicsRuntimeState {
     pub const fn monster_ctor_default() -> Self {
         Self {
             velocity_xyz: [0.0; 3],
+            secondary_motion_xyz: [0.0; 3],
             gravity_velocity_y: 0.0,
             gravity_acceleration: 9.8,
             contact_response_bits: 0,
@@ -75,6 +82,28 @@ impl RobotsCharacterPhysicsRuntimeState {
             object_flag_bit4: false,
             object_flags_14c: 0,
             handler_606: true,
+        }
+    }
+
+    /// Physics object installed by common WatchBot component setup 0x004935A0.
+    ///
+    /// All three concrete component vtables share vslot +0x04 = 0x00493760.
+    /// That factory creates base XItemPhysics, sets +0x128 gravity to zero,
+    /// clears Physics+0x08 bits0/1 and sets +0x14C bit0x20. Common setup then
+    /// adds +0x800 before attaching the replacement Physics to the owner.
+    pub const fn watchbot_component_ctor_default() -> Self {
+        Self {
+            velocity_xyz: [0.0; 3],
+            secondary_motion_xyz: [0.0; 3],
+            gravity_velocity_y: 0.0,
+            gravity_acceleration: 0.0,
+            contact_response_bits: 0,
+            previous_contact_response_bits: 0,
+            object_flag_bit0: false,
+            object_flag_bit2: false,
+            object_flag_bit4: false,
+            object_flags_14c: 0x0000_0820,
+            handler_606: false,
         }
     }
 
@@ -162,6 +191,14 @@ impl RobotsCharacterPhysicsRuntimeState {
         self.velocity_xyz[1] += delta_y;
     }
 
+    /// Additive base-Physics secondary motion writer. Unlike Character-Physics
+    /// velocity this lane is transient: native slot0 consumes and clears it.
+    pub fn add_secondary_motion_delta(&mut self, delta_xyz: [f32; 3]) {
+        for (value, delta) in self.secondary_motion_xyz.iter_mut().zip(delta_xyz) {
+            *value += delta;
+        }
+    }
+
     /// Ballistic velocity setup used by native CharacterPhysics helper
     /// `0x0041EC80` when Physics+0x128 is active and random spread is zero.
     /// Piranha calls this exact branch with current owner position, a cached
@@ -196,14 +233,13 @@ impl RobotsCharacterPhysicsRuntimeState {
         if launch_height < 0.0 {
             self.gravity_velocity_y = 0.0;
         } else {
-            let base_vertical =
-                (launch_height * self.gravity_acceleration * 2.0).sqrt();
+            let base_vertical = (launch_height * self.gravity_acceleration * 2.0).sqrt();
             self.gravity_velocity_y = base_vertical * (1.0 + 1.0 / 60.0);
         }
 
         let half_acceleration = self.gravity_acceleration * -0.5;
-        let discriminant =
-            self.gravity_velocity_y * self.gravity_velocity_y - 2.0 * self.gravity_acceleration * dy;
+        let discriminant = self.gravity_velocity_y * self.gravity_velocity_y
+            - 2.0 * self.gravity_acceleration * dy;
         if discriminant < 0.0 || !discriminant.is_finite() {
             return None;
         }
@@ -283,6 +319,24 @@ impl RobotsCharacterPhysicsRuntimeState {
         position_xyz[1] += (self.velocity_xyz[1] + self.gravity_velocity_y) * dt;
         position_xyz[2] += self.velocity_xyz[2] * dt;
     }
+
+    /// Base Physics slot0 secondary-channel commit for owners whose primary
+    /// +0x0C..+0x14 motion lane is otherwise zero/host-owned.
+    ///
+    /// 0x00419400 adds +0x2C..+0x34 to the primary channel, adds +0x124 to Y,
+    /// multiplies the result by the process runtime-rate scalar, then clears the
+    /// secondary channel. There is no second 1/60 factor at this boundary.
+    pub fn consume_secondary_motion_with_gravity(
+        &mut self,
+        position_xyz: &mut [f32; 3],
+        runtime_rate_scale: f32,
+    ) {
+        position_xyz[0] += self.secondary_motion_xyz[0] * runtime_rate_scale;
+        position_xyz[1] +=
+            (self.secondary_motion_xyz[1] + self.gravity_velocity_y) * runtime_rate_scale;
+        position_xyz[2] += self.secondary_motion_xyz[2] * runtime_rate_scale;
+        self.secondary_motion_xyz = [0.0; 3];
+    }
 }
 
 #[cfg(test)]
@@ -312,6 +366,32 @@ mod tests {
         assert!((position[0] - 1.0 / 60.0).abs() < 1.0e-6);
         assert!((position[1] - (10.0 + 2.5 / 60.0)).abs() < 1.0e-6);
         assert!((position[2] - 3.0 / 60.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn secondary_motion_accumulator_is_additive_and_consumed_once() {
+        let mut state = RobotsCharacterPhysicsRuntimeState::watchbot_component_ctor_default();
+        state.add_secondary_motion_delta([0.25, -0.5, 1.0]);
+        state.add_secondary_motion_delta([0.75, 0.25, -0.5]);
+        assert_eq!(state.secondary_motion_xyz, [1.0, -0.25, 0.5]);
+
+        let mut position = [10.0, 20.0, 30.0];
+        state.consume_secondary_motion_with_gravity(&mut position, 1.0);
+        assert_eq!(position, [11.0, 19.75, 30.5]);
+        assert_eq!(state.secondary_motion_xyz, [0.0; 3]);
+
+        state.consume_secondary_motion_with_gravity(&mut position, 1.0);
+        assert_eq!(position, [11.0, 19.75, 30.5]);
+    }
+
+    #[test]
+    fn watchbot_component_physics_factory_disables_gravity_and_sets_native_flags() {
+        let state = RobotsCharacterPhysicsRuntimeState::watchbot_component_ctor_default();
+        assert_eq!(state.gravity_acceleration.to_bits(), 0.0f32.to_bits());
+        assert_eq!(state.gravity_velocity_y.to_bits(), 0.0f32.to_bits());
+        assert!(!state.object_flag_bit0);
+        assert_eq!(state.object_flags_14c, 0x0000_0820);
+        assert_eq!(state.secondary_motion_xyz, [0.0; 3]);
     }
 
     #[test]

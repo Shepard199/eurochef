@@ -17,6 +17,9 @@ fn main() -> Result<()> {
         /// hashcodes.h
         #[arg(long, short = 't')]
         hashcodes: Option<String>,
+        /// Start the loaded level in the dedicated Game Mode (context 0).
+        #[arg(long)]
+        play: bool,
     }
     let args = Args::parse();
 
@@ -28,8 +31,19 @@ fn main() -> Result<()> {
     // Log to stdout (if you run with `RUST_LOG=debug`).
     tracing_subscriber::fmt::init();
 
+    // Game Mode starts in a modern maximized borderless-work-area window;
+    // egui uses logical points and the GPU renders at the monitor DPI scale.
+    // Keep the legacy editor's original starting window unchanged.
+    let viewport = if args.play {
+        egui::ViewportBuilder::default()
+            .with_inner_size([1920.0, 1080.0])
+            .with_min_inner_size([960.0, 540.0])
+            .with_maximized(true)
+    } else {
+        egui::ViewportBuilder::default().with_inner_size([1280.0, 1024.0])
+    };
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280., 1024.]),
+        viewport,
         depth_buffer: 24,
         multisampling: 0,
         ..Default::default()
@@ -38,9 +52,10 @@ fn main() -> Result<()> {
         "Eurochef",
         native_options,
         Box::new(|cc| {
-            Ok(Box::new(eurochef_gui::EurochefApp::new(
+            Ok(Box::new(eurochef_gui::EurochefApp::new_with_launch(
                 args.file,
                 args.hashcodes,
+                args.play,
                 cc,
             )))
         }),

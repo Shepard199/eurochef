@@ -153,6 +153,19 @@ pub struct MapViewerPanel {
     frame: MapFrame,
 }
 
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub struct ProcessedNavigationRegion {
+    /// Runtime placement/XItem identity corresponding to native region record +0x34.
+    pub placement_hashcode: Hashcode,
+    /// NavMesh entity resource selected by the placement.
+    pub resource_hashcode: Hashcode,
+    /// Native region world offset populated from the live placement instance.
+    pub origin: Vec3,
+    pub map_on: u16,
+    pub navmesh: ProcessedNavMesh,
+}
+
 #[derive(Clone, Default)]
 #[allow(dead_code)]
 pub struct ProcessedMap {
@@ -178,6 +191,11 @@ pub struct ProcessedMap {
     /// Native 0x607 navigation topology reached through each MapZone ref-entity.
     /// A zone may expose multiple NavMesh children through a Split hierarchy.
     pub zone_navmeshes: Vec<Vec<ProcessedNavMesh>>,
+    /// World-space navigation regions reconstructed from NavMesh entity placements.
+    /// Native Robots.exe resolves navigation through the global manager at 0x007B2B20:
+    /// each 0x78-byte region record owns a placement id (+0x34), resolves the NavMesh
+    /// resource lazily, and applies the instance world offset (+0x3C..+0x48).
+    pub navigation_regions: Vec<ProcessedNavigationRegion>,
     /// World-space native raycast faces for each serialized placement. `None`
     /// means the referenced entity could not be resolved; `Some(empty)` means
     /// it resolved and genuinely has no native raycast faces.
@@ -1035,6 +1053,9 @@ pub struct ProcessedCharacterVisual {
     /// Searchable AnimDatum metadata from the selected AnimSkin. Spatial queries
     /// keep the datum local transform separate from the animated selector chain.
     pub anim_datums: BTreeMap<Hashcode, ProcessedCharacterAnimDatum>,
+    /// Exact Robots v248 AnimSkin +0x58 lookup, keyed by (AnimSkin, HT_AnimBone).
+    /// Presentation/UE attachment adapters use this instead of assuming a bone index.
+    pub animation_bone_selectors: BTreeMap<(Hashcode, Hashcode), usize>,
     /// Minimal extra sampled bone chains for gameplay events that reference an
     /// AnimDatum outside the collision selector chain, keyed by (AnimMode, datum).
     pub animation_mode_datum_tracks:
@@ -1080,6 +1101,7 @@ pub struct ProcessedTrigger {
 pub(crate) fn robots_sweeper_boss_trigger_event_target(
     map: &ProcessedMap,
     controller_trigger_index: usize,
+    player_trigger_index: Option<usize>,
     event: NativeSweeperBossTriggerEvent,
 ) -> Option<usize> {
     let (owner_index, link_ordinal) = match event {
@@ -1091,7 +1113,12 @@ pub(crate) fn robots_sweeper_boss_trigger_event_target(
             (controller_trigger_index, 6)
         }
         NativeSweeperBossTriggerEvent::PlayerLink0CommonMask1 => {
-            let player_index = map.triggers.iter().position(|trigger| trigger.ttype == 0)?;
+            // Player +link0 belongs to the actual Player creator, not the
+            // first serialized Player destination in this level.
+            let player_index = player_trigger_index?;
+            if map.triggers.get(player_index)?.ttype != 0 {
+                return None;
+            }
             (player_index, 0)
         }
     };
@@ -1101,11 +1128,88 @@ pub(crate) fn robots_sweeper_boss_trigger_event_target(
     Some(target_index)
 }
 
+
+fn processed_navigation_regions_from_placements(
+    placements: &[EXGeoPlacement],
+    entities: &[(usize, IdentifiableResult<(EXGeoEntity, ProcessedEntityMesh)>)],
+) -> Vec<ProcessedNavigationRegion> {
+    let mut regions = Vec::new();
+
+    for placement in placements {
+        let resolved = if placement.object_ref.is_local() {
+            entities
+                .iter()
+                .find(|(index, _)| *index == placement.object_ref.index() as usize)
+                .map(|(_, entry)| entry.hashcode)
+        } else {
+            Some(placement.object_ref)
+        };
+        let Some(resource_hashcode) = resolved else {
+            continue;
+        };
+        let Some(Ok((_, mesh))) = entities
+            .iter()
+            .find(|(_, entry)| entry.hashcode == resource_hashcode)
+            .map(|(_, entry)| entry.data.as_ref())
+        else {
+            continue;
+        };
+        if mesh.robots_navmeshes.is_empty() {
+            continue;
+        }
+
+        let origin = Vec3::from(placement.position);
+        for navmesh in &mesh.robots_navmeshes {
+            let mut navmesh = navmesh.clone();
+            for vertex in &mut navmesh.vertices {
+                vertex[0] += origin.x;
+                vertex[1] += origin.y;
+                vertex[2] += origin.z;
+            }
+            regions.push(ProcessedNavigationRegion {
+                placement_hashcode: placement.hashcode,
+                resource_hashcode,
+                origin,
+                map_on: placement.map_on,
+                navmesh,
+            });
+        }
+    }
+
+    regions
+}
+
+/// Level entry may own multiple sub-maps. Do not choose an arbitrary first map
+/// when more than one serialized Player matches the GameWnd entry context.
+fn native_player_entry_unique_map_index(
+    maps: &[ProcessedMap],
+    context: u32,
+) -> Option<usize> {
+    let mut matches = maps.iter().enumerate().filter_map(|(i, map)| {
+        MapFrame::native_player_initialise_candidate(map, context).map(|_| i)
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+/// Cross-submap entry must resolve exactly one destination Player creator.
+/// Ambiguous or current-map contexts never tear down any live scene.
+fn native_unique_cross_submap_player_index(
+    maps: &[ProcessedMap],
+    current_map_index: usize,
+    context: u32,
+) -> Option<usize> {
+    maps.get(current_map_index)?;
+    let target_index = native_player_entry_unique_map_index(maps, context)?;
+    (target_index != current_map_index).then_some(target_index)
+}
+
 impl MapViewerPanel {
     pub fn new(
         file: Hashcode,
         gl: Arc<glow::Context>,
         maps: Vec<ProcessedMap>,
+        entities: &[(usize, IdentifiableResult<(EXGeoEntity, ProcessedEntityMesh)>)],
         ref_entities: Vec<IdentifiableResult<(EXGeoEntity, ProcessedEntityMesh)>>,
         render_store: Arc<RwLock<RenderStore>>,
         platform: Platform,
@@ -1114,7 +1218,13 @@ impl MapViewerPanel {
         sound_preview: SharedSoundPreview,
     ) -> Self {
         let mut maps = maps;
-        Self::populate_lighting_triangles(file, &mut maps, &ref_entities, &render_store);
+        Self::populate_lighting_triangles(
+            file,
+            &mut maps,
+            entities,
+            &ref_entities,
+            &render_store,
+        );
         let initial_camera_position = maps.first().and_then(map_editor_start_position);
         MapViewerPanel {
             frame: {
@@ -1148,6 +1258,7 @@ impl MapViewerPanel {
     fn populate_lighting_triangles(
         file: Hashcode,
         maps: &mut [ProcessedMap],
+        entities: &[(usize, IdentifiableResult<(EXGeoEntity, ProcessedEntityMesh)>)],
         ref_entities: &[IdentifiableResult<(EXGeoEntity, ProcessedEntityMesh)>],
         render_store: &Arc<RwLock<RenderStore>>,
     ) {
@@ -1158,6 +1269,8 @@ impl MapViewerPanel {
             map.zone_surface_triangles = vec![Vec::new(); map.mapzone_entities.len()];
             map.zone_raycast_triangles = vec![None; map.mapzone_entities.len()];
             map.zone_navmeshes = vec![Vec::new(); map.mapzone_entities.len()];
+            map.navigation_regions =
+                processed_navigation_regions_from_placements(&map.placements, entities);
             map.placement_raycast_triangles = vec![None; map.placements.len()];
             for (zone_index, zone_entity) in map.mapzone_entities.iter().enumerate() {
                 let Some(Ok((_, mesh))) = ref_entities
@@ -1312,6 +1425,88 @@ impl MapViewerPanel {
         }
 
         ref_renderers
+    }
+
+    /// Initial GameWnd +0x308 is zero in the native constructor; this test
+    /// does not infer the game menu's choice of starting EDB file.
+    pub(crate) fn has_unique_player_entry_context(&self, context: u32) -> bool {
+        native_player_entry_unique_map_index(&self.maps, context).is_some()
+    }
+
+    /// Only real gameplay ChangeLevel events leave the map-local dispatcher.
+    pub(crate) fn take_gameplay_change_level_request(
+        &mut self,
+    ) -> Option<(
+        eurochef_shared::robots_runtime::change_level::RobotsChangeLevelRequest,
+        eurochef_shared::robots_runtime::change_level::RobotsLevelTransitionProgress,
+    )> {
+        self.frame.take_gameplay_change_level_request()
+    }
+
+    /// Native same-level ChangeLevel keeps the currently loaded EDB and all
+    /// level-local runtime. Only relocate a live Player inside its current map.
+    pub(crate) fn relocate_same_level_player_context(
+        &mut self,
+        context: u32,
+        wall_time: f64,
+    ) -> Option<usize> {
+        self.frame.relocate_same_level_player_context(&self.maps, context, wall_time)
+    }
+
+    /// Dispatch same-level ChangeLevel to either the existing Player or an
+    /// unambiguous Player creator on a different sub-map of the *same* EDB.
+    /// A sub-map transfer parks scene-local owners by map UID, preserving
+    /// NPC/XItem timelines as well as typed persistent Player progress.
+    /// No editor-only AI preview is used.
+    pub(crate) fn change_same_level_player_context(
+        &mut self,
+        context: u32,
+        wall_time: f64,
+        progress: eurochef_shared::robots_runtime::change_level::RobotsLevelTransitionProgress,
+    ) -> Option<(usize, usize)> {
+        if let Some(index) =
+            self.frame.relocate_same_level_player_context(&self.maps, context, wall_time)
+        {
+            return Some((self.frame.active_submap_index(), index));
+        }
+        let current_index = self.frame.active_submap_index();
+        let target_index =
+            native_unique_cross_submap_player_index(&self.maps, current_index, context)?;
+        let current_uid = self.maps.get(current_index)?.hashcode;
+        let target_map = self.maps.get(target_index)?;
+        let index = self.frame.transition_same_level_submap(
+            target_map, target_index, current_uid, context, wall_time, progress,
+        )?;
+        Some((target_index, index))
+    }
+
+    /// Commit Player Initialise after the caller verifies the loaded EDB UID.
+    /// A multi-map EDB is ambiguous unless exactly one sub-map owns the context.
+    pub(crate) fn initialise_loaded_level_player(
+        &mut self,
+        context: u32,
+        wall_time: f64,
+        progress: Option<eurochef_shared::robots_runtime::change_level::RobotsLevelTransitionProgress>,
+    ) -> Option<(usize, usize)> {
+        let map_index = native_player_entry_unique_map_index(&self.maps, context)?;
+        let map = self.maps.get(map_index)?;
+        let trigger_index = self.frame.commit_loaded_level_player(
+            map, map_index, context, wall_time, progress,
+        )?;
+        Some((map_index, trigger_index))
+    }
+
+    pub(crate) fn game_checkpoint_progress(
+        &self,
+    ) -> Option<(u32, eurochef_shared::robots_runtime::change_level::RobotsLevelTransitionProgress)> {
+        let map = self.maps.get(self.frame.active_submap_index())?;
+        self.frame.checkpoint_progress(map)
+    }
+
+    pub(crate) fn show_game(
+        &mut self, context: &egui::Context, ui: &mut egui::Ui,
+    ) -> anyhow::Result<()> {
+        self.frame.show_game(ui, context, &self.maps)
     }
 
     pub fn show(&mut self, context: &egui::Context, ui: &mut egui::Ui) -> anyhow::Result<()> {
@@ -1850,6 +2045,7 @@ pub fn read_from_file(edb: &mut EdbFile) -> Vec<ProcessedMap> {
             zone_surface_triangles: Vec::new(),
             zone_raycast_triangles: Vec::new(),
             zone_navmeshes: Vec::new(),
+            navigation_regions: Vec::new(),
             placement_raycast_triangles: Vec::new(),
             paths: xmap
                 .paths
@@ -2002,6 +2198,91 @@ pub fn read_from_file(edb: &mut EdbFile) -> Vec<ProcessedMap> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_level_entry_rejects_ambiguous_submaps_without_selecting_first() {
+        use super::{native_player_entry_unique_map_index, ProcessedMap, ProcessedTrigger};
+        use glam::Vec3;
+
+        let player = |context: u32| ProcessedTrigger {
+            file_offset: 0,
+            link_ref: -1,
+            type_index: 0,
+            ttype: 0,
+            tsubtype: None,
+            debug: 0,
+            game_flags: 0,
+            trig_flags: 0,
+            position: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            scale: Vec3::ONE,
+            data: vec![Some(context)],
+            links: vec![-1; 8],
+            engine_options: eurochef_edb::map::EXGeoTriggerEngineOptions::default(),
+            trigger_script: None,
+            character_visual: None,
+            incoming_links: vec![],
+        };
+        let map0 = ProcessedMap {
+            hashcode: 0x1100_0001,
+            triggers: vec![player(3)],
+            ..Default::default()
+        };
+        let map1 = ProcessedMap {
+            hashcode: 0x1100_0002,
+            triggers: vec![player(7)],
+            ..Default::default()
+        };
+        assert_eq!(
+            native_player_entry_unique_map_index(&[map0.clone(), map1.clone()], 7),
+            Some(1)
+        );
+        assert_eq!(
+            native_player_entry_unique_map_index(&[map0.clone(), map1.clone()], 8),
+            None
+        );
+        let current_maps = [map0.clone(), map1.clone()];
+        assert_eq!(
+            super::native_unique_cross_submap_player_index(&current_maps, 0, 7),
+            Some(1),
+            "unique non-current destination should admit sub-map handoff",
+        );
+        assert_eq!(
+            super::native_unique_cross_submap_player_index(&current_maps, 1, 7),
+            None,
+            "the active sub-map must use in-place Player relocation",
+        );
+        assert_eq!(
+            super::native_unique_cross_submap_player_index(&current_maps, 0, 8),
+            None,
+            "unknown context cannot reset a scene",
+        );
+        assert_eq!(
+            super::native_unique_cross_submap_player_index(&current_maps, 9, 7),
+            None,
+            "invalid current map cannot start a handoff",
+        );
+        assert!(
+            super::MapFrame::native_same_level_player_destination(&current_maps, 0, 7)
+                .is_none(),
+            "same-level transfer must not use a Player from another sub-map"
+        );
+        let (uid, player) =
+            super::MapFrame::native_same_level_player_destination(&current_maps, 1, 7)
+                .expect("matching Player in active sub-map");
+        assert_eq!(uid, map1.hashcode);
+        assert_eq!(player.trigger_index, 0);
+        assert!(
+            super::MapFrame::native_same_level_player_destination(&current_maps, 2, 7)
+                .is_none(),
+            "invalid active map cannot silently choose the first one"
+        );
+        assert_eq!(
+            native_player_entry_unique_map_index(&[map0, map1.clone(), map1], 7),
+            None,
+            "two candidate maps must not select the first Player"
+        );
+    }
+
     use super::triggers::NativeSweeperRatchetScriptEventKind;
     use super::{
         map_editor_start_position, native_portal_clip, read_from_file,
@@ -2627,6 +2908,7 @@ mod tests {
             super::robots_sweeper_boss_trigger_event_target(
                 map,
                 controller_index,
+                Some(0),
                 super::NativeSweeperBossTriggerEvent::ControllerLink6CommonMask1,
             ),
             Some(10),
@@ -2635,9 +2917,24 @@ mod tests {
             super::robots_sweeper_boss_trigger_event_target(
                 map,
                 controller_index,
+                Some(0),
                 super::NativeSweeperBossTriggerEvent::PlayerLink0CommonMask1,
             ),
             Some(11),
+        );
+        assert_eq!(
+            super::robots_sweeper_boss_trigger_event_target(
+                map, controller_index, None,
+                super::NativeSweeperBossTriggerEvent::PlayerLink0CommonMask1,
+            ),
+            None,
+        );
+        assert_eq!(
+            super::robots_sweeper_boss_trigger_event_target(
+                map, controller_index, Some(controller_index),
+                super::NativeSweeperBossTriggerEvent::PlayerLink0CommonMask1,
+            ),
+            None,
         );
         let hand = Vec3::from(
             map.sweeper_ratchet_missile_hand_local
@@ -5599,6 +5896,66 @@ mod tests {
         assert_ne!(base.flags & 0x10, 0);
         assert!(base.bounds_box[0][0] < 599.34375 && base.bounds_box[1][0] > 948.65625);
         assert!(base.bounds_box[0][2] < -231.75 && base.bounds_box[1][2] > -93.9375);
+    }
+
+    #[test]
+    fn real_m03_hub1_navigation_regions_follow_native_placements_when_requested() {
+        let Ok(path) = std::env::var("EUROCHEF_REAL_M03_HUB1_EDB") else {
+            return;
+        };
+        let open_edb = || {
+            let file = File::open(&path).expect("m03_hub1 fixture is missing");
+            EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+                .expect("m03_hub1 fixture is not a valid PC EDB")
+        };
+
+        let mut map_edb = open_edb();
+        let maps = read_from_file(&mut map_edb);
+        let map = maps.first().expect("m03_hub1 map is missing");
+
+        let mut entity_edb = open_edb();
+        let (entities, _, _) = crate::entities::read_from_file(&mut entity_edb, None)
+            .expect("m03_hub1 entities did not parse");
+        let regions = super::processed_navigation_regions_from_placements(&map.placements, &entities);
+
+        assert_eq!(regions.len(), 3);
+        let translated = regions
+            .iter()
+            .find(|region| region.placement_hashcode == 0x0200_0056)
+            .expect("translated NavMesh placement 0x02000056 is missing");
+        assert_eq!(translated.resource_hashcode, 0x8200_0074);
+        assert!((translated.origin.x - 875.0763).abs() < 0.001);
+        assert!((translated.origin.z - 154.23149).abs() < 0.001);
+
+        let nav_views = regions
+            .iter()
+            .map(|region| eurochef_shared::robots_runtime::monster_navigation::RobotsMonsterNavMeshView {
+                vertices: &region.navmesh.vertices,
+                faces: &region.navmesh.faces,
+                adjacency: &region.navmesh.adjacency,
+                groups: &region.navmesh.groups,
+            })
+            .collect::<Vec<_>>();
+
+        for (trigger_index, npc) in map
+            .triggers
+            .iter()
+            .enumerate()
+            .filter(|(_, trigger)| {
+                trigger.ttype == 48
+                    && robots_npc_flags(trigger.ttype, &trigger.data).unwrap_or_default() & 0x2 != 0
+            })
+        {
+            let position = npc.position;
+            let mut nav = eurochef_shared::robots_runtime::monster_navigation::RobotsMonsterNavigationRuntimeState::default();
+            assert!(
+                nav.maintain(&nav_views, position.to_array()),
+                "flag2 NPC #{trigger_index} at {position:?} cannot resolve a native navigation region/face"
+            );
+            assert!(nav.region_ordinal.is_some());
+            assert!(nav.face_index.is_some());
+            assert!(nav.group_flags0.is_some());
+        }
     }
 
     #[test]

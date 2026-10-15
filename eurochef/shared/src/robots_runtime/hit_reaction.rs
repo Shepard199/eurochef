@@ -44,7 +44,7 @@ pub const ROBOTS_AI_HIT_YAW_EPSILON: f32 = 0.001;
 pub const ROBOTS_HIT_FLAG_DERIVED_FORCE_ZERO: u32 = 0x0040_0000;
 pub const ROBOTS_HIT_FLAG_DODGEM_FORCE_ZERO: u32 = 0x0000_0010;
 pub const ROBOTS_HIT_FLAG_EF01_MINE_USE_COMMON_AI: u32 = 0x0000_0010;
-pub const ROBOTS_TURRET_HIT_EFFECT_UID: u32 = 0x1AF0_026C;
+pub const ROBOTS_TURRET_HIT_SOUND_UID: u32 = 0x1AF0_026C;
 /// Native `DAT_005E23BC[0..2]` selected by `AI_HitFatal` event `0x16000039`
 /// before calling common Monster action dispatcher `0x004550A0`. The event
 /// payload is an index into this table, not the probability modulus itself.
@@ -604,6 +604,10 @@ pub struct RobotsAiHitReactionState {
     pub health: u8,
     /// Native Handler +0x608, set to 1 on every admitted reaction.
     pub got_hit_latch: bool,
+    /// TurretBot Handler +0x60C. `0x0045D140` sets this persistently once health
+    /// reaches zero; common transform helper `0x00453730` later skips its
+    /// transform-correction block while the latch is nonzero.
+    pub turretbot_zero_health_latch_60c: bool,
     /// Native owner XItem +0x264 category used by the two force-damage branches.
     pub owner_category: u32,
 }
@@ -691,9 +695,9 @@ impl RobotsAiHitReactionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct RobotsDerivedAiHitResult {
     pub base: RobotsHitReactionResult,
-    /// Turret family `0x004609F0` requests this native effect after an accepted
-    /// common AI reaction. The UE adapter owns actual effect spawning.
-    pub effect_uid: Option<u32>,
+    /// Turret family `0x004609F0` requests `HT_Sound_SFX_GENERIC_METALHIT`
+    /// after an accepted common AI reaction. The GUI/UE adapter owns playback.
+    pub transient_sound_uid: Option<u32>,
     /// TurretBot `0x0045D140` sets Handler +0x60C when health is zero after its
     /// wrapper logic.
     pub set_zero_health_latch: bool,
@@ -704,14 +708,15 @@ pub struct RobotsDerivedAiHitResult {
 fn derived_result(base: RobotsHitReactionResult) -> RobotsDerivedAiHitResult {
     RobotsDerivedAiHitResult {
         base,
-        effect_uid: None,
+        transient_sound_uid: None,
         set_zero_health_latch: false,
         clear_four_runtime_words: false,
     }
 }
 
 /// Turret family `0x004609F0`: common AI hit must accept first, then native
-/// emits effect 0x1AF0026C and optional flag 0x400000 forces health to zero.
+/// plays `HT_Sound_SFX_GENERIC_METALHIT` (0x1AF0026C) and optional flag
+/// 0x400000 forces health to zero.
 pub fn robots_apply_turret_hit_reaction(
     state: &mut RobotsAiHitReactionState,
     input: RobotsAcceptedHitReactionInput,
@@ -722,7 +727,7 @@ pub fn robots_apply_turret_hit_reaction(
     if !result.base.reaction_accepted {
         return result;
     }
-    result.effect_uid = Some(ROBOTS_TURRET_HIT_EFFECT_UID);
+    result.transient_sound_uid = Some(ROBOTS_TURRET_HIT_SOUND_UID);
     if input.query_flags & ROBOTS_HIT_FLAG_DERIVED_FORCE_ZERO != 0 {
         state.health = 0;
         result.base.health_damage = health_before.saturating_sub(state.health);
@@ -746,6 +751,9 @@ pub fn robots_apply_turret_bot_hit_reaction(
         result.base.health_damage = health_before.saturating_sub(state.health);
     }
     result.set_zero_health_latch = state.health == 0;
+    if result.set_zero_health_latch {
+        state.turretbot_zero_health_latch_60c = true;
+    }
     result
 }
 
@@ -870,6 +878,7 @@ mod tests {
             capability_flags: ROBOTS_AI_HIT_CAPABILITY_FLAG,
             health: 5,
             got_hit_latch: false,
+            turretbot_zero_health_latch_60c: false,
             owner_category: 1,
         }
     }
@@ -1129,7 +1138,7 @@ mod tests {
     }
 
     #[test]
-    fn turret_wrapper_runs_effect_only_after_common_accept_and_0x400000_zeroes_health() {
+    fn turret_wrapper_runs_sound_only_after_common_accept_and_0x400000_zeroes_health() {
         let mut state = ai();
         let result = robots_apply_turret_hit_reaction(
             &mut state,
@@ -1137,7 +1146,10 @@ mod tests {
             false,
         );
         assert!(result.base.reaction_accepted);
-        assert_eq!(result.effect_uid, Some(ROBOTS_TURRET_HIT_EFFECT_UID));
+        assert_eq!(
+            result.transient_sound_uid,
+            Some(ROBOTS_TURRET_HIT_SOUND_UID)
+        );
         assert_eq!(state.health, 0);
         assert_eq!(result.base.health_damage, 5);
 
@@ -1145,7 +1157,7 @@ mod tests {
         rejected.last_query_serial = 11;
         let result = robots_apply_turret_hit_reaction(&mut rejected, input(0, 11, 0), false);
         assert!(!result.base.reaction_accepted);
-        assert_eq!(result.effect_uid, None);
+        assert_eq!(result.transient_sound_uid, None);
         assert_eq!(rejected.health, 5);
     }
 
@@ -1162,6 +1174,7 @@ mod tests {
         assert_eq!(state.health, 0);
         assert_eq!(result.base.health_damage, 5);
         assert!(result.set_zero_health_latch);
+        assert!(state.turretbot_zero_health_latch_60c);
     }
 
     #[test]

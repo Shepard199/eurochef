@@ -61,21 +61,24 @@ impl NativeEm07PiranhaRuntime {
     }
 }
 
-fn em07_piranha_cached_points(map: &ProcessedMap, trigger: &ProcessedTrigger) -> Vec<RobotsEm07PiranhaCachedPoint> {
+fn em07_piranha_cached_points(
+    map: &ProcessedMap,
+    trigger: &ProcessedTrigger,
+) -> Vec<RobotsEm07PiranhaCachedPoint> {
     (ROBOTS_EM07_PIRANHA_LINK_FIRST_INDEX..ROBOTS_EM07_PIRANHA_LINK_END_INDEX)
         .filter_map(|ordinal| trigger.links.get(ordinal).copied())
-        .filter_map(|raw| eurochef_shared::robots_runtime::trigger_links::robots_trigger_link_index(raw, map.triggers.len()))
+        .filter_map(|raw| {
+            eurochef_shared::robots_runtime::trigger_links::robots_trigger_link_index(
+                raw,
+                map.triggers.len(),
+            )
+        })
         .filter_map(|index| map.triggers.get(index))
         .filter(|linked| linked.ttype == 2)
         .filter_map(|linked| {
             let raw_radius = linked.data.first().copied().flatten()?;
             Some(RobotsEm07PiranhaCachedPoint {
-                position_xyzw: [
-                    linked.position.x,
-                    linked.position.y,
-                    linked.position.z,
-                    0.0,
-                ],
+                position_xyzw: [linked.position.x, linked.position.y, linked.position.z, 0.0],
                 native_radius: em07_piranha_distance_radius_from_raw(raw_radius),
             })
         })
@@ -94,11 +97,7 @@ impl MapFrame {
         Some((angle_draw, radius_draw))
     }
 
-    fn em07_piranha_begin_flight(
-        &mut self,
-        key: u64,
-        trigger: &ProcessedTrigger,
-    ) -> bool {
+    fn em07_piranha_begin_flight(&mut self, key: u64, trigger: &ProcessedTrigger) -> bool {
         let proximity_radius = trigger
             .data
             .get(1)
@@ -139,7 +138,12 @@ impl MapFrame {
         };
 
         let spawn = em07_piranha_creator_spawn_position_from_draws(
-            [trigger.position.x, trigger.position.y, trigger.position.z, 0.0],
+            [
+                trigger.position.x,
+                trigger.position.y,
+                trigger.position.z,
+                0.0,
+            ],
             proximity_radius,
             spawn_angle_draw,
             spawn_radius_draw,
@@ -274,7 +278,8 @@ impl MapFrame {
                 ) {
                     physics.advance_base_gravity(ROBOTS_FIXED_STEP_SECONDS);
                     let mut position = body.owner_position.to_array();
-                    physics.integrate_position_with_gravity(&mut position, ROBOTS_FIXED_STEP_SECONDS);
+                    physics
+                        .integrate_position_with_gravity(&mut position, ROBOTS_FIXED_STEP_SECONDS);
                     body.owner_position = Vec3::from_array(position);
                     physics.latch_contact_response_after_base_update();
                 }
@@ -287,15 +292,18 @@ impl MapFrame {
             let owner_rotation = body_snapshot.owner_rotation;
             let owner_scale = body_snapshot.native_transform_scale_xyz();
             // Common retained HitCheck service precedes selector execution.
-            let active_query = self.native_em07_piranha_runtime.get(&key).and_then(|runtime| {
-                runtime.hit_query.map(|entry| {
-                    (
-                        entry,
-                        runtime.animation.sampled_pose_seconds(),
-                        runtime.animation.current_anim_mode(),
-                    )
-                })
-            });
+            let active_query = self
+                .native_em07_piranha_runtime
+                .get(&key)
+                .and_then(|runtime| {
+                    runtime.hit_query.map(|entry| {
+                        (
+                            entry,
+                            runtime.animation.sampled_pose_seconds(),
+                            runtime.animation.current_anim_mode(),
+                        )
+                    })
+                });
             if let Some((entry, pose_seconds, current_anim_mode)) = active_query {
                 let mut query = entry.query;
                 let source_shape = (current_anim_mode == entry.source_anim_mode)
@@ -359,15 +367,9 @@ impl MapFrame {
                 .native_em07_piranha_runtime
                 .get(&key)
                 .is_some_and(|runtime| runtime.cycle.flight_active)
-                && self
-                    .runtime_character_bodies
-                    .get(&key)
-                    .is_some_and(|body| {
-                        em07_piranha_flight_reset_ready(
-                            body.owner_position.y,
-                            trigger.position.y,
-                        )
-                    });
+                && self.runtime_character_bodies.get(&key).is_some_and(|body| {
+                    em07_piranha_flight_reset_ready(body.owner_position.y, trigger.position.y)
+                });
             if should_reset_flight {
                 if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
                     body.owner_position.y = trigger.position.y - ROBOTS_EM07_PIRANHA_HEIGHT_OFFSET;
@@ -383,10 +385,12 @@ impl MapFrame {
             }
 
             if let Some(runtime) = self.native_em07_piranha_runtime.get_mut(&key) {
-                runtime.attachment_spin_radians += em07_piranha_attachment_rotation_per_fixed_tick();
+                runtime.attachment_spin_radians +=
+                    em07_piranha_attachment_rotation_per_fixed_tick();
             }
 
-            let Some(player_position) = self.native_ai_gameplay_target_position(player_position) else {
+            let Some(player_position) = self.native_ai_gameplay_target_position(player_position)
+            else {
                 continue;
             };
             let owner_position = self
@@ -464,7 +468,10 @@ impl MapFrame {
                         }
                     }
                 }
-                self.native_em07_piranha_runtime.get_mut(&key).unwrap().active_node = winner;
+                self.native_em07_piranha_runtime
+                    .get_mut(&key)
+                    .unwrap()
+                    .active_node = winner;
             }
 
             match winner {
@@ -472,12 +479,19 @@ impl MapFrame {
                     let events = {
                         let runtime = self.native_em07_piranha_runtime.get_mut(&key).unwrap();
                         if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
-                            runtime.advance_animation(body, ROBOTS_BASE_MONSTER_IDLE_ANIM_MODE, NativeAiRootMotionPolicy::NONE)
+                            runtime.advance_animation(
+                                body,
+                                ROBOTS_BASE_MONSTER_IDLE_ANIM_MODE,
+                                NativeAiRootMotionPolicy::NONE,
+                            )
                         } else {
                             Vec::new()
                         }
                     };
-                    if events.iter().any(|event| event.event_type == event_type::SETUP_IDLE) {
+                    if events
+                        .iter()
+                        .any(|event| event.event_type == event_type::SETUP_IDLE)
+                    {
                         self.native_em07_piranha_runtime
                             .get_mut(&key)
                             .unwrap()
@@ -494,7 +508,11 @@ impl MapFrame {
                         let events = {
                             let runtime = self.native_em07_piranha_runtime.get_mut(&key).unwrap();
                             if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
-                                runtime.advance_animation(body, requested_anim_mode, NativeAiRootMotionPolicy::TRANSLATION_ONLY)
+                                runtime.advance_animation(
+                                    body,
+                                    requested_anim_mode,
+                                    NativeAiRootMotionPolicy::TRANSLATION_ONLY,
+                                )
                             } else {
                                 Vec::new()
                             }
@@ -508,17 +526,23 @@ impl MapFrame {
                                     runtime.animation.setup_idle();
                                 }
                                 event_type::HIT_CHECK => {
-                                    if let Some(plan) = RobotsHitQueryInitPlan::from_event(event.as_view()) {
+                                    if let Some(plan) =
+                                        RobotsHitQueryInitPlan::from_event(event.as_view())
+                                    {
                                         let serial = self.allocate_native_hit_query_serial();
-                                        self.native_em07_piranha_runtime.get_mut(&key).unwrap().hit_query =
-                                            Some(NativePiranhaHitQueryRuntime {
-                                                query: plan.instantiate(true, false, serial),
-                                                source_anim_mode: requested_anim_mode,
-                                            });
+                                        self.native_em07_piranha_runtime
+                                            .get_mut(&key)
+                                            .unwrap()
+                                            .hit_query = Some(NativePiranhaHitQueryRuntime {
+                                            query: plan.instantiate(true, false, serial),
+                                            source_anim_mode: requested_anim_mode,
+                                        });
                                     }
                                 }
                                 event_type::CREATE_PROJECTILE => {
-                                    if let Some(request) = RobotsCreateProjectileRequest::from_event(event.as_view()) {
+                                    if let Some(request) =
+                                        RobotsCreateProjectileRequest::from_event(event.as_view())
+                                    {
                                         let serial = self.allocate_native_hit_query_serial();
                                         if let Some(plan) = resolve_ai_projectile_spawn_plan(
                                             map,
@@ -542,7 +566,11 @@ impl MapFrame {
                         }
                     }
                     tick_generic_attack(
-                        &mut self.native_em07_piranha_runtime.get_mut(&key).unwrap().attack,
+                        &mut self
+                            .native_em07_piranha_runtime
+                            .get_mut(&key)
+                            .unwrap()
+                            .attack,
                     );
                 }
                 None => {}
@@ -565,7 +593,11 @@ impl MapFrame {
                 .map(|datum| datum.position.y)
             });
             let relative_height = datum_height
-                .or_else(|| self.runtime_character_bodies.get(&key).map(|body| body.owner_position.y))
+                .or_else(|| {
+                    self.runtime_character_bodies
+                        .get(&key)
+                        .map(|body| body.owner_position.y)
+                })
                 .map(|height| height - trigger.position.y)
                 .unwrap_or_default();
             let splash_selector = trigger
@@ -576,26 +608,37 @@ impl MapFrame {
             let transition = self
                 .native_em07_piranha_runtime
                 .get(&key)
-                .and_then(|runtime| em07_piranha_height_transition(runtime.above_creator_latch, relative_height));
+                .and_then(|runtime| {
+                    em07_piranha_height_transition(runtime.above_creator_latch, relative_height)
+                });
             if let Some(transition) = transition {
                 let plan = em07_piranha_height_transition_plan(transition, splash_selector);
-                self.native_ai_permanent_sounds.remove(&plan.stop_loop_sound_uid);
-                self.native_ai_transient_sounds.push(NativeAiTransientSoundRequest {
-                    owner_key: key,
-                    sound_uid: plan.one_shot_sound_uid,
-                });
+                self.native_ai_permanent_sounds
+                    .remove(&plan.stop_loop_sound_uid);
+                self.native_ai_transient_sounds
+                    .push(NativeAiTransientSoundRequest {
+                        owner_key: key,
+                        sound_uid: plan.one_shot_sound_uid,
+                    });
                 if let Some(script_uid) = plan.script_uid {
                     let position_xyzw = self
                         .native_em07_piranha_runtime
                         .get(&key)
                         .map(|runtime| runtime.transition_position_xyzw)
-                        .unwrap_or([trigger.position.x, trigger.position.y, trigger.position.z, 0.0]);
-                    self.native_ai_script_spawns.push(NativeAiScriptSpawnRequest {
-                        owner_key: key,
-                        file_uid: ROBOTS_EM07_PIRANHA_FILE_UID,
-                        script_uid,
-                        position_xyzw,
-                    });
+                        .unwrap_or([
+                            trigger.position.x,
+                            trigger.position.y,
+                            trigger.position.z,
+                            0.0,
+                        ]);
+                    self.native_script_xitem_spawns
+                        .push(NativeScriptXItemSpawnRequest {
+                            owner_key: key,
+                            file_uid: ROBOTS_EM07_PIRANHA_FILE_UID,
+                            script_uid,
+                            position_xyzw,
+                            rotation: Quat::IDENTITY,
+                        });
                 }
                 register_native_ai_permanent_sound(
                     &mut self.native_ai_permanent_sounds,
@@ -624,7 +667,10 @@ mod tests {
     fn cached_points_use_only_native_link_slots_4_through_7_and_distance_triggers() {
         assert_eq!(ROBOTS_EM07_PIRANHA_LINK_FIRST_INDEX, 4);
         assert_eq!(ROBOTS_EM07_PIRANHA_LINK_END_INDEX, 8);
-        assert_eq!(em07_piranha_distance_radius_from_raw(30).to_bits(), 3.0f32.to_bits());
+        assert_eq!(
+            em07_piranha_distance_radius_from_raw(30).to_bits(),
+            3.0f32.to_bits()
+        );
     }
 
     #[test]

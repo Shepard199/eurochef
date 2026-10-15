@@ -510,6 +510,7 @@ impl EurochefApp {
                         header.hashcode,
                         self.gl.clone(),
                         map,
+                        &entities,
                         ref_entities.clone(),
                         self.render_store.clone(),
                         platform,

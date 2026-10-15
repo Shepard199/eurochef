@@ -193,7 +193,9 @@ fn finite_quat(values: [f32; 4]) -> Quat {
     }
 }
 
-fn controller_transform(
+/// Shared native controller TRS sampler. Used by both 3D Script rendering
+/// and the frontend's per-Entity H04 pose inspection; no 2D projection here.
+pub(crate) fn controller_transform(
     script: &UXGeoScript,
     command: &UXGeoScriptCommand,
     controller: Option<&EXGeoAnimScriptControllerHeader>,

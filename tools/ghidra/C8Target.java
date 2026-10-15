@@ -1,0 +1,2 @@
+import ghidra.app.decompiler.*; import ghidra.app.script.GhidraScript; import ghidra.program.model.listing.*; import ghidra.program.model.symbol.*;
+public class C8Target extends GhidraScript { public void run()throws Exception{DecompInterface d=new DecompInterface();d.openProgram(currentProgram);Function f=getFunctionAt(toAddr(0x00425800L));println("F="+f);DecompileResults z=d.decompileFunction(f,500,monitor);println(z.getDecompiledFunction().getC());d.dispose();}}

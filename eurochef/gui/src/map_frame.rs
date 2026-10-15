@@ -1,6 +1,8 @@
 use std::{io::Cursor, sync::Arc};
 
-use self::runtime_ai_motion::{NativeAiAnimationRuntime, NativeAiRootMotionPolicy};
+use self::runtime_ai_motion::{
+    NativeAiAnimationPresentationSample, NativeAiAnimationRuntime, NativeAiRootMotionPolicy,
+};
 use anyhow::Context;
 use egui::{
     mutex::{Mutex, RwLock},
@@ -20,11 +22,18 @@ use eurochef_shared::{
             RobotsBallTrackSpawnIterationRequest, RobotsBallTrackSpawnSlot,
             ROBOTS_BALL_TRACK_FIXED_STEP_SECONDS,
         },
+        boss_ratchet_path::{
+            RobotsBossRatchetPathRuntimeState, ROBOTS_BOSS_RATCHET_PHYSICS_RATE,
+            ROBOTS_BOSS_RATCHET_POSITION_BLEND,
+        },
         character_physics::RobotsCharacterPhysicsRuntimeState,
-        current_attacker::{RobotsCurrentAttackerRuntimeState, RobotsCurrentAttackerWatchBotGateState},
+        change_level::{RobotsChangeLevelRequest, RobotsLevelTransitionProgress},
+        current_attacker::{
+            RobotsCurrentAttackerRuntimeState, RobotsCurrentAttackerWatchBotGateState,
+        },
         cutscene::{
-            plan_cutscene_effect, plan_cutscene_finalize, scan_cutscene_script_audio,
-            RobotsCutsceneEffect, RobotsCutsceneFinalizeBranch,
+            inventory_check_outcome, plan_cutscene_effect, plan_cutscene_finalize,
+            scan_cutscene_script_audio, RobotsCutsceneEffect, RobotsCutsceneFinalizeBranch,
             RobotsCutsceneFinalizeDispatchTarget, RobotsCutsceneFinalizeEffect,
             RobotsCutsceneFinalizeInput, RobotsCutsceneHandlerHostEffect,
             RobotsCutsceneHandlerHostInput, RobotsCutsceneHostRuntimeState,
@@ -66,6 +75,7 @@ use eurochef_shared::{
             step_ai_locomotion_after_steering_prepass, step_ai_movement_error,
             RobotsAiLocomotionInput, RobotsAiLocomotionRuntimeState,
             RobotsAiMovementErrorRuntimeState, RobotsAiTurnRateInput, ROBOTS_ANIM_MODE_MOVE,
+            ROBOTS_FIXED_STEP_SECONDS,
         },
         message_presentation::{
             build_cutscene_show_message_record, build_npc_simple_text_record,
@@ -180,7 +190,7 @@ use crate::map_runtime::{
     RuntimeEventPreviewSnapshot, RuntimeEventPreviewState, RuntimePathNodeEvent,
     RuntimePlayerState, RuntimeRobotsGlobalRngState, RuntimeScriptTriggerLifecycleState,
     RuntimeTriggerDistanceEvent, RuntimeTriggerGraphState, ROBOTS_EVENT_ACTIVATE,
-    ROBOTS_EVENT_DEACTIVATE,
+    ROBOTS_EVENT_DEACTIVATE, ROBOTS_TRIGGER_PLAYER,
 };
 use crate::{
     map_zone::robots_map_zone_contains,
@@ -214,7 +224,7 @@ use crate::{
         NativeSweeperBossOwnedXItemPhaseInput, NativeSweeperBossReplayRuntime,
         NativeSweeperBossSpawnSelection, NativeSweeperBossSpawnTransform,
         NativeSweeperBossTransporterEvent, NativeVisualZoneFrame, ObjectAudioProfile, ProcessedMap,
-        ProcessedTrigger, RobotsSweeperBossPatterns, NATIVE_FADE_HIGH_THRESHOLD,
+        ProcessedPath, ProcessedTrigger, RobotsSweeperBossPatterns, NATIVE_FADE_HIGH_THRESHOLD,
         NATIVE_FADE_IN_STATE, NATIVE_FADE_LOW_THRESHOLD, NATIVE_FADE_OUT_STATE,
         ROBOTS_SWEEPER_APPEAR_ANIM_MODE, ROBOTS_SWEEPER_ATTACK_ANIMATION,
         ROBOTS_SWEEPER_ATTACK_ANIM_MODE, ROBOTS_SWEEPER_ATTACK_ANIM_SET,
@@ -265,6 +275,7 @@ use crate::{
         script::{
             collect_script_dynamic_lights, collect_script_particles, render_script,
             render_script_without_static_animations, render_static_script,
+            render_static_script_without_animations,
         },
         trigger::{CollisionDatumRenderer, LinkLineRenderer, SelectCubeRenderer},
         tweeny::{self, Tweeny3D},
@@ -354,6 +365,75 @@ impl NativeWatchbotOwnerPose {
 struct NativePickupXItemRuntime {
     spawn: RobotsPickupSpawnPlan,
     handler: RobotsPickupHandlerRuntimeState,
+    /// Native owner XItem +0xE4. CreateItem seeds one random full-turn angle;
+    /// entity-backed Pickup +0x34 then subtracts exactly two degrees/update.
+    spin_radians: f32,
+}
+
+const ROBOTS_BOSS_RATCHET_TRIGGER_TYPE: u32 = 72;
+const ROBOTS_BOSS_RATCHET_MAGNET_TRUCK_FILE_UID: u32 = 0x0100_00B5;
+const ROBOTS_BOSS_RATCHET_MAGNET_TRUCK_SCRIPT_UID: u32 = 0x0400_0273;
+
+#[derive(Clone, Debug)]
+struct NativeBossRatchetHostRuntime {
+    path: RobotsBossRatchetPathRuntimeState,
+    physics: RobotsCharacterPhysicsRuntimeState,
+    position: Vec3,
+    yaw_radians: f32,
+    script_time_seconds: f32,
+    looped: bool,
+}
+
+impl NativeBossRatchetHostRuntime {
+    fn new(path: &ProcessedPath, initial_position: Vec3) -> Option<Self> {
+        let mut runtime = RobotsBossRatchetPathRuntimeState::default();
+        let points: Vec<[f32; 3]> = path
+            .nodes
+            .iter()
+            .map(|node| node.position.to_array())
+            .collect();
+        let node_values: Vec<[u16; 4]> = path.nodes.iter().map(|node| node.value).collect();
+        if !runtime.bind_path(&points, &node_values) {
+            return None;
+        }
+        Some(Self {
+            path: runtime,
+            physics: RobotsCharacterPhysicsRuntimeState::default(),
+            position: initial_position,
+            yaw_radians: 0.0,
+            script_time_seconds: 0.0,
+            looped: path.path_type == 1,
+        })
+    }
+
+    fn advance_fixed(&mut self, player_position: Vec3) -> Option<()> {
+        let nearest = self
+            .path
+            .nearest_player_parameter(player_position.to_array(), self.looped)?;
+        let step = self.path.advance_fixed(nearest, 1.0)?;
+        // Shipped m08_chas path 0x0B00001F contains only event 0x0C. If a
+        // future corpus path requests 0x09, fail closed until its pointer-swap
+        // semantics are host-wired without resetting retained handler fields.
+        if step.requested_path_uid.is_some() {
+            return None;
+        }
+        let sampled_position = Vec3::from_array(step.owner_position_xyz);
+        let alpha = ROBOTS_BOSS_RATCHET_POSITION_BLEND;
+        let blended_position = self.position + (sampled_position - self.position) * alpha;
+        let velocity = (blended_position - self.position) * ROBOTS_BOSS_RATCHET_PHYSICS_RATE;
+        self.physics.overwrite_velocity(velocity.to_array());
+        let mut position = self.position.to_array();
+        self.physics
+            .integrate_position(&mut position, ROBOTS_FIXED_STEP_SECONDS);
+        self.position = Vec3::from_array(position);
+        self.yaw_radians = step.owner_yaw_radians;
+        self.script_time_seconds += ROBOTS_FIXED_STEP_SECONDS;
+        Some(())
+    }
+
+    fn rotation(&self) -> Quat {
+        Quat::from_rotation_y(self.yaw_radians)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -404,6 +484,8 @@ pub struct MapFrame {
     pub viewer: Arc<Mutex<BaseViewer>>,
     sky_ent: String,
     sky_diagnostic: String,
+    /// Dormant sub-maps of the current EDB; no clocks or AI tick while asleep.
+    native_submap_states: FxHashMap<u32, submap_runtime::NativeSuspendedSubmapRuntime>,
     native_zone_runtime_map: Option<u32>,
     native_zone_runtime: Vec<NativeMapZoneRuntimeState>,
     native_sky_cache: Vec<Option<NativeSkyCacheEntry>>,
@@ -426,6 +508,8 @@ pub struct MapFrame {
     runtime_event_states: FxHashMap<u64, RuntimeEventPreviewState>,
     runtime_character_bodies: FxHashMap<u64, RuntimeCharacterBodyState>,
     simulate_ai: bool,
+    /// Editor-only bulk preview; native TriggerManager is the gameplay authority.
+    preview_all_ai: bool,
     native_ai_fixed_last_time: Option<f64>,
     native_ai_fixed_accumulator: f64,
     /// Reconstructed process-wide engine frame counter used by native staggered
@@ -450,16 +534,16 @@ pub struct MapFrame {
     native_current_attacker: RobotsCurrentAttackerRuntimeState,
     /// Per-candidate Handler+0x5FB hysteresis used only while the gameplay target
     /// is the Player-owned WatchBot XItem (native category 0x57).
-    native_current_attacker_watchbot_gates:
-        FxHashMap<u64, RobotsCurrentAttackerWatchBotGateState>,
-    /// Native manager +0x34 candidate bonus owner. The concrete external setter is
-    /// still unresolved; keep the seam explicit instead of aliasing an unrelated global.
-    native_current_attacker_bonus_owner: Option<u64>,
+    native_current_attacker_watchbot_gates: FxHashMap<u64, RobotsCurrentAttackerWatchBotGateState>,
     /// Process-global XSoundTag permanent registrations created by class first-update
     /// overrides. Native lookup is by sound UID, so only the first owner registers it.
     native_ai_permanent_sounds: FxHashMap<u32, runtime_ai::NativeAiPermanentSoundRegistration>,
     native_ai_transient_sounds: Vec<runtime_ai::NativeAiTransientSoundRequest>,
-    native_ai_script_spawns: Vec<runtime_ai::NativeAiScriptSpawnRequest>,
+    native_script_xitem_spawns: Vec<runtime_script_xitem::NativeScriptXItemSpawnRequest>,
+    /// Gameplay-created Script XItems are independent owners after factory
+    /// creation. Keep one common host for AI/effect producers rather than
+    /// class-specific transient presentation state.
+    native_transient_script_xitems: Vec<runtime_script_xitem::NativeTransientScriptXItemRuntime>,
     native_rollerbot_runtime: FxHashMap<u64, runtime_ai::NativeRollerBotRuntime>,
     /// Native process-global DAT_007B2A18/3C monster attack lockout. Kept
     /// class-independent so recovered monster brains share the same gate.
@@ -493,16 +577,15 @@ pub struct MapFrame {
     native_ai_explosion_main_spawns: Vec<runtime_ai_explosion::NativeAiExplosionMainSpawnRequest>,
     /// Common `XItemHandler_Explosion` instances resolved from FX03 definitions.
     native_ai_explosions: Vec<runtime_ai_explosion::NativeAiExplosionRuntime>,
-    /// UE-facing child-XItem factory boundary emitted by `0x004DCC20`.
-    native_ai_explosion_fragment_spawns:
-        Vec<runtime_ai_explosion::NativeAiExplosionFragmentSpawnRequest>,
     /// Live child XItems whose Physics object is native `XItemPhysics_Projectile`.
     /// Handler/contact/fade lifetime is retained separately from immutable FX03 rows.
     native_ai_explosion_fragments: Vec<runtime_ai_explosion::NativeAiExplosionFragmentRuntime>,
-    /// Dynamic Pickup/resource requests emitted by generic XExplosionFragment teardown.
-    /// These are intentionally not forged into serialized XTrigger_Pickup ownership.
-    native_ai_explosion_fragment_pickup_spawns:
-        Vec<runtime_ai_explosion::NativeAiExplosionFragmentPickupSpawnRequest>,
+    /// Gameplay-created Pickup XItems emitted by native factories such as
+    /// `XItemHandler::GeneratePickupFromHash`. They deliberately stay separate
+    /// from serialized XTrigger_Pickup ownership while reusing the same Handler
+    /// semantics and inventory owners.
+    native_dynamic_pickup_spawns: Vec<runtime_pickup::NativeDynamicPickupSpawnRequest>,
+    native_dynamic_pickups: Vec<runtime_pickup::NativeDynamicPickupRuntime>,
     native_ai_projectile_terminal_events:
         Vec<runtime_ai_projectile::NativeAiProjectileTerminalEvent>,
     active_camera_trigger: Option<usize>,
@@ -547,6 +630,8 @@ pub struct MapFrame {
     native_script_trigger_lifecycle_valid: bool,
     native_monster_transporter_lifecycle: FxHashMap<u64, RuntimeScriptTriggerLifecycleState>,
     native_monster_transporters: FxHashMap<u64, NativeMonsterTransporterRuntime>,
+    native_boss_ratchet_lifecycle: FxHashMap<u64, RuntimeScriptTriggerLifecycleState>,
+    native_boss_ratchets: FxHashMap<u64, NativeBossRatchetHostRuntime>,
     native_sweeper_boss_controller_lifecycle: FxHashMap<u64, RuntimeScriptTriggerLifecycleState>,
     native_sweeper_boss_runtime_map: Option<u32>,
     native_sweeper_boss_bindings: Option<NativeSweeperBossMapBindings>,
@@ -571,6 +656,11 @@ pub struct MapFrame {
     native_camera_live_player_preview: bool,
     native_camera_player_preview: FpsCamera,
     native_runtime_player_state: Option<RuntimePlayerState>,
+    /// Live ChangeLevel ingress only; host loads the target EDB after Mission
+    /// admission and carries confirmed persistent groups across the reload.
+    native_change_level_request: Option<(u32, usize, RobotsChangeLevelRequest)>,
+    /// Explicit editor-only GameWnd +0x308 input; None means native source is unknown.
+    native_player_context_diagnostic: Option<u32>,
     /// Native Player +0x544 magnetic/control target selected by XWeapon_Magnet.
     /// Ownership stays Player-side; AI consumers only compare against their XItem key.
     native_player_magnetic_target_key: Option<u64>,
@@ -588,6 +678,11 @@ pub struct MapFrame {
     /// components own movement math only; this stores the real owner pose that
     /// native AI target helpers read in Player states 0x2A/0x35.
     native_watchbot_owner_pose: Option<NativeWatchbotOwnerPose>,
+    /// Native XItem Physics accumulator reached by WatchBot component vslot +0x20.
+    /// Collision projection remains a separate host-owned phase; this state mirrors
+    /// the proven +0x2C..+0x38 accumulator without inventing a second movement model.
+    native_watchbot_physics: RobotsCharacterPhysicsRuntimeState,
+    native_watchbot_host_input: runtime_input::RobotsGameplayHostInputFrame,
     native_watchbot_mode1_runtime: RobotsWatchbotMode1Runtime,
     native_watchbot_mode2_runtime: RobotsWatchbotMode2Runtime,
     native_watchbot_mode3_runtime: RobotsWatchbotMode3Runtime,
@@ -1103,7 +1198,12 @@ mod runtime_ai_motion;
 mod runtime_ai_projectile;
 mod runtime_bodies;
 mod runtime_events;
+mod runtime_input;
+mod runtime_pickup;
+mod runtime_player_effects;
 mod runtime_queries;
+mod runtime_script_xitem;
+mod submap_runtime;
 mod script_sound;
 mod sound;
 mod sweeper_boss;
@@ -1286,6 +1386,7 @@ impl MapFrame {
             viewer: Arc::new(Mutex::new(BaseViewer::new(&gl))),
             sky_ent: String::new(),
             sky_diagnostic: String::new(),
+            native_submap_states: FxHashMap::default(),
             native_zone_runtime_map: None,
             native_zone_runtime: Vec::new(),
             native_sky_cache: Vec::new(),
@@ -1305,6 +1406,7 @@ impl MapFrame {
             runtime_event_states: FxHashMap::default(),
             runtime_character_bodies: FxHashMap::default(),
             simulate_ai: false,
+            preview_all_ai: false,
             native_ai_fixed_last_time: None,
             native_ai_fixed_accumulator: 0.0,
             native_ai_engine_frame_counter: 0,
@@ -1324,10 +1426,10 @@ impl MapFrame {
             native_spintop_runtime: FxHashMap::default(),
             native_current_attacker: RobotsCurrentAttackerRuntimeState::default(),
             native_current_attacker_watchbot_gates: FxHashMap::default(),
-            native_current_attacker_bonus_owner: None,
             native_ai_permanent_sounds: FxHashMap::default(),
             native_ai_transient_sounds: Vec::new(),
-            native_ai_script_spawns: Vec::new(),
+            native_script_xitem_spawns: Vec::new(),
+            native_transient_script_xitems: Vec::new(),
             native_rollerbot_runtime: FxHashMap::default(),
             native_monster_attack_cooldown: RobotsMonsterAttackCooldownRuntime::default(),
             native_ai_event_throttle: RobotsAiEventThrottleRuntime::default(),
@@ -1341,9 +1443,9 @@ impl MapFrame {
             native_ai_explosion_spawns: Vec::new(),
             native_ai_explosion_main_spawns: Vec::new(),
             native_ai_explosions: Vec::new(),
-            native_ai_explosion_fragment_spawns: Vec::new(),
             native_ai_explosion_fragments: Vec::new(),
-            native_ai_explosion_fragment_pickup_spawns: Vec::new(),
+            native_dynamic_pickup_spawns: Vec::new(),
+            native_dynamic_pickups: Vec::new(),
             native_ai_projectile_terminal_events: Vec::new(),
             active_camera_trigger: None,
             native_camera_ownership: NativeCameraOwnershipRuntime::default(),
@@ -1381,6 +1483,8 @@ impl MapFrame {
             native_script_trigger_lifecycle_valid: false,
             native_monster_transporter_lifecycle: FxHashMap::default(),
             native_monster_transporters: FxHashMap::default(),
+            native_boss_ratchet_lifecycle: FxHashMap::default(),
+            native_boss_ratchets: FxHashMap::default(),
             native_sweeper_boss_controller_lifecycle: FxHashMap::default(),
             native_sweeper_boss_runtime_map: None,
             native_sweeper_boss_bindings: None,
@@ -1400,6 +1504,8 @@ impl MapFrame {
             native_camera_live_player_preview: true,
             native_camera_player_preview: FpsCamera::default(),
             native_runtime_player_state: None,
+            native_change_level_request: None,
+            native_player_context_diagnostic: None,
             native_player_magnetic_target_key: None,
             native_runtime_player_last_hit_query_serial: u16::MAX,
             native_player_hit_runtime: RobotsPlayerHitRuntimeState::default(),
@@ -1408,6 +1514,8 @@ impl MapFrame {
             native_game_control_runtime: RobotsGameControlRuntime::default(),
             native_watchbot_owner_runtime: RobotsWatchbotOwnerRuntime::default(),
             native_watchbot_owner_pose: None,
+            native_watchbot_physics: RobotsCharacterPhysicsRuntimeState::watchbot_component_ctor_default(),
+            native_watchbot_host_input: runtime_input::RobotsGameplayHostInputFrame::default(),
             native_watchbot_mode1_runtime: RobotsWatchbotMode1Runtime::default(),
             native_watchbot_mode2_runtime: RobotsWatchbotMode2Runtime::default(),
             native_watchbot_mode3_runtime: RobotsWatchbotMode3Runtime::default(),
@@ -1493,6 +1601,189 @@ impl MapFrame {
         render_store.set_navmesh_options(self.show_navmesh, self.navmesh_texture_scale);
     }
 
+    /// Native level-entry transaction already validated the target EDB file.
+    /// Initialise one matching Player before the default gameplay camera runs.
+    pub(super) fn commit_loaded_level_player(
+        &mut self,
+        map: &ProcessedMap,
+        map_index: usize,
+        context: u32,
+        wall_time: f64,
+        progress: Option<RobotsLevelTransitionProgress>,
+    ) -> Option<usize> {
+        let trigger_index =
+            self.initialise_native_player_for_context(map, context, wall_time)?;
+        // The creator owns destination Player pose/animations. Restore only
+        // proven persistent groups after the new owner has been created.
+        if let Some(progress) = progress {
+            let restored_action_uid = progress.restorable_action_uid();
+            let restored_scalar_590 = progress.restored_player_scalar_590();
+            // Native Player creator 0x0048BE24 restores health fraction
+            // (0x58000027) against this Player's own maximum health.
+            if let Some(health) = progress.restored_health(self.native_player_hit_runtime.max_health) {
+                self.native_player_hit_runtime.current_health = health;
+            }
+            self.native_script_gameplay_state = progress.gameplay;
+            self.native_player_item_state = progress.player_items;
+            if let Some(value) = restored_scalar_590 {
+                self.native_player_action_runtime.player_scalar_590_bits = value.to_bits();
+            }
+            // Destination Player creator restores the action only after
+            // native Player-item +0x488 proves the requested UID is owned.
+            if let Some(action_uid) = restored_action_uid {
+                let items = &self.native_player_item_state;
+                self.native_player_action_runtime.request_cutscene_action(
+                    action_uid,
+                    self.native_player_focus_runtime.player_state,
+                    |uid| items.stored_current(uid) as i32,
+                );
+            }
+            self.service_native_watchbot_owner();
+        }
+        self.selected_map = map_index;
+        self.simulate_ai = true;
+        self.preview_all_ai = false;
+        self.native_player_context_diagnostic = None;
+        Some(trigger_index)
+    }
+
+    /// Current Player spawn context and proven persistent state for the
+    /// host checkpoint format. Never pretend to serialize world XItems.
+    pub(crate) fn checkpoint_progress(
+        &self, map: &ProcessedMap,
+    ) -> Option<(u32, RobotsLevelTransitionProgress)> {
+        (self.native_zone_runtime_map == Some(map.hashcode)).then_some(())?;
+        let player = self.native_runtime_player_state?;
+        let creator = map.triggers.get(player.trigger_index)?;
+        (creator.ttype == 0).then_some(())?;
+        let context = creator.data.first().copied().flatten().unwrap_or_default();
+        let progress = self.gameplay_checkpoint_progress()?;
+        Some((context, progress))
+    }
+
+    pub(crate) fn active_submap_index(&self) -> usize {
+        self.selected_map
+    }
+
+    /// Same-EDB cross-submap GameWnd handoff. Validate destination first,
+    /// suspend the old sub-map's transient owners before creating the
+    /// destination Player and restoring only proven persistent progress.
+    /// Local NPC/Monster/XItem timelines resume when their map is revisited;
+    /// process-global state is never cloned into a sub-map.
+    pub(super) fn transition_same_level_submap(
+        &mut self,
+        map: &ProcessedMap,
+        destination_index: usize,
+        current_map_uid: u32,
+        context: u32,
+        wall_time: f64,
+        progress: RobotsLevelTransitionProgress,
+    ) -> Option<usize> {
+        if !self.simulate_ai
+            || !self.native_script_trigger_lifecycle_valid
+            || self.native_runtime_player_state.is_none()
+            || self.native_mission_owner.is_some()
+            || self.native_zone_runtime_map != Some(current_map_uid)
+            || self.selected_map == destination_index
+            || self.native_submap_states.contains_key(&current_map_uid)
+        {
+            return None;
+        }
+        let creator = Self::native_player_initialise_candidate(map, context)?;
+        runtime_player_trigger_state(creator, map.triggers.get(creator)?)?;
+
+        // Preflight passed. Physically move every classified sub-map owner
+        // into its own dormant slot; other sub-maps cannot tick or see it.
+        let old_scene = submap_runtime::NativeSuspendedSubmapRuntime::park(self, wall_time);
+        self.native_submap_states.insert(current_map_uid, old_scene);
+        // These are process-global, NOT sub-map-local. The legacy full
+        // reset helper clears them, so preserve them across this handoff.
+        let engine_frame = self.native_ai_engine_frame_counter;
+        let fragment_phase = self.native_ai_explosion_fragment_phase_counter;
+        let event_throttle = std::mem::take(&mut self.native_ai_event_throttle);
+        // Native XSoundTag permanent registrations use process-global
+        // sound UID identity (first registrar wins). Keep that registry
+        // across sub-map sleep: the audio synchronizer emits only when the
+        // corresponding owner body is active in the current map.
+        let permanent_sounds = std::mem::take(&mut self.native_ai_permanent_sounds);
+        // Native DAT_007B2C44 is a level-global 32-byte message queue.
+        // It must not sleep with sub-map A or reappear as an old HUD when
+        // returning to A. Keep this sole instance alive during the reset.
+        let global_messages = std::mem::take(&mut self.native_message_presentation);
+        self.reset_all_runtime_events();
+        self.native_ai_engine_frame_counter = engine_frame;
+        self.native_ai_explosion_fragment_phase_counter = fragment_phase;
+        self.native_ai_event_throttle = event_throttle;
+        self.native_ai_permanent_sounds = permanent_sounds;
+        self.native_message_presentation = global_messages;
+        self.native_zone_runtime_map = None;
+        self.native_zone_runtime.clear();
+        self.native_sky_cache.clear();
+        self.native_pickup_global_scheduler = RobotsPickupGlobalSchedulerState::default();
+        self.native_player_hit_runtime = RobotsPlayerHitRuntimeState::default();
+        self.native_player_action_runtime = RobotsPlayerActionRuntime::default();
+        self.native_player_item_state.clear();
+        self.native_player_magnetic_target_key = None;
+        self.native_runtime_player_last_hit_query_serial = u16::MAX;
+        self.native_watchbot_owner_runtime = RobotsWatchbotOwnerRuntime::default();
+        self.native_watchbot_owner_pose = None;
+        self.native_watchbot_physics =
+            RobotsCharacterPhysicsRuntimeState::watchbot_component_ctor_default();
+        self.native_watchbot_host_input = runtime_input::RobotsGameplayHostInputFrame::default();
+        self.native_watchbot_mode1_runtime = RobotsWatchbotMode1Runtime::default();
+        self.native_watchbot_mode2_runtime = RobotsWatchbotMode2Runtime::default();
+        self.native_watchbot_mode3_runtime = RobotsWatchbotMode3Runtime::default();
+        self.native_shop_lifecycle = RobotsShopLifecycleState::default();
+        self.native_monster_transporters.clear();
+        self.native_monster_transporter_lifecycle.clear();
+        self.native_boss_ratchet_lifecycle.clear();
+        self.native_boss_ratchets.clear();
+        self.native_sweeper_boss_controller_lifecycle.clear();
+        self.native_sweeper_boss_runtime_map = None;
+        self.native_sweeper_boss_bindings = None;
+        self.native_sweeper_boss_runtime = None;
+        self.native_camera_runtime = None;
+        self.native_camera_last_time = None;
+        self.native_default_camera_runtime = None;
+        self.native_camera_viewpoint_valid = false;
+        self.native_camera_player_preview_map = None;
+        self.native_camera_player_preview_last_time = None;
+        self.viewer.lock().clear_native_camera();
+        self.script_animation_start_time = None;
+        self.selected_trigger = None;
+        self.selected_sound = None;
+        self.preview_all_ai = false;
+        {
+            let mut audio = self.sound_preview.lock();
+            audio.reset_group(SoundVoiceGroup::MapAmbient);
+            audio.reset_group(SoundVoiceGroup::ObjectAudio);
+            audio.reset_group(SoundVoiceGroup::AiPermanent);
+            audio.reset_group(SoundVoiceGroup::MapScript);
+        }
+
+        // Uses exactly the same validated destination Player creator as the
+        // full-level entry; there is no eager NPC/Monster creation here.
+        let player_index = self.commit_loaded_level_player(
+            map, destination_index, context, wall_time, Some(progress),
+        )?;
+        if let Some(suspended) = self.native_submap_states.remove(&map.hashcode) {
+            suspended.resume(self, wall_time, map.hashcode);
+        }
+        Some(player_index)
+    }
+
+    /// Rendering-only game shell path: same MapFrame/TriggerManager/AI and
+    /// renderer, without editor map picker or diagnostics controls.
+    pub(crate) fn show_game(
+        &mut self, ui: &mut egui::Ui, context: &egui::Context,
+        maps: &[ProcessedMap],
+    ) -> anyhow::Result<()> {
+        let map = maps.get(self.selected_map)
+            .ok_or_else(|| anyhow::anyhow!("Game Mode has no active sub-map"))?;
+        egui::Frame::canvas(ui.style()).show(ui, |ui| self.show_canvas(ui, context, map));
+        Ok(())
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -1525,55 +1816,12 @@ impl MapFrame {
         self.draw_map_controls(context, maps)?;
 
         if self.selected_map != previous_map {
+            // An explicit editor selection starts a new diagnostic scene, not
+            // a native GameWnd transition. Never resurrect gameplay XItems.
+            self.native_submap_states.clear();
             self.runtime_motion_start_time = None;
             self.runtime_event_states.clear();
-            self.runtime_character_bodies.clear();
-            self.native_ai_fixed_last_time = None;
-            self.native_ai_fixed_accumulator = 0.0;
-            self.native_ai_engine_frame_counter = 0;
-            self.native_ai_explosion_fragment_phase_counter = 0;
-            self.native_eq04_mine_runtime.clear();
-            self.native_minebot_runtime.clear();
-            self.native_dogbot_runtime.clear();
-            self.native_turret_runtime.clear();
-            self.native_ep05_turret_runtime.clear();
-            self.native_ep06_turret_runtime.clear();
-            self.native_turretbot_runtime.clear();
-            self.native_standard_monster_runtime.clear();
-            self.native_base_monster_runtime.clear();
-            self.native_em07_piranha_runtime.clear();
-            self.native_test_anim_bot_runtime.clear();
-            self.native_dodgem_runtime.clear();
-            self.native_spintop_runtime.clear();
-            self.native_current_attacker = RobotsCurrentAttackerRuntimeState::default();
-            self.native_current_attacker_watchbot_gates.clear();
-            self.native_current_attacker_bonus_owner = None;
-            self.native_ai_permanent_sounds.clear();
-            self.native_ai_transient_sounds.clear();
-            self.native_ai_script_spawns.clear();
-            self.native_ai_event_throttle = RobotsAiEventThrottleRuntime::default();
-            self.native_monster_navigation.clear();
-            self.native_monster_physics.clear();
-            self.native_ai_fatal_runtime.clear();
-            self.native_ai_hit_reactions.clear();
-            self.native_ai_last_hit_source_yaw.clear();
-            self.native_ai_last_hit_source_position.clear();
-            self.native_ai_creator_runtime.clear();
-            self.native_ai_deferred_destroy.clear();
-            self.native_ai_projectiles.clear();
-            self.native_ai_explosion_spawns.clear();
-            self.native_ai_explosion_main_spawns.clear();
-            self.native_ai_explosions.clear();
-            self.native_ai_explosion_fragment_spawns.clear();
-            self.native_ai_explosion_fragments.clear();
-            self.native_ai_explosion_fragment_pickup_spawns.clear();
-            self.native_ai_projectile_terminal_events.clear();
-            self.native_ai_preview_live.clear();
-            self.native_ai_preview_map = None;
-            self.native_ai_preview_gameplay_rng =
-                RuntimeRobotsGlobalRngState::fresh_process_startup();
-            self.native_ai_preview_process_lcg_seed =
-                Some(eurochef_shared::robots_runtime::process_rng::ROBOTS_PROCESS_LCG_STARTUP_SEED);
+            self.reset_native_ai_runtime_state();
             self.active_camera_trigger = None;
             self.native_camera_ownership = NativeCameraOwnershipRuntime::default();
             self.native_camera_sequences.clear();
@@ -1583,7 +1831,6 @@ impl MapFrame {
             self.native_camera_fixed_accumulator = 0.0;
             self.native_script_trigger_lifecycle.clear();
             self.native_ai_trigger_lifecycle.clear();
-            self.native_npc_behavior.clear();
             self.native_lightweight_trigger_lifecycle.clear();
             self.native_fluid_trigger_lifecycle.clear();
             self.native_pickup_trigger_lifecycle.clear();
@@ -1597,6 +1844,8 @@ impl MapFrame {
             self.native_script_trigger_lifecycle_valid = false;
             self.native_monster_transporter_lifecycle.clear();
             self.native_monster_transporters.clear();
+            self.native_boss_ratchet_lifecycle.clear();
+            self.native_boss_ratchets.clear();
             self.native_sweeper_boss_controller_lifecycle.clear();
             self.native_sweeper_boss_runtime_map = None;
             self.native_sweeper_boss_bindings = None;
@@ -1604,6 +1853,8 @@ impl MapFrame {
             self.native_camera_runtime = None;
             self.native_camera_last_time = None;
             self.native_runtime_player_state = None;
+            self.native_change_level_request = None;
+            self.native_player_context_diagnostic = None;
             self.native_player_magnetic_target_key = None;
             self.native_runtime_player_last_hit_query_serial = u16::MAX;
             self.native_player_hit_runtime = RobotsPlayerHitRuntimeState::default();
@@ -1612,6 +1863,8 @@ impl MapFrame {
             self.native_game_control_runtime = RobotsGameControlRuntime::default();
             self.native_watchbot_owner_runtime = RobotsWatchbotOwnerRuntime::default();
             self.native_watchbot_owner_pose = None;
+            self.native_watchbot_physics = RobotsCharacterPhysicsRuntimeState::watchbot_component_ctor_default();
+            self.native_watchbot_host_input = runtime_input::RobotsGameplayHostInputFrame::default();
             self.native_watchbot_mode1_runtime = RobotsWatchbotMode1Runtime::default();
             self.native_watchbot_mode2_runtime = RobotsWatchbotMode2Runtime::default();
             self.native_watchbot_mode3_runtime = RobotsWatchbotMode3Runtime::default();
@@ -1666,8 +1919,8 @@ mod tests {
         robots_merge_visual_zone_depth, robots_sky_cache_activate, robots_sky_cache_begin_frame,
         robots_sky_cache_mark_pending, robots_stream_resource_mask,
         robots_update_zone_runtime_state, robots_zone_resource_ready, MapSkySelection,
-        MapSkyZoneState, NativeMapZoneRuntimeState, NativeSkyCacheEntry, QueuedEntityRender,
-        ROBOTS_TRIGGER_INFO, TRIGGER_ICON_DATA,
+        MapSkyZoneState, NativeBossRatchetHostRuntime, NativeMapZoneRuntimeState,
+        NativeSkyCacheEntry, QueuedEntityRender, ROBOTS_TRIGGER_INFO, TRIGGER_ICON_DATA,
     };
     use crate::map_runtime::{
         apply_vehicle_steering_wheel_angle, closest_route_phase, map_trigger_link_index,
@@ -1819,6 +2072,93 @@ mod tests {
     }
 
     #[test]
+    fn real_m03_hub1_player_boot_routes_when_requested() {
+        use crate::map_runtime::{map_trigger_by_link, ROBOTS_TRIGGER_PLAYER};
+        let Ok(path) = std::env::var("EUROCHEF_REAL_M03_HUB1_EDB") else {
+            return;
+        };
+        let file = File::open(path).expect("m03_hub1 EDB fixture missing");
+        let mut edb = EdbFile::new(Box::new(BufReader::new(file)), Platform::Pc)
+            .expect("m03_hub1 EDB failed parsing");
+        let maps = read_from_file(&mut edb);
+        for (map_number, map) in maps.iter().enumerate() {
+            let player_indices: Vec<usize> = map.triggers.iter().enumerate()
+                .filter_map(|(i, t)| (t.ttype == ROBOTS_TRIGGER_PLAYER).then_some(i))
+                .collect();
+            let inbound: Vec<_> = map.triggers.iter().enumerate().flat_map(|(i, src)| {
+                src.links.iter().filter_map(move |&link| {
+                    map_trigger_by_link(map, link)
+                        .and_then(|(target, t)| (t.ttype == ROBOTS_TRIGGER_PLAYER)
+                            .then_some((i, src.ttype, src.data.first().copied().flatten(), target)))
+                })
+            }).collect();
+            // Shipped hub has many destinations, not one universal spawn.
+            // Startup must follow actual source events; Group/Pattern does
+            // not directly activate any of these Player triggers.
+            assert_eq!(map_number, 0);
+            assert_eq!(player_indices.len(), 16);
+            assert_eq!(inbound.len(), 10);
+            assert_eq!(inbound.iter().filter(|route| route.1 == 19).count(), 7);
+            assert_eq!(inbound.iter().filter(|route| route.1 == 44).count(), 2);
+            assert_eq!(inbound.iter().filter(|route| route.1 == 13).count(), 1);
+            assert!(inbound.iter().all(|route| !matches!(route.1, 14 | 43)));
+            // The original Initialise chooses by first packed data slot,
+            // not first Player or first inbound Cutscene destination.
+            let contexts: Vec<(usize, u32)> = player_indices.iter().map(|&index| {
+                let context = map.triggers[index]
+                    .data.first().copied().flatten().unwrap_or_default();
+                let selected = super::MapFrame::native_player_initialise_candidate(map, context)
+                    .expect("Player context must resolve its own creator");
+                assert_eq!(map.triggers[selected].ttype, ROBOTS_TRIGGER_PLAYER);
+                assert_eq!(
+                    map.triggers[selected]
+                        .data.first().copied().flatten().unwrap_or_default(),
+                    context
+                );
+                (index, context)
+            }).collect();
+            assert_eq!(
+                contexts,
+                vec![
+                    (3, 0), (6, 3), (8, 1), (9, 2),
+                    (11, 4), (14, 5), (15, 6), (20, 7),
+                    (21, 8), (42, 9), (87, 10), (105, 11),
+                    (107, 12), (110, 13), (112, 14), (575, 15),
+                ],
+                "shipped hub Player context-to-trigger mapping changed"
+            );
+            // With 16 possible destinations the native Camera preview cannot
+            // silently select the first serialized Player as level entry.
+            assert!(super::MapFrame::serialized_camera_player_pose(map, None).is_none());
+            let first_player = player_indices[0];
+            let other_player = player_indices[1];
+            let first_preview =
+                super::MapFrame::serialized_camera_player_pose(map, Some(first_player))
+                    .expect("explicitly selected Player must have a preview pose");
+            let other_preview =
+                super::MapFrame::serialized_camera_player_pose(map, Some(other_player))
+                    .expect("alternate Player destination must resolve");
+            assert_eq!(
+                first_preview.0,
+                crate::map_runtime::runtime_player_trigger_state(
+                    first_player,
+                    &map.triggers[first_player]
+                ).unwrap().position
+            );
+            assert_eq!(
+                other_preview.0,
+                crate::map_runtime::runtime_player_trigger_state(
+                    other_player,
+                    &map.triggers[other_player]
+                ).unwrap().position
+            );
+            assert!(super::MapFrame::serialized_camera_player_pose(
+                map, Some(inbound[0].0)
+            ).is_none());
+        }
+    }
+
+    #[test]
     fn real_m03_hub1_no_sky_zone_resource_context_when_requested() {
         let Ok(path) = std::env::var("EUROCHEF_REAL_M03_HUB1_EDB") else {
             return;
@@ -1928,6 +2268,39 @@ mod tests {
         let default_start = runtime_path_travel_distance(2.0 / 60.0, 7.0, 0.0, 1.0);
         assert!((default_start - (8.0 / 60.0)).abs() < 0.0001);
         assert_eq!(runtime_path_travel_distance(0.0, 4.0, 0.5, 1.0), 0.0);
+    }
+
+    #[test]
+    fn boss_ratchet_host_uses_trigger_origin_and_native_physics_blend() {
+        let path = ProcessedPath {
+            hashcode: 0x0B00_001F,
+            position: Vec3::ZERO,
+            flags: 0,
+            path_type: 0,
+            nodes: vec![
+                path_node(Vec3::new(0.0, 0.0, 0.0)),
+                path_node(Vec3::new(10.0, 0.0, 0.0)),
+                path_node(Vec3::new(20.0, 0.0, 0.0)),
+            ],
+            links: vec![],
+        };
+        let initial = Vec3::new(-10.0, 0.0, 0.0);
+        let mut runtime =
+            NativeBossRatchetHostRuntime::new(&path, initial).expect("BossRatchet path runtime");
+        assert_eq!(runtime.position, initial);
+
+        runtime
+            .advance_fixed(Vec3::new(20.0, 0.0, 0.0))
+            .expect("first BossRatchet path step");
+
+        // nearest parameter 2.0 follows by 10% -> 0.2, whose linear shipped-style
+        // test spline sample is x=2. Native then approaches that pose by 8%, writes
+        // displacement*60 to Physics +0x1B8 and base 60 Hz integration commits it.
+        assert!((runtime.path.tracked_player_parameter() - 0.2).abs() < 1.0e-6);
+        assert!((runtime.position.x - -9.04).abs() < 1.0e-5);
+        assert!((runtime.physics.velocity_xyz[0] - 57.6).abs() < 1.0e-4);
+        assert!((runtime.script_time_seconds - 1.0 / 60.0).abs() < 1.0e-6);
+        assert!(runtime.position.x < 2.0, "host must not teleport to spline sample");
     }
 
     #[test]

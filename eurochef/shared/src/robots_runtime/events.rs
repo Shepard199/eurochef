@@ -341,6 +341,16 @@ pub enum RobotsInventoryComparison {
 }
 
 impl RobotsInventoryComparison {
+    pub const fn matches(self, current: i32, requested: i32) -> bool {
+        match self {
+            Self::GreaterOrEqual => current >= requested,
+            Self::Greater => current > requested,
+            Self::Equal => current == requested,
+            Self::Less => current < requested,
+            Self::LessOrEqual => current <= requested,
+        }
+    }
+
     pub const fn from_native_mode(mode: u8) -> Self {
         match mode {
             1 => Self::Greater,
@@ -434,7 +444,7 @@ pub enum RobotsHandlerScriptCommandSemantic {
         owner_selector: Option<u32>,
         item: Option<u32>,
         quantity: Option<f32>,
-        fallback_item: Option<u32>,
+        fallback_check_uid: Option<u32>,
         on_true: [Option<u32>; 2],
         on_false: [Option<u32>; 2],
         comparison: Option<RobotsInventoryComparison>,
@@ -458,7 +468,9 @@ pub enum RobotsHandlerScriptCommandSemantic {
     WaitForMessage,
     WaitForItemLandOn,
     WaitForItemOff,
-    WaitForMessageSpecific,
+    WaitForMessageSpecific {
+        mask: Option<u32>,
+    },
     FileLoad {
         resources: [Option<u32>; 8],
     },
@@ -548,7 +560,9 @@ pub fn classify_generic_handler_script_command(
         WAIT_FOR_MESSAGE => Semantic::WaitForMessage,
         WAIT_FOR_ITEM_LAND_ON => Semantic::WaitForItemLandOn,
         WAIT_FOR_ITEM_OFF => Semantic::WaitForItemOff,
-        WAIT_FOR_MESSAGE_SPECIFIC => Semantic::WaitForMessageSpecific,
+        WAIT_FOR_MESSAGE_SPECIFIC => Semantic::WaitForMessageSpecific {
+            mask: event.native_arg_word(0),
+        },
         FILE_LOAD => Semantic::FileLoad {
             resources: event.native_args(),
         },
@@ -940,7 +954,7 @@ pub fn classify_script_lifecycle_handler_script_command(
             owner_selector: event.native_arg_word(0),
             item: event.native_arg_word(1),
             quantity: event.native_arg_float(2),
-            fallback_item: event.native_arg_word(3),
+            fallback_check_uid: event.native_arg_word(3),
             on_true: [event.native_arg_word(4), event.native_arg_word(5)],
             on_false: [event.native_arg_word(6), event.native_arg_word(7)],
             comparison: event
@@ -1479,6 +1493,15 @@ mod tests {
 
     #[test]
     fn generic_wait_family_preserves_native_host_result() {
+        let specific = classify_generic_handler_script_command(event(
+            event_type::WAIT_FOR_MESSAGE_SPECIFIC,
+            &[0x1234],
+        ));
+        assert_eq!(
+            specific.semantic,
+            RobotsHandlerScriptCommandSemantic::WaitForMessageSpecific { mask: Some(0x1234) }
+        );
+
         for event_type in [
             event_type::WAIT,
             event_type::WAIT_FOR_MESSAGE,
@@ -1626,7 +1649,7 @@ mod tests {
                 owner_selector: Some(0),
                 item: Some(0x4700_0023),
                 quantity: Some(3.0),
-                fallback_item: Some(0x4700_0042),
+                fallback_check_uid: Some(0x4700_0042),
                 on_true: [Some(0x5600_0001), Some(0x5600_0002)],
                 on_false: [Some(0x5600_0003), Some(0x5600_0004)],
                 comparison: Some(RobotsInventoryComparison::Equal),

@@ -1,10 +1,8 @@
 use serde::Serialize;
 
 use super::{
-    ai_character::RobotsAiPatrolConfig,
-    ai_pursue::RobotsAiPursueConfig,
-    generic_attack::RobotsGenericAttackConfig,
-    hit_reaction::RobotsCommonAiHitConfig,
+    ai_character::RobotsAiPatrolConfig, ai_pursue::RobotsAiPursueConfig,
+    generic_attack::RobotsGenericAttackConfig, hit_reaction::RobotsCommonAiHitConfig,
     locomotion::RobotsAiTurnRateInput,
 };
 
@@ -26,8 +24,7 @@ pub const ROBOTS_TEST_ANIM_ATTACK_ANIM_MODES: [u32; 5] = [
 pub const ROBOTS_TEST_ANIM_PERIODIC_IDLE_BASE_DELAY_TICKS: i32 = 180;
 pub const ROBOTS_TEST_ANIM_ATTACK_REENTRY_TICKS: u32 = 60;
 pub const ROBOTS_TEST_ANIM_ATTACK_OUTER_RADIUS: f32 = 2.0;
-pub const ROBOTS_TEST_ANIM_ATTACK_YAW_TOLERANCE_RADIANS: f32 =
-    f32::from_bits(0x3E86_0A92);
+pub const ROBOTS_TEST_ANIM_ATTACK_YAW_TOLERANCE_RADIANS: f32 = f32::from_bits(0x3E86_0A92);
 pub const ROBOTS_TEST_ANIM_HANDLER_FLAGS_ANIM_35_36_OR_MASK: u32 = 0x0000_0006;
 
 pub const fn test_anim_patrol_config() -> RobotsAiPatrolConfig {
@@ -103,7 +100,10 @@ pub fn test_anim_behavior_winner(
     common_hit_priority: u8,
 ) -> Option<RobotsTestAnimBehaviorWinner> {
     let candidates = [
-        (common_idle_priority, RobotsTestAnimBehaviorWinner::CommonIdle),
+        (
+            common_idle_priority,
+            RobotsTestAnimBehaviorWinner::CommonIdle,
+        ),
         (patrol_priority, RobotsTestAnimBehaviorWinner::Patrol),
         (pursue_priority, RobotsTestAnimBehaviorWinner::Pursue),
         (
@@ -149,15 +149,30 @@ mod tests {
         let patrol = test_anim_patrol_config();
         assert_eq!(patrol.interval_seconds, 7);
         assert_eq!(patrol.target_locomotion_scalar.to_bits(), 0.2f32.to_bits());
-        assert_eq!(test_anim_pursue_config(), RobotsAiPursueConfig::new(10.0, 1.0));
+        assert_eq!(
+            test_anim_pursue_config(),
+            RobotsAiPursueConfig::new(10.0, 1.0)
+        );
         assert_eq!(ROBOTS_TEST_ANIM_PERIODIC_IDLE_BASE_DELAY_TICKS, 180);
         assert_eq!(
             ROBOTS_TEST_ANIM_PERIODIC_IDLE_ANIM_MODES,
-            [0x0900_0006, 0x0900_0007, 0x0900_0008, 0x0900_0009, 0x0900_000A]
+            [
+                0x0900_0006,
+                0x0900_0007,
+                0x0900_0008,
+                0x0900_0009,
+                0x0900_000A
+            ]
         );
         assert_eq!(
             ROBOTS_TEST_ANIM_ATTACK_ANIM_MODES,
-            [0x0900_0025, 0x0900_0027, 0x0900_0037, 0x0900_0038, 0x0900_0039]
+            [
+                0x0900_0025,
+                0x0900_0027,
+                0x0900_0037,
+                0x0900_0038,
+                0x0900_0039
+            ]
         );
         for mode in ROBOTS_TEST_ANIM_ATTACK_ANIM_MODES {
             let attack = test_anim_attack_config(mode);
@@ -170,14 +185,8 @@ mod tests {
             assert_eq!(attack.reentry_delay_ticks, 60);
             assert!(attack.sticky_while_active);
         }
-        assert_eq!(
-            test_anim_effective_handler_flags(0x100, true, true),
-            0x106
-        );
-        assert_eq!(
-            test_anim_effective_handler_flags(0x100, true, false),
-            0x100
-        );
+        assert_eq!(test_anim_effective_handler_flags(0x100, true, true), 0x106);
+        assert_eq!(test_anim_effective_handler_flags(0x100, true, false), 0x100);
     }
 
     #[test]

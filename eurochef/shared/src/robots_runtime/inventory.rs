@@ -2,7 +2,7 @@ use std::io::{Seek, SeekFrom};
 
 use anyhow::Context;
 use eurochef_edb::{binrw::BinReaderExt, edb::EdbFile};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::spreadsheets::UXGeoSpreadsheet;
 
@@ -20,7 +20,7 @@ pub fn is_robots_inventory_uid(uid: u32) -> bool {
     uid != u32::MAX && uid & 0x7f00_0000 == ROBOTS_INVENTORY_UID_BASE
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RobotsInventoryValue {
     pub uid: u32,
     pub current: i32,
@@ -33,7 +33,7 @@ pub struct RobotsInventoryMutationOutcome {
     pub current: Option<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RobotsInventoryState {
     pub values: Vec<RobotsInventoryValue>,
 }

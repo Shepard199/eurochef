@@ -189,6 +189,21 @@ fn ambient_candidates(
     candidates
 }
 
+/// A process-wide sound UID can be registered once while its owning XItem
+/// lives in another sub-map. Only the active sub-map's live bodies are audible.
+fn active_ai_permanent_sound_emitters(
+    registrations: &FxHashMap<u32, runtime_ai::NativeAiPermanentSoundRegistration>,
+    mut live_owner_position: impl FnMut(u64) -> Option<Vec3>,
+) -> Vec<(u32, Vec3)> {
+    registrations
+        .values()
+        .filter_map(|registration| {
+            live_owner_position(registration.owner_key)
+                .map(|position| (registration.sound_uid, position))
+        })
+        .collect()
+}
+
 impl MapFrame {
     pub(super) fn dispatch_object_audio_event(
         &mut self,
@@ -351,15 +366,14 @@ impl MapFrame {
     }
 
     fn sync_ai_permanent_sounds(&mut self, listener_position: Vec3, listener_rotation: Quat) {
-        let emitters = self
-            .native_ai_permanent_sounds
-            .values()
-            .filter_map(|registration| {
-                self.runtime_character_bodies
-                    .get(&registration.owner_key)
-                    .map(|body| (registration.sound_uid, body.owner_position))
-            })
-            .collect::<Vec<_>>();
+        // The UID registry outlives individual sub-maps, but only bodies
+        // belonging to the currently active map may be audible. When an
+        // inactive owner returns, the retained registration starts emitting
+        // again without calling the class's first-update registrar twice.
+        let emitters = active_ai_permanent_sound_emitters(
+            &self.native_ai_permanent_sounds,
+            |key| self.runtime_character_bodies.get(&key).map(|body| body.owner_position),
+        );
         let transient_emitters = std::mem::take(&mut self.native_ai_transient_sounds)
             .into_iter()
             .filter_map(|request| {
@@ -377,14 +391,11 @@ impl MapFrame {
         }
 
         preview.preload_hashes(
-            emitters
-                .iter()
-                .map(|(sound_uid, _)| *sound_uid)
-                .chain(
-                    transient_emitters
-                        .iter()
-                        .map(|(request, _)| request.sound_uid),
-                ),
+            emitters.iter().map(|(sound_uid, _)| *sound_uid).chain(
+                transient_emitters
+                    .iter()
+                    .map(|(request, _)| request.sound_uid),
+            ),
         );
         let desired = emitters
             .into_iter()
@@ -689,6 +700,35 @@ mod tests {
         .unwrap();
         assert_eq!(plan.stop_loop_channel, 3);
         assert_eq!(plan.one_shot, Some((0, 0x1AF0_1000)));
+    }
+
+    #[test]
+    fn permanent_ai_audio_is_dormant_without_owner_and_resumes_on_return() {
+        let owner_a = MapFrame::runtime_character_body_key(0x1100_0001, 4);
+        let owner_b = MapFrame::runtime_character_body_key(0x1100_0002, 4);
+        let sound_uid = 0x1900_0001;
+        let mut registrations = FxHashMap::default();
+        registrations.insert(sound_uid, runtime_ai::NativeAiPermanentSoundRegistration {
+            owner_key: owner_a,
+            sound_uid,
+            native_parameter: 2,
+        });
+        let from_a = active_ai_permanent_sound_emitters(&registrations, |owner| {
+            (owner == owner_a).then_some(Vec3::new(2.0, 3.0, 4.0))
+        });
+        assert_eq!(from_a, vec![(sound_uid, Vec3::new(2.0, 3.0, 4.0))]);
+        let from_b = active_ai_permanent_sound_emitters(&registrations, |owner| {
+            (owner == owner_b).then_some(Vec3::new(7.0, 8.0, 9.0))
+        });
+        assert!(from_b.is_empty(), "a parked owner must be inaudible in B");
+        assert_eq!(
+            active_ai_permanent_sound_emitters(&registrations, |owner| {
+                (owner == owner_a).then_some(Vec3::new(5.0, 6.0, 7.0))
+            }),
+            vec![(sound_uid, Vec3::new(5.0, 6.0, 7.0))],
+            "returning to A must restore the existing permanent emitter",
+        );
+        assert_eq!(registrations.len(), 1, "no second registration on resume");
     }
 
     #[test]

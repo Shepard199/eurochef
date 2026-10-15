@@ -16,9 +16,13 @@ pub const ROBOTS_PICKUP_MODE2_COLLECT_RANGE_SQUARED: f32 = 1.959_999_9;
 pub const ROBOTS_PICKUP_DEFAULT_COLLECT_RANGE_SQUARED: f32 = 1.0;
 pub const ROBOTS_PICKUP_MODE34_COLLECT_RANGE_SQUARED: f32 = 9.0;
 pub const ROBOTS_PICKUP_FAR_CADENCE_RANGE_SQUARED: f32 = 100.0;
+pub const ROBOTS_PICKUP_LIFETIME_FLAG: u8 = 0x01;
 pub const ROBOTS_PICKUP_COLLECTED_FLAG: u8 = 0x02;
-pub const ROBOTS_PICKUP_PERIODIC_FLAG: u8 = 0x20;
 pub const ROBOTS_PICKUP_KILL_ON_EXPIRY_FLAG: u8 = 0x10;
+pub const ROBOTS_PICKUP_PERIODIC_FLAG: u8 = 0x20;
+/// `XItemHandler::GeneratePickupFromHash 0x00403F20` copies bit 0x02000000
+/// from its resolved resource UID into Handler periodic bit 0x20.
+pub const ROBOTS_PICKUP_GENERATED_RESOURCE_PERIODIC_BIT: u32 = 0x0200_0000;
 /// Player vslot +0x174 (`0x004B0D50`) returned by the common attraction wrapper
 /// `0x004AFF20` when callers request a smaller radius.
 pub const ROBOTS_PICKUP_ATTRACT_DEFAULT_RANGE: f32 = 2.0;
@@ -337,7 +341,7 @@ impl RobotsPickupHandlerRuntimeState {
             collect_on_expiry: false,
             destroy_on_expiry: false,
         };
-        if self.flags_3d1 & 0x01 == 0 {
+        if self.flags_3d1 & ROBOTS_PICKUP_LIFETIME_FLAG == 0 {
             return step;
         }
 
@@ -521,6 +525,79 @@ impl RobotsPickupRuntimeState {
 
 pub fn is_robots_pickup_serialized_type(serialized_trigger_type: u32) -> bool {
     ROBOTS_PICKUP_SERIALIZED_TYPES.contains(&serialized_trigger_type)
+}
+
+/// Exact `0x004DA680` resolver used by `GeneratePickupFromHash 0x00403F20`.
+/// The executable jump table covers UID offsets `0x47000001..0x47000023` but
+/// only four entries are accepted; every other UID takes the native error path.
+pub fn robots_generated_pickup_native_runtime_type(pickup_uid: u32) -> Option<u32> {
+    Some(match pickup_uid {
+        0x4700_0001 => 0x2C,
+        0x4700_0002 => 0x2D,
+        0x4700_0003 | 0x4700_0023 => 0x2F,
+        _ => return None,
+    })
+}
+
+/// `0x00403F73..0x00403F78`: generated runtime type 0x2C seeds Handler
+/// +0x3CC with 0x400; the other accepted generated types seed zero.
+pub const fn robots_generated_pickup_handler_argument(native_runtime_type: u32) -> i32 {
+    if native_runtime_type == 0x2C {
+        0x400
+    } else {
+        0
+    }
+}
+
+/// Exact resource resolver used when `GeneratePickupFromHash 0x00403F20`
+/// receives param7 = -1. Native `0x004DA710` converts owner +0x264 through
+/// `__ftol`, uses modulo 3 for the table-backed Pickup families and switches
+/// resource families with GameControl +0x50F.
+pub fn robots_generated_pickup_resource_uid(
+    fallback_resource_uid: u32,
+    owner_datum_264: i32,
+    native_runtime_type: u32,
+    game_control_mode: u8,
+    current_file_uid: u32,
+) -> u32 {
+    let index = owner_datum_264.rem_euclid(3) as usize;
+    let special_mode = matches!(game_control_mode, 2 | 3 | 4);
+    match native_runtime_type {
+        0x2C => {
+            if game_control_mode == 2 {
+                [0x0400_015F, 0x0400_029E, 0x0400_029F][index]
+            } else if special_mode {
+                [0x0400_0269, 0x0400_02A1, 0x0400_02A0][index]
+            } else {
+                [0x0200_01C8, 0x0200_01C9, 0x0200_01CA][index]
+            }
+        }
+        0x2D => {
+            if special_mode {
+                [0x0400_015F, 0x0400_029E, 0x0400_029F][index]
+            } else {
+                [0x0200_01CB, 0x0200_01CC, 0x0200_01CD][index]
+            }
+        }
+        0x2E => match game_control_mode {
+            2 => 0x0400_0240,
+            3 | 4 => 0x0400_026B,
+            _ => 0x0400_023F,
+        },
+        0x2F => match game_control_mode {
+            2 => 0x0400_024D,
+            3 | 4 => 0x0400_026A,
+            _ => fallback_resource_uid,
+        },
+        0x30 => {
+            if special_mode || current_file_uid == 0x0100_006F {
+                0x0400_02AF
+            } else {
+                fallback_resource_uid
+            }
+        }
+        _ => fallback_resource_uid,
+    }
 }
 
 pub fn robots_pickup_native_runtime_type(serialized_trigger_type: u32) -> Option<u32> {
@@ -856,6 +933,34 @@ mod tests {
     }
 
     #[test]
+    fn generated_pickup_resource_resolver_matches_native_004da710_tables() {
+        assert_eq!(
+            robots_generated_pickup_resource_uid(0x4700_0001, 4, 0x2C, 0, 0x0100_0001),
+            0x0200_01C9
+        );
+        assert_eq!(
+            robots_generated_pickup_resource_uid(0x4700_0001, 5, 0x2C, 2, 0x0100_0001),
+            0x0400_029F
+        );
+        assert_eq!(
+            robots_generated_pickup_resource_uid(0x4700_0001, 3, 0x2C, 3, 0x0100_0001),
+            0x0400_0269
+        );
+        assert_eq!(
+            robots_generated_pickup_resource_uid(0x4700_0002, 2, 0x2D, 0, 0x0100_0001),
+            0x0200_01CD
+        );
+        assert_eq!(
+            robots_generated_pickup_resource_uid(0x4700_0003, 7, 0x2F, 4, 0x0100_0001),
+            0x0400_026A
+        );
+        assert_eq!(
+            robots_generated_pickup_resource_uid(0xDEAD_BEEF, 1, 0x30, 0, 0x0100_006F),
+            0x0400_02AF
+        );
+    }
+
+    #[test]
     fn lifetime_step_uses_native_last_second_fade_and_expiry_route() {
         let mut global = RobotsPickupGlobalSchedulerState::default();
         let mut pickup = RobotsPickupHandlerRuntimeState::new(0x4700_0002, 1, &mut global);
@@ -904,6 +1009,41 @@ mod tests {
         assert!(near_target
             .target_distance_squared([f32::NAN, 0.0, 0.0])
             .is_none());
+    }
+
+    #[test]
+    fn generated_pickup_runtime_type_table_is_exact_and_fail_closed() {
+        assert_eq!(
+            robots_generated_pickup_native_runtime_type(0x4700_0001),
+            Some(0x2C)
+        );
+        assert_eq!(
+            robots_generated_pickup_native_runtime_type(0x4700_0002),
+            Some(0x2D)
+        );
+        assert_eq!(
+            robots_generated_pickup_native_runtime_type(0x4700_0003),
+            Some(0x2F)
+        );
+        assert_eq!(
+            robots_generated_pickup_native_runtime_type(0x4700_0023),
+            Some(0x2F)
+        );
+        assert_eq!(
+            robots_generated_pickup_native_runtime_type(0x4700_0004),
+            None
+        );
+        assert_eq!(
+            robots_generated_pickup_native_runtime_type(0x4700_0022),
+            None
+        );
+        assert_eq!(
+            robots_generated_pickup_native_runtime_type(0x4700_002B),
+            None
+        );
+        assert_eq!(robots_generated_pickup_handler_argument(0x2C), 0x400);
+        assert_eq!(robots_generated_pickup_handler_argument(0x2D), 0);
+        assert_eq!(robots_generated_pickup_handler_argument(0x2F), 0);
     }
 
     #[test]

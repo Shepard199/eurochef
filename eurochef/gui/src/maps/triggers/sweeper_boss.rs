@@ -3735,6 +3735,43 @@ fn idle_combat_mode(random_mod100: u8) -> u32 {
     }
 }
 
+#[cfg(test)]
+mod deferred_destroy_regression {
+    use super::*;
+
+    #[test]
+    fn dynamic_ai_pending_destroy_is_unlinked_before_next_ratchet_count() {
+        let mut registry = NativeSweeperBossLiveAiRegistry::default();
+        let (live_id, created) = registry.register_serialized_trigger_after_native_create(
+            7,
+            3,
+            0x0100_0001,
+            [1.0, 2.0, 3.0, 1.0],
+            0.25,
+        );
+        assert!(created);
+        assert_eq!(
+            registry.transfer_serialized_trigger_to_transporter(7),
+            Some(live_id)
+        );
+        assert_eq!(registry.registered_count(), 1);
+
+        assert!(registry.mark_live_id_pending_destroy_after_native_request(live_id));
+        assert_eq!(
+            registry.registered_count(),
+            1,
+            "native manager membership stays visible until outer 0x00444E80"
+        );
+
+        assert_eq!(registry.flush_pending_destroy_end_of_tick(), 1);
+        assert_eq!(
+            registry.registered_count(),
+            0,
+            "next Ratchet count must not see the already-destroyed dynamic AI"
+        );
+    }
+}
+
 #[path = "sweeper_boss_post_ratchet_ai.rs"]
 mod post_ratchet_ai;
 pub(crate) use post_ratchet_ai::*;

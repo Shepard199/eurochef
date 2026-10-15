@@ -88,12 +88,22 @@ impl NativeAiAnimationEvent {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct NativeAiAnimationPresentationSample {
+    pub(super) anim_mode: u32,
+    pub(super) pose_seconds: f32,
+    pub(super) transition_from: Option<(u32, f32)>,
+    pub(super) transition_elapsed_seconds: f32,
+}
+
 #[derive(Default)]
 pub(super) struct NativeAiAnimationRuntime {
     current_anim_mode: Option<u32>,
     animation_seconds: f32,
     sampled_pose_seconds: f32,
     blend_seconds: f32,
+    sampled_blend_seconds: f32,
+    presentation_transition_from: Option<(u32, f32)>,
     script_scheduler: RobotsScriptSchedulerState,
     /// Native Character Physics velocity lane (+0x1B8/+0x1BC/+0x1C0) produced
     /// by animation root motion in `0x004F3E8D`. Kept here so the common AI
@@ -119,6 +129,23 @@ impl NativeAiAnimationRuntime {
         self.sampled_pose_seconds
     }
 
+    pub(super) fn sample(&self) -> Option<(u32, f32)> {
+        self.current_anim_mode
+            .filter(|mode| *mode != 0)
+            .map(|mode| (mode, self.sampled_pose_seconds))
+    }
+
+    pub(super) fn presentation_sample(&self) -> Option<NativeAiAnimationPresentationSample> {
+        self.current_anim_mode
+            .filter(|mode| *mode != 0)
+            .map(|anim_mode| NativeAiAnimationPresentationSample {
+                anim_mode,
+                pose_seconds: self.sampled_pose_seconds,
+                transition_from: self.presentation_transition_from,
+                transition_elapsed_seconds: self.sampled_blend_seconds,
+            })
+    }
+
     pub(super) fn character_physics_velocity(&self) -> Vec3 {
         self.character_physics_velocity
     }
@@ -136,6 +163,8 @@ impl NativeAiAnimationRuntime {
         self.animation_seconds = 0.0;
         self.sampled_pose_seconds = 0.0;
         self.blend_seconds = 0.0;
+        self.sampled_blend_seconds = 0.0;
+        self.presentation_transition_from = None;
         self.script_scheduler.reset();
         self.character_physics_velocity = Vec3::ZERO;
         body.clear_collision_animation_track();
@@ -150,6 +179,8 @@ impl NativeAiAnimationRuntime {
         self.animation_seconds = 0.0;
         self.sampled_pose_seconds = 0.0;
         self.blend_seconds = 0.0;
+        self.sampled_blend_seconds = 0.0;
+        self.presentation_transition_from = None;
         self.script_scheduler.reset();
         self.character_physics_velocity = Vec3::ZERO;
     }
@@ -172,12 +203,17 @@ impl NativeAiAnimationRuntime {
 
         let mode_changed = self.current_anim_mode != Some(requested_anim_mode);
         if mode_changed {
+            self.presentation_transition_from = self
+                .current_anim_mode
+                .filter(|mode| *mode != 0)
+                .map(|mode| (mode, self.sampled_pose_seconds));
             self.animation_seconds = 0.0;
             self.sampled_pose_seconds = 0.0;
             self.blend_seconds = 0.0;
             self.script_scheduler.reset();
         }
         self.sampled_pose_seconds = self.animation_seconds;
+        self.sampled_blend_seconds = self.blend_seconds;
 
         let track = body.animation_modes.get(&requested_anim_mode).cloned();
         let script = body
@@ -314,6 +350,19 @@ fn filter_root_motion(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sampled_animation_contract_exposes_only_active_anim_mode() {
+        let mut runtime = NativeAiAnimationRuntime::default();
+        assert_eq!(runtime.sample(), None);
+
+        runtime.current_anim_mode = Some(0x0900_0042);
+        runtime.sampled_pose_seconds = 1.25;
+        assert_eq!(runtime.sample(), Some((0x0900_0042, 1.25)));
+
+        runtime.current_anim_mode = Some(0);
+        assert_eq!(runtime.sample(), None);
+    }
 
     #[test]
     fn root_motion_policy_keeps_translation_and_rotation_ownership_separate() {

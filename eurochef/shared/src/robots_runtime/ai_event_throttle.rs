@@ -75,11 +75,23 @@ mod tests {
     fn native_ctor_installs_stalk_three_seconds_and_attack_four_seconds() {
         let runtime = RobotsAiEventThrottleRuntime::default();
         assert_eq!(runtime.records[0].id, 1);
-        assert_eq!(runtime.records[0].interval_seconds.to_bits(), 3.0f32.to_bits());
+        assert_eq!(
+            runtime.records[0].interval_seconds.to_bits(),
+            3.0f32.to_bits()
+        );
         assert_eq!(runtime.records[1].id, 2);
-        assert_eq!(runtime.records[1].interval_seconds.to_bits(), 4.0f32.to_bits());
-        assert_eq!(runtime.records[0].last_grant_seconds.to_bits(), 0.0f32.to_bits());
-        assert_eq!(runtime.records[1].last_grant_seconds.to_bits(), 0.0f32.to_bits());
+        assert_eq!(
+            runtime.records[1].interval_seconds.to_bits(),
+            4.0f32.to_bits()
+        );
+        assert_eq!(
+            runtime.records[0].last_grant_seconds.to_bits(),
+            0.0f32.to_bits()
+        );
+        assert_eq!(
+            runtime.records[1].last_grant_seconds.to_bits(),
+            0.0f32.to_bits()
+        );
     }
 
     #[test]

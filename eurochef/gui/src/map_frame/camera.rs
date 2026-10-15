@@ -1,8 +1,30 @@
 use super::*;
 
+/// A serialized XTrigger_Player location is only a spawn *definition*.
+/// Gameplay target ownership begins when the Player XItem is materialized.
+fn native_created_player_pose(state: Option<RuntimePlayerState>) -> Option<(Vec3, f32)> {
+    let state = state?;
+    let direction = state.rotation * Vec3::Z;
+    Some((state.position, direction.x.atan2(direction.z)))
+}
+
 impl MapFrame {
-    fn serialized_camera_player_pose(map: &ProcessedMap) -> Option<(Vec3, f32)> {
-        let trigger = map.triggers.iter().find(|trigger| trigger.ttype == 0)?;
+    pub(super) fn serialized_camera_player_pose(
+        map: &ProcessedMap,
+        selected_trigger: Option<usize>,
+    ) -> Option<(Vec3, f32)> {
+        // An EDB can carry many Player destinations (m03_hub1 has 16).
+        // Never pretend the first one is the automatic level entry. Explicit
+        // editor selection or a genuinely unique Player is safe to preview.
+        let trigger = selected_trigger
+            .and_then(|index| map.triggers.get(index))
+            .filter(|trigger| trigger.ttype == ROBOTS_TRIGGER_PLAYER)
+            .or_else(|| {
+                let mut players = map.triggers.iter()
+                    .filter(|trigger| trigger.ttype == ROBOTS_TRIGGER_PLAYER);
+                let only_player = players.next()?;
+                players.next().is_none().then_some(only_player)
+            })?;
         let mode = trigger.data.get(1).and_then(|value| *value).unwrap_or(0);
         Some((
             crate::map_runtime::runtime_player_spawn_position(trigger.position, mode),
@@ -23,8 +45,9 @@ impl MapFrame {
                 viewer.camera_fly.speed_mul,
             )
         };
-        let (position, mut direction) = Self::serialized_camera_player_pose(map)
-            .map(|(position, heading)| (position, Vec3::new(heading.sin(), 0.0, heading.cos())))
+        let (position, mut direction) =
+            Self::serialized_camera_player_pose(map, self.selected_trigger)
+                .map(|(position, heading)| (position, Vec3::new(heading.sin(), 0.0, heading.cos())))
             .unwrap_or((fallback_position, fallback_direction));
         if !direction.is_finite() || direction.length_squared() <= f32::EPSILON {
             direction = Vec3::Z;
@@ -64,26 +87,38 @@ impl MapFrame {
         }
     }
 
-    pub(super) fn native_gameplay_player_pose(
-        &mut self,
-        map: &ProcessedMap,
-    ) -> Option<(Vec3, f32)> {
-        let serialized = self
-            .native_runtime_player_state
-            .map(|state| {
-                let direction = state.rotation * Vec3::Z;
-                (state.position, direction.x.atan2(direction.z))
-            })
-            .or_else(|| Self::serialized_camera_player_pose(map))?;
-        self.ensure_native_camera_player_preview(map);
-        if !self.native_camera_live_player_preview {
-            return Some(serialized);
-        }
+    /// Only a class-created XTrigger_Player XItem is a gameplay target. The
+    /// editor Camera proxy and serialized spawn are *not* Player Physics; they
+    /// must never trigger native proximity events or make enemies attack.
+    pub(super) fn native_gameplay_player_pose(&self) -> Option<(Vec3, f32)> {
+        native_created_player_pose(self.native_runtime_player_state)
+    }
 
+    /// Camera-only source. Serialized spawn and the editor's live Camera proxy
+    /// can preview native Camera controllers before the real Player exists,
+    /// without fabricating an XItem for TriggerManager and AI.
+    fn native_camera_player_pose(&mut self, map: &ProcessedMap) -> Option<(Vec3, f32)> {
+        self.ensure_native_camera_player_preview(map);
+        let fallback = self
+            .native_gameplay_player_pose()
+            .or_else(|| Self::serialized_camera_player_pose(map, self.selected_trigger))
+            .unwrap_or_else(|| {
+                let mut front = self.native_camera_player_preview.front;
+                front.y = 0.0;
+                (self.native_camera_player_preview.position, front.x.atan2(front.z))
+            });
+        // In gameplay the Camera tracks the same actual Player XItem as
+        // TriggerManager and AI. Never let an editor camera proxy override a
+        // live Player merely because the preview checkbox defaults to true.
+        if (self.simulate_ai && self.native_runtime_player_state.is_some())
+            || !self.native_camera_live_player_preview
+        {
+            return Some(fallback);
+        }
         let mut horizontal_front = self.native_camera_player_preview.front;
         horizontal_front.y = 0.0;
         if !horizontal_front.is_finite() || horizontal_front.length_squared() <= f32::EPSILON {
-            return Some((self.native_camera_player_preview.position, serialized.1));
+            return Some((self.native_camera_player_preview.position, fallback.1));
         }
         horizontal_front = horizontal_front.normalize();
         Some((
@@ -93,7 +128,7 @@ impl MapFrame {
     }
 
     fn native_camera_player_anchor(&mut self, map: &ProcessedMap) -> Option<Vec3> {
-        self.native_gameplay_player_pose(map)
+        self.native_camera_player_pose(map)
             .map(|(position, _)| position)
             .or_else(|| {
                 self.ensure_native_camera_player_preview(map);
@@ -239,7 +274,7 @@ impl MapFrame {
             .native_camera_runtime
             .take()
             .map(|runtime| runtime.current);
-        let Some((player_position, player_heading)) = self.native_gameplay_player_pose(map) else {
+        let Some((player_position, player_heading)) = self.native_camera_player_pose(map) else {
             self.native_default_camera_runtime = None;
             self.native_camera_last_time = None;
             self.viewer.lock().clear_native_camera();
@@ -303,5 +338,26 @@ impl MapFrame {
         } else {
             viewer.clear_native_camera();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn created_player_is_required_for_gameplay_target_pose() {
+        // The serialized spawn, free Camera and editor live position are not
+        // native Player XItems and must never create proximity/attack targets.
+        assert_eq!(native_created_player_pose(None), None);
+        let owner = RuntimePlayerState {
+            trigger_index: 7,
+            mode: 0,
+            position: Vec3::new(10.0, 2.0, -4.0),
+            rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        };
+        let (position, yaw) = native_created_player_pose(Some(owner)).unwrap();
+        assert_eq!(position, owner.position);
+        assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1.0e-5);
     }
 }

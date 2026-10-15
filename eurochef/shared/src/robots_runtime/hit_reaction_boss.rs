@@ -763,6 +763,7 @@ mod tests {
             capability_flags: ROBOTS_AI_HIT_CAPABILITY_FLAG,
             health,
             got_hit_latch: false,
+            turretbot_zero_health_latch_60c: false,
             owner_category: 1,
         }
     }

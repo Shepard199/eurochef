@@ -1,0 +1,2 @@
+import ghidra.app.decompiler.*; import ghidra.app.script.GhidraScript; import ghidra.program.model.listing.*;
+public class PostTransformDefs extends GhidraScript { public void run()throws Exception{DecompInterface d=new DecompInterface();d.openProgram(currentProgram);long[] xs={0x00426170L,0x004264c0L,0x00425690L};for(long x:xs){Function f=getFunctionContaining(toAddr(x));println("\n=== "+toAddr(x)+" "+f.getName()+" ===");DecompileResults r=d.decompileFunction(f,180,monitor);if(r.getDecompiledFunction()!=null)println(r.getDecompiledFunction().getC());}d.dispose();}}

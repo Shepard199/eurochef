@@ -1,0 +1,2 @@
+import ghidra.app.decompiler.*; import ghidra.app.script.GhidraScript; import ghidra.program.model.listing.*;
+public class SweepScalar extends GhidraScript { public void run()throws Exception{DecompInterface d=new DecompInterface();d.openProgram(currentProgram);Function f=getFunctionAt(toAddr(0x004d6560L));println("=== "+f+" ===");DecompileResults r=d.decompileFunction(f,1000,monitor);if(r.getDecompiledFunction()!=null)println(r.getDecompiledFunction().getC());d.dispose();}}

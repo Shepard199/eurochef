@@ -124,6 +124,74 @@ impl RobotsNaturalCubicSpline3 {
             .unwrap_or_default()
     }
 
+    /// Exact polyline-side projection used by native `XPath::GetNearestPoint`
+    /// at `0x0041FDF0`. Native first chooses the nearest raw node, then compares
+    /// only the two adjacent raw-node segments and returns
+    /// `segment_index + projected_distance / segment_length`.
+    ///
+    /// This is deliberately separate from cubic sampling: BossRatchet's
+    /// `0x004CACF0` consumes this raw XPath parameter and only then samples the
+    /// natural-cubic path.
+    pub fn nearest_xpath_parameter(&self, point: [f32; 3], looped: bool) -> Option<f32> {
+        let count = self.points.len();
+        if count == 0 {
+            return None;
+        }
+        if count == 1 {
+            return Some(0.0);
+        }
+
+        let nearest = self.nearest_node_index(point);
+        let mut best: Option<(f32, f32)> = None;
+
+        let mut consider = |start_index: usize, end_index: usize, parameter_base: f32| {
+            let start = self.points[start_index];
+            let end = self.points[end_index];
+            let delta = sub3(end, start);
+            let length_squared = dot3(delta, delta);
+            let fraction = if length_squared > f32::EPSILON {
+                (dot3(sub3(point, start), delta) / length_squared).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let closest = add3(start, mul3(delta, fraction));
+            let distance_squared = distance_squared3(point, closest);
+            let parameter = parameter_base + fraction;
+            if best
+                .as_ref()
+                .is_none_or(|(best_distance, _)| distance_squared < *best_distance)
+            {
+                best = Some((distance_squared, parameter));
+            }
+        };
+
+        if nearest > 0 {
+            consider(nearest - 1, nearest, (nearest - 1) as f32);
+        } else if looped {
+            consider(count - 1, 0, (count - 1) as f32);
+        }
+
+        if nearest + 1 < count {
+            consider(nearest, nearest + 1, nearest as f32);
+        } else if looped {
+            consider(count - 1, 0, (count - 1) as f32);
+        }
+
+        let (_, mut parameter) = best.unwrap_or((distance_squared3(point, self.points[nearest]), nearest as f32));
+        if looped {
+            let count_f = count as f32;
+            if parameter >= count_f {
+                parameter -= count_f;
+            }
+            if parameter < 0.0 {
+                parameter += count_f;
+            }
+        } else {
+            parameter = parameter.clamp(0.0, self.last_parameter());
+        }
+        Some(parameter)
+    }
+
     /// Engine-neutral form of native distance-to-parameter helper `0x0044A1E0`.
     /// It advances through the same spline in exact 0.1 parameter increments.
     pub fn advance_parameter_by_distance(&self, parameter: f32, distance: f32) -> f32 {
@@ -225,6 +293,10 @@ fn div3(value: [f32; 3], scalar: f32) -> [f32; 3] {
     [value[0] / scalar, value[1] / scalar, value[2] / scalar]
 }
 
+fn dot3(lhs: [f32; 3], rhs: [f32; 3]) -> f32 {
+    lhs[0] * rhs[0] + lhs[1] * rhs[1] + lhs[2] * rhs[2]
+}
+
 fn distance_squared3(lhs: [f32; 3], rhs: [f32; 3]) -> f32 {
     let dx = lhs[0] - rhs[0];
     let dy = lhs[1] - rhs[1];
@@ -250,6 +322,26 @@ mod tests {
         let spline = linear();
         assert_eq!(spline.sample(0.5), [5.0, 0.0, 0.0]);
         assert_eq!(spline.sample(1.5), [15.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn native_xpath_nearest_point_returns_fractional_raw_segment_parameter() {
+        let spline = linear();
+        assert!((spline.nearest_xpath_parameter([13.0, 4.0, 0.0], false).unwrap() - 1.3).abs() < 1.0e-6);
+        assert!((spline.nearest_xpath_parameter([2.5, -3.0, 0.0], false).unwrap() - 0.25).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn native_xpath_nearest_point_clamps_open_path_endpoints() {
+        let spline = linear();
+        assert_eq!(
+            spline.nearest_xpath_parameter([-5.0, 0.0, 0.0], false),
+            Some(0.0)
+        );
+        assert_eq!(
+            spline.nearest_xpath_parameter([25.0, 0.0, 0.0], false),
+            Some(2.0)
+        );
     }
 
     #[test]

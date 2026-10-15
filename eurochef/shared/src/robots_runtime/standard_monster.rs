@@ -8,9 +8,7 @@ use super::{
         ROBOTS_EF01_PERIODIC_IDLE_ANIM_MODES, ROBOTS_EF01_PERIODIC_IDLE_BASE_DELAY_TICKS,
         ROBOTS_EF01_PERMANENT_SOUND_NATIVE_PARAMETER, ROBOTS_EF01_PERMANENT_SOUND_UID,
     },
-    ef03_evilbot::{
-        ROBOTS_EF03_FLY_LOOP_NATIVE_PARAMETER, ROBOTS_EF03_FLY_LOOP_SOUND_UID,
-    },
+    ef03_evilbot::{ROBOTS_EF03_FLY_LOOP_NATIVE_PARAMETER, ROBOTS_EF03_FLY_LOOP_SOUND_UID},
     ew09_armoured::{ew09_attack_config, ROBOTS_EW09_PATROL_SCALAR},
     flee_navmesh::RobotsFleeNavMeshConfig,
     generic_attack::RobotsGenericAttackConfig,
@@ -381,19 +379,23 @@ impl RobotsStandardMonsterBehaviorConfig {
             first_update_uniform_scale: 1.0,
             stalk: Some(RobotsStalkNavMeshConfig::ew10_minion()),
             attacks: [
-                Some(RobotsGenericAttackConfig::standard_monster_attack_with_reentry(
-                    0x0900_0025,
-                    2.0,
-                    ROBOTS_EW10_EB14_ATTACK_YAW_TOLERANCE_RADIANS,
-                    0,
-                )),
-                Some(RobotsGenericAttackConfig::standard_monster_attack_window_with_reentry(
-                    0x0900_0027,
-                    2.0,
-                    4.0,
-                    ROBOTS_EW10_EB14_ATTACK_YAW_TOLERANCE_RADIANS,
-                    120,
-                )),
+                Some(
+                    RobotsGenericAttackConfig::standard_monster_attack_with_reentry(
+                        0x0900_0025,
+                        2.0,
+                        ROBOTS_EW10_EB14_ATTACK_YAW_TOLERANCE_RADIANS,
+                        0,
+                    ),
+                ),
+                Some(
+                    RobotsGenericAttackConfig::standard_monster_attack_window_with_reentry(
+                        0x0900_0027,
+                        2.0,
+                        4.0,
+                        ROBOTS_EW10_EB14_ATTACK_YAW_TOLERANCE_RADIANS,
+                        120,
+                    ),
+                ),
                 None,
             ],
             common_hit: Some(RobotsCommonAiHitConfig::fast_front_back()),
@@ -1470,15 +1472,42 @@ pub fn sweeper_behavior_winner(
     attack_group_priority: u8,
 ) -> Option<RobotsStandardMonsterBehaviorWinner> {
     let candidates = [
-        (periodic_idle_priority, RobotsStandardMonsterBehaviorWinner::PeriodicIdle),
-        (if pursue_ready { 0x1f } else { 1 }, RobotsStandardMonsterBehaviorWinner::PursueNavMesh),
-        (stalk_priority, RobotsStandardMonsterBehaviorWinner::StalkNavMesh),
-        (patrol_navmesh2_priority, RobotsStandardMonsterBehaviorWinner::PatrolNavMesh2),
-        (common_hit_priority, RobotsStandardMonsterBehaviorWinner::CommonHit),
-        (scrambled_hit_priority, RobotsStandardMonsterBehaviorWinner::ScrambledHit),
-        (electro_hit_priority, RobotsStandardMonsterBehaviorWinner::ElectroHit),
-        (magnetic_hit_priority, RobotsStandardMonsterBehaviorWinner::MagneticHit),
-        (attack_group_priority, RobotsStandardMonsterBehaviorWinner::AttackGroup),
+        (
+            periodic_idle_priority,
+            RobotsStandardMonsterBehaviorWinner::PeriodicIdle,
+        ),
+        (
+            if pursue_ready { 0x1f } else { 1 },
+            RobotsStandardMonsterBehaviorWinner::PursueNavMesh,
+        ),
+        (
+            stalk_priority,
+            RobotsStandardMonsterBehaviorWinner::StalkNavMesh,
+        ),
+        (
+            patrol_navmesh2_priority,
+            RobotsStandardMonsterBehaviorWinner::PatrolNavMesh2,
+        ),
+        (
+            common_hit_priority,
+            RobotsStandardMonsterBehaviorWinner::CommonHit,
+        ),
+        (
+            scrambled_hit_priority,
+            RobotsStandardMonsterBehaviorWinner::ScrambledHit,
+        ),
+        (
+            electro_hit_priority,
+            RobotsStandardMonsterBehaviorWinner::ElectroHit,
+        ),
+        (
+            magnetic_hit_priority,
+            RobotsStandardMonsterBehaviorWinner::MagneticHit,
+        ),
+        (
+            attack_group_priority,
+            RobotsStandardMonsterBehaviorWinner::AttackGroup,
+        ),
     ];
     let mut best_priority = 1u8;
     let mut selected = None;
@@ -3107,7 +3136,10 @@ mod tests {
         assert!(sweeper.pursue_enabled);
         assert_eq!(sweeper.pursue_stop_distance.to_bits(), 1.5f32.to_bits());
         assert_eq!(sweeper.stalk, Some(RobotsStalkNavMeshConfig::ew10_minion()));
-        assert_eq!(sweeper.common_hit, Some(RobotsCommonAiHitConfig::fast_front_back()));
+        assert_eq!(
+            sweeper.common_hit,
+            Some(RobotsCommonAiHitConfig::fast_front_back())
+        );
         assert!(sweeper.has_status_hit_nodes);
         assert!(sweeper.has_magnetic_hit_node());
 

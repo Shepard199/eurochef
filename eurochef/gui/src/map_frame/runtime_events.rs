@@ -1,5 +1,6 @@
-use super::runtime_ai::{locomotion_root_motion_policy, monster_nav_regions};
+use super::runtime_ai::{budget_maps_fixed_steps, locomotion_root_motion_policy, monster_nav_regions};
 use super::*;
+use eurochef_shared::robots_runtime::cutscene::RobotsCutsceneWaitForTextRuntime;
 
 const ROBOTS_CAMERA_SEQUENCE_TYPE: u32 = 85;
 const ROBOTS_SCRIPT_TRIGGER_TYPE: u32 = 4;
@@ -37,7 +38,51 @@ const ROBOTS_TUTORIAL_TYPE: u32 = 78;
 const ROBOTS_SCRIPT_DYNAMIC_RAYCAST_FLAG: u32 = 0x100;
 const ROBOTS_SCRIPT_UNSUPPORTED_DISTANCE_FLAGS: u32 = 0x0008_0000 | 0x0800_0000;
 const ROBOTS_NATIVE_FIXED_SECONDS: f64 = 1.0 / 60.0;
-const ROBOTS_NATIVE_MAX_FIXED_STEPS_PER_FRAME: usize = 200_000;
+
+/// Shipped routers address XTrigger_Player only with 0x100 or 0x101.
+/// Group link-initialisation 0x10000 and enable/disable/toggle messages are
+/// not Player creation requests and cannot materialize gameplay Player state.
+fn native_player_creation_event(event_mask: u32) -> bool {
+    matches!(event_mask, 0x100 | 0x101)
+}
+
+/// In gameplay the native fixed scheduler requires a validated Camera/MapZone
+/// frame. The editor's optional path preview retains its independent controls:
+/// it can run diagnostics without pretending that the level is playable.
+fn maps_native_fixed_schedule_enabled(
+    simulate_ai: bool,
+    animate_runtime_paths: bool,
+    native_scene_valid: bool,
+) -> bool {
+    if simulate_ai {
+        native_scene_valid
+    } else {
+        animate_runtime_paths
+    }
+}
+
+fn native_cutscene_wait_for_text_target_index(
+    triggers: &[ProcessedTrigger],
+    creator: &ProcessedTrigger,
+    choice: u8,
+    creator_flags_e8: u8,
+) -> Option<usize> {
+    if !RobotsCutsceneWaitForTextRuntime::completed_choice_route_enabled(
+        choice,
+        creator_flags_e8,
+    ) {
+        return None;
+    }
+    let target_type = match choice {
+        0 => ROBOTS_CHANGE_LEVEL_TYPE,
+        1 => ROBOTS_CUTSCENE_TYPE,
+        _ => return None,
+    };
+    creator.links.iter().take(8).find_map(|link| {
+        let index = robots_trigger_link_index(*link, triggers.len())?;
+        (triggers.get(index)?.ttype == target_type).then_some(index)
+    })
+}
 
 fn take_global_gameplay_rng_draws<const N: usize>(
     rng: &mut RuntimeRobotsGlobalRngState,
@@ -198,6 +243,22 @@ fn preview_pickup_trigger_manager_shared_rng(
         rng: next_rng,
         spawned,
     })
+}
+
+fn native_deferred_trigger_outputs(
+    map: &ProcessedMap,
+    trigger: &ProcessedTrigger,
+) -> Vec<(usize, u32)> {
+    (0..8usize)
+        .filter_map(|slot| {
+            let link = trigger.links.get(slot).copied()?;
+            let (target_index, _) = map_trigger_by_link(map, link)?;
+            Some((
+                target_index,
+                runtime_trigger_deferred_link_event(trigger, slot),
+            ))
+        })
+        .collect()
 }
 
 fn commit_native_slide_under_player_step(
@@ -1107,6 +1168,14 @@ impl MapFrame {
                 None,
             );
         }
+        if outcome.transition.commit_transition {
+            // Common setup 0x004935A0 detaches/destroys the old owner Physics,
+            // creates a replacement through shared component vslot +0x04 =
+            // 0x00493760, then attaches it. Do not leak motion/contact state across
+            // WatchBot component modes just because Maps stores the host body inline.
+            self.native_watchbot_physics =
+                RobotsCharacterPhysicsRuntimeState::watchbot_component_ctor_default();
+        }
         Some(outcome)
     }
 
@@ -1663,8 +1732,52 @@ impl MapFrame {
         Some(step)
     }
 
-    /// Host commit after mode1/mode2 physics has applied the shared accumulator to
-    /// the real WatchBot XItem. No synthetic integration happens inside MapFrame.
+    /// Fixed-step Maps host slice for the proven WatchBot base-XItemPhysics motion path.
+    /// Native `0x00493800` adds component motion to Physics `+0x2C..+0x38`; base
+    /// slot0 `0x00419400` combines it with the primary channel, applies the runtime-rate
+    /// scalar and clears the transient lane. Exact slot4 world-contact projection remains
+    /// a separate host phase and is deliberately not fabricated here.
+    pub fn advance_native_watchbot_owner_physics_fixed(
+        &mut self,
+        _map: &ProcessedMap,
+        world_motion_xyzw: [f32; 4],
+        owner_rotation_euler4: [f32; 4],
+    ) -> bool {
+        if !self.native_watchbot_owner_runtime.owner_xitem_exists_550
+            || !self.native_watchbot_owner_runtime.handler_attached
+        {
+            return false;
+        }
+        let Some(pose) = self.native_watchbot_owner_pose else {
+            return false;
+        };
+        // 0x00493800 adds to base Physics +0x2C..+0x38. That is a transient
+        // secondary motion accumulator, not the persistent Character-Physics lane.
+        self.native_watchbot_physics.add_secondary_motion_delta([
+            world_motion_xyzw[0],
+            world_motion_xyzw[1],
+            world_motion_xyzw[2],
+        ]);
+        self.native_watchbot_physics.advance_base_gravity(1.0 / 60.0);
+        let mut position = pose.position_xyz;
+        self.native_watchbot_physics
+            .consume_secondary_motion_with_gravity(&mut position, 1.0);
+        self.native_watchbot_physics.latch_contact_response_after_base_update();
+        if !position.iter().all(|value| value.is_finite()) {
+            return false;
+        }
+        let rotation = glam::Quat::from_euler(
+            glam::EulerRot::ZXY,
+            owner_rotation_euler4[2],
+            owner_rotation_euler4[0],
+            owner_rotation_euler4[1],
+        );
+        self.store_native_watchbot_owner_pose(position, Some(rotation.to_array()))
+    }
+
+    /// UE/external-host post-physics override after a real engine has applied the
+    /// WatchBot body accumulator and collision response. Maps has its own proven slot0
+    /// motion commit above; this seam remains for UE5.8/native-physics ownership.
     pub fn commit_native_watchbot_owner_post_physics_pose(
         &mut self,
         post_physics_position: Vec3,
@@ -1865,9 +1978,49 @@ impl MapFrame {
         steps
     }
 
+    pub(super) fn interact_native_watchbot_focus_from_map(
+        &mut self,
+        map: &ProcessedMap,
+    ) -> Option<RobotsWatchbotControlEnterOutcome> {
+        let focused = self.native_player_focus_runtime.current_owner?;
+        if focused.category != ROBOTS_XITEM_CATEGORY_ACTIVATION_PAD
+            || (focused.key >> 32) as u32 != map.hashcode
+        {
+            return None;
+        }
+        let trigger_index = focused.key as u32 as usize;
+        let trigger = map.triggers.get(trigger_index)?;
+        if trigger.ttype != ROBOTS_ACTIVATION_PAD_TYPE
+            || !self
+                .native_lightweight_trigger_lifecycle
+                .get(&focused.key)
+                .is_some_and(|state| state.xitem_exists)
+        {
+            return None;
+        }
+
+        let rotation = Quat::from_euler(
+            glam::EulerRot::ZXY,
+            trigger.rotation[2],
+            trigger.rotation[0],
+            trigger.rotation[1],
+        );
+        self.interact_native_watchbot_focus(
+            [
+                trigger.position.x,
+                trigger.position.y,
+                trigger.position.z,
+                1.0,
+            ],
+            rotation.to_array(),
+            None,
+        )
+    }
+
     /// Accepted action-button boundary for Player `0x004BCCA0` with a focused
-    /// native category 0x4C ActivationPad. Input ownership stays outside Maps;
-    /// this method starts exactly after native input vslot `+0x2C(4)` succeeds.
+    /// native category 0x4C ActivationPad. The shared transition remains physical-input
+    /// agnostic; Maps now calls this only after its host adapter receives native logical
+    /// action4 (PC default DIK_Q 0x10) from input vslot `+0x2C(4)` semantics.
     pub fn interact_native_watchbot_focus(
         &mut self,
         focused_position_xyzw: [f32; 4],
@@ -2270,19 +2423,27 @@ impl MapFrame {
         })
     }
 
-    fn advance_native_npc_behavior_fixed(&mut self, map: &ProcessedMap, player_position: Vec3) {
+    pub(super) fn advance_native_npc_behavior_fixed(
+        &mut self,
+        map: &ProcessedMap,
+        player_position: Option<Vec3>,
+    ) {
         let nav_regions = monster_nav_regions(map);
-        let gameplay_target_position = self.native_ai_gameplay_target_position(player_position);
+        // FollowPath / Flag2 / RandomIdle are owner-local behavior lanes and keep
+        // ticking even when the Maps host has no live Player pose yet. Only the
+        // proximity/face-player lane requires a resolved gameplay target.
+        let gameplay_target_position =
+            player_position.and_then(|position| self.native_ai_gameplay_target_position(position));
         for (trigger_index, trigger) in map.triggers.iter().enumerate() {
             if trigger.ttype != ROBOTS_NPC_TYPE {
                 continue;
             }
             let key = Self::runtime_event_key(map.hashcode, trigger_index);
-            let xitem_exists = self
-                .native_ai_trigger_lifecycle
-                .get(&key)
-                .is_some_and(|state| state.xitem_exists);
-            if !xitem_exists {
+            // Use the common AI live-owner policy here. Native Camera mode is
+            // still driven by TriggerManager lifecycle, while Fly/Orbit preview
+            // deliberately uses native_ai_preview_live. Gating NPC brains only
+            // on the former left preview bodies render-live but behavior-dead.
+            if !self.runtime_ai_character_xitem_live(map.hashcode, trigger_index) {
                 self.native_npc_behavior.remove(&key);
                 self.native_monster_navigation.remove(&key);
                 continue;
@@ -2373,7 +2534,11 @@ impl MapFrame {
                 if !runtime.diner_profile_bootstrapped {
                     // 0x0046B5BB..0x0046B5E3: 0x00455E30(0), Physics+0x08 bit2,
                     // paired 0x004535D0(1)/0x00453600(1). Handler+0x604 is also
-                    // cleared natively; the current NPC host has no consumer of that lane.
+                    // cleared natively. This is not a dead byte: common Monster state0
+                    // readers 0x00451D70/0x00451F40/0x00452120 gate their work on it;
+                    // in particular 0x00452120 owns Physics+0x14C bit0x20000. Diner's
+                    // explicit zero therefore disables that common lane, which this NPC
+                    // host preserves by not synthesizing the normal enabled state.
                     bootstrap_npc_diner_physics(&mut runtime.physics);
                     runtime.diner_profile_bootstrapped = true;
                 }
@@ -2387,7 +2552,7 @@ impl MapFrame {
                     .get(&key)
                     .is_none_or(|runtime| !runtime.random_idle.initialized);
             let initial_random_draw = random_needs_init
-                .then(|| self.native_global_gameplay_rng.next_u32())
+                .then(|| self.next_native_ai_gameplay_rng_u32())
                 .flatten();
 
             let (random_priority, proximity_priority, previous_node) = {
@@ -2452,9 +2617,8 @@ impl MapFrame {
             let random_enter_draws = if winner == Some(NativeNpcBehaviorNode::RandomIdle)
                 && previous_node != Some(NativeNpcBehaviorNode::RandomIdle)
             {
-                self.native_global_gameplay_rng
-                    .next_u32()
-                    .zip(self.native_global_gameplay_rng.next_u32())
+                self.next_native_ai_gameplay_rng_u32()
+                    .zip(self.next_native_ai_gameplay_rng_u32())
             } else {
                 None
             };
@@ -2738,9 +2902,7 @@ impl MapFrame {
                                 && npc_flag2_rebuild_will_consume_rng(&runtime.flag2)
                         };
                         let enter_draws = if enter_needs_rng {
-                            take_global_gameplay_rng_draws::<ROBOTS_NPC_FLAG2_ROUTE_SAMPLE_COUNT>(
-                                &mut self.native_global_gameplay_rng,
-                            )
+                            self.take_native_ai_gameplay_rng_draws::<ROBOTS_NPC_FLAG2_ROUTE_SAMPLE_COUNT>()
                         } else {
                             None
                         };
@@ -2775,9 +2937,7 @@ impl MapFrame {
                             && npc_flag2_rebuild_will_consume_rng(&runtime.flag2)
                     };
                     let step_draws = if step_needs_rng {
-                        take_global_gameplay_rng_draws::<ROBOTS_NPC_FLAG2_ROUTE_SAMPLE_COUNT>(
-                            &mut self.native_global_gameplay_rng,
-                        )
+                        self.take_native_ai_gameplay_rng_draws::<ROBOTS_NPC_FLAG2_ROUTE_SAMPLE_COUNT>()
                     } else {
                         None
                     };
@@ -3400,6 +3560,7 @@ impl MapFrame {
         let mut transporter_steps = FxHashMap::default();
         let mut transporter_resets = Vec::new();
         let mut active_transporters = Vec::new();
+        let mut active_boss_ratchets = Vec::new();
         for (trigger_index, trigger) in map.triggers.iter().enumerate() {
             let key = Self::runtime_event_key(map.hashcode, trigger_index);
             if self.native_trigger_disabled(map.hashcode, trigger_index, trigger) {
@@ -3423,6 +3584,12 @@ impl MapFrame {
                             .or_default()
                             .cleanup_zone_failed();
                         self.native_monster_transporters.remove(&key);
+                    } else if trigger.ttype == ROBOTS_BOSS_RATCHET_TRIGGER_TYPE {
+                        self.native_boss_ratchet_lifecycle
+                            .entry(key)
+                            .or_default()
+                            .cleanup_zone_failed();
+                        self.native_boss_ratchets.remove(&key);
                     } else if trigger.ttype == ROBOTS_BOSS_SEWER_CANON_TYPE {
                         self.native_camera_bit0_trigger_lifecycle
                             .entry(key)
@@ -3562,14 +3729,104 @@ impl MapFrame {
                 let action =
                     runtime_common_trigger_lifecycle_action(event, true, trigger.game_flags);
                 let proximity_factor = runtime_trigger_normal_proximity_factor(distance_squared);
+                let was_live = state.xitem_exists;
                 state.advance_trigger_manager(
                     action,
                     trigger.game_flags,
                     proximity_factor,
                     creates_this_update,
                 );
+                // XTrigger_AI_Character creates a *new* owner on this edge.
+                // A previously unloaded character body and Handler may still
+                // be cached by Maps, but the previous XItem's movement, attack,
+                // collision and RNG-dependent brain state must not be reused.
+                if !was_live && state.xitem_exists {
+                    self.clear_native_ai_xitem_owner_runtime(key);
+                    if let Some(body) = self.runtime_character_bodies.get_mut(&key) {
+                        let rotation = Quat::from_euler(
+                            glam::EulerRot::ZXY,
+                            trigger.rotation[2],
+                            trigger.rotation[0],
+                            trigger.rotation[1],
+                        );
+                        body.reset_owner_for_new_xitem(effective_position, rotation);
+                    }
+                }
                 continue;
             }
+            if trigger.ttype == ROBOTS_BOSS_RATCHET_TRIGGER_TYPE {
+                let Some((_, _, path)) = map_trigger_runtime_path(map, trigger) else {
+                    self.native_boss_ratchet_lifecycle.remove(&key);
+                    self.native_boss_ratchets.remove(&key);
+                    continue;
+                };
+                let Some(zone_index) = map.native_zone_index(trigger.position) else {
+                    // Native class event 0x200 only calls cleanup when trigger bit28 is set.
+                    // Shipped m08 type72 has game_flags=0x4, so an already-created owner
+                    // survives a temporarily unavailable trigger zone.
+                    if trigger.game_flags & 0x1000_0000 != 0 {
+                        self.native_boss_ratchet_lifecycle
+                            .entry(key)
+                            .or_default()
+                            .cleanup_zone_failed();
+                        self.native_boss_ratchets.remove(&key);
+                    } else if self
+                        .native_boss_ratchet_lifecycle
+                        .get(&key)
+                        .is_some_and(|state| state.xitem_exists)
+                    {
+                        active_boss_ratchets.push((key, trigger_index));
+                    }
+                    continue;
+                };
+                let Some(zone_state) = self.native_zone_runtime.get(zone_index).copied() else {
+                    continue;
+                };
+                let state = self.native_boss_ratchet_lifecycle.entry(key).or_default();
+                if zone_state.activated && zone_state.visual_depth > 0 {
+                    let distance_squared = trigger.position.distance_squared(player_position);
+                    if let Some(event) =
+                        runtime_trigger_distance_event(distance_squared, trigger.game_flags)
+                    {
+                        let action = runtime_common_trigger_lifecycle_action(
+                            event,
+                            true,
+                            trigger.game_flags,
+                        );
+                        match action {
+                            crate::map_runtime::RuntimeCommonTriggerLifecycleAction::ImmediateActive
+                            | crate::map_runtime::RuntimeCommonTriggerLifecycleAction::DelayedActive { .. } => {
+                                // XTrigger_BossRatchet +0x6C consumes event 0x100 and creates
+                                // the MagnetTruck owner. Event 0x200 is ignored for shipped
+                                // flags because bit28 is clear, so do not run generic inactive
+                                // destruction here.
+                                state.advance_trigger_manager(
+                                    action,
+                                    trigger.game_flags,
+                                    runtime_trigger_normal_proximity_factor(distance_squared),
+                                    creates_this_update,
+                                );
+                            }
+                            crate::map_runtime::RuntimeCommonTriggerLifecycleAction::InactiveState2
+                            | crate::map_runtime::RuntimeCommonTriggerLifecycleAction::InactiveState3 => {
+                                if trigger.game_flags & 0x1000_0000 != 0 {
+                                    state.cleanup_zone_failed();
+                                    self.native_boss_ratchets.remove(&key);
+                                }
+                            }
+                        }
+                    }
+                } else if trigger.game_flags & 0x1000_0000 != 0 {
+                    state.cleanup_zone_failed();
+                    self.native_boss_ratchets.remove(&key);
+                }
+                if state.xitem_exists {
+                    active_boss_ratchets.push((key, trigger_index));
+                }
+                let _ = path;
+                continue;
+            }
+
             if trigger.ttype == ROBOTS_MONSTER_TRANSPORTER_TYPE {
                 let Some((_, _, primary)) = map_trigger_runtime_path(map, trigger) else {
                     self.native_monster_transporter_lifecycle.remove(&key);
@@ -3738,6 +3995,29 @@ impl MapFrame {
             }
         }
 
+        for (key, trigger_index) in active_boss_ratchets {
+            let Some(trigger) = map.triggers.get(trigger_index) else {
+                continue;
+            };
+            let Some((_, _, path)) = map_trigger_runtime_path(map, trigger) else {
+                self.native_boss_ratchets.remove(&key);
+                continue;
+            };
+            if !self.native_boss_ratchets.contains_key(&key) {
+                let Some(runtime) = NativeBossRatchetHostRuntime::new(path, trigger.position) else {
+                    continue;
+                };
+                self.native_boss_ratchets.insert(key, runtime);
+            }
+            let keep = self
+                .native_boss_ratchets
+                .get_mut(&key)
+                .is_some_and(|runtime| runtime.advance_fixed(player_position).is_some());
+            if !keep {
+                self.native_boss_ratchets.remove(&key);
+            }
+        }
+
         for trigger_index in transporter_resets {
             self.dispatch_runtime_event(map, trigger_index, 0x1000, wall_time);
         }
@@ -3836,6 +4116,14 @@ impl MapFrame {
                     continue;
                 }
 
+                // Generic Script +0x60 (0x004037F0) reads creator +0xCC for
+                // WaitForMessage/WaitForMessageSpecific. The common Trigger
+                // dispatcher mirrors that field as the last delivered event mask.
+                let creator_message_mask = self
+                    .native_common_trigger_events
+                    .get(&key)
+                    .map(|state| state.last_event)
+                    .unwrap_or_default();
                 let gameplay_state = &mut self.native_script_gameplay_state;
                 let mut host_music_volume_percent = None;
                 let mut host_effects = Vec::new();
@@ -3846,6 +4134,7 @@ impl MapFrame {
                     if state.lifecycle.xitem_exists {
                         if let Some(script) = selected_script.as_ref() {
                             let mut effects = Vec::new();
+                            let mut inventory_checks = Vec::new();
                             let _step = state.advance_script(script, |event| {
                                 let Some(execution) = execute_recovered_handler_script_command(
                                     RobotsHandlerScriptCommandFamily::Cutscene,
@@ -3867,6 +4156,12 @@ impl MapFrame {
                                 }) {
                                     restore_player_health = true;
                                 }
+                                if let Some(outcome) = inventory_check_outcome(
+                                    &execution.plan.semantic,
+                                    |uid| gameplay_state.inventory.stored_current(uid),
+                                ) {
+                                    inventory_checks.push(outcome);
+                                }
                                 if let Some(effect) = plan_cutscene_effect(&execution.plan.semantic)
                                 {
                                     effects.push(effect);
@@ -3878,8 +4173,27 @@ impl MapFrame {
                                     RobotsHandlerEventReturnPolicy::One => {
                                         RobotsScriptNativeEventResult::Hold
                                     }
+                                    RobotsHandlerEventReturnPolicy::HostResult => {
+                                        match &execution.plan.semantic {
+                                            eurochef_shared::robots_runtime::events::RobotsHandlerScriptCommandSemantic::WaitForMessage => {
+                                                if creator_message_mask != 0 {
+                                                    RobotsScriptNativeEventResult::Continue
+                                                } else {
+                                                    RobotsScriptNativeEventResult::Hold
+                                                }
+                                            }
+                                            eurochef_shared::robots_runtime::events::RobotsHandlerScriptCommandSemantic::WaitForMessageSpecific {
+                                                mask: Some(mask),
+                                            } if *mask < 0x1_0000
+                                                && creator_message_mask != 0
+                                                && creator_message_mask & *mask == *mask =>
+                                            {
+                                                RobotsScriptNativeEventResult::Continue
+                                            }
+                                            _ => RobotsScriptNativeEventResult::Hold,
+                                        }
+                                    }
                                     RobotsHandlerEventReturnPolicy::StateDependent
-                                    | RobotsHandlerEventReturnPolicy::HostResult
                                     | RobotsHandlerEventReturnPolicy::Delegate => {
                                         // StateMarker is consumed internally by NativeCutsceneRuntimeState.
                                         // Other stateful families remain fail-closed until their exact host
@@ -3888,6 +4202,28 @@ impl MapFrame {
                                     }
                                 }
                             });
+                            for effect in &effects {
+                                if let RobotsCutsceneEffect::WaitForText {
+                                    start: Some(start),
+                                    length: Some(length),
+                                    ..
+                                } = effect
+                                {
+                                    // 0x00407E40 returns zero immediately and only arms
+                                    // Handler +0x3C0/+0x16A8. Dedicated 0x00409970
+                                    // services the rewind/completion latch later.
+                                    state.wait_for_text_runtime.arm(*start, *length);
+                                }
+                            }
+                            for outcome in inventory_checks {
+                                if let Some(marker_index) = outcome.marker_index {
+                                    let _ = state
+                                        .state_marker_runtime
+                                        .seek_state_marker_index_frame_bits(marker_index);
+                                } else if let Some(script_uid) = outcome.script_override_uid {
+                                    state.set_handler_script_override(Some(script_uid));
+                                }
+                            }
                             let creator_data0 =
                                 trigger.data.first().copied().flatten().unwrap_or_default();
                             for effect in effects.iter().copied() {
@@ -3906,6 +4242,47 @@ impl MapFrame {
                                     }
                                     RobotsCutsceneEffect::SwapCharacter { mode } => {
                                         state.apply_swap_character_mode(mode);
+                                    }
+                                    RobotsCutsceneEffect::SetProperties { args, .. } => {
+                                        state.apply_own_xitem_set_properties(args);
+                                    }
+                                    RobotsCutsceneEffect::ChangeScript { script_uid, .. } => {
+                                        state.set_handler_script_override(script_uid);
+                                    }
+                                    RobotsCutsceneEffect::MissionCheck { args, .. } => {
+                                        // Native Cutscene 0x1600003C. A direct arg0
+                                        // writes Handler +0x3B8 while the global Mission
+                                        // manager exists. Sentinel -1/0x04000000 instead
+                                        // selects arg3 only when Player Mission status
+                                        // lookup(arg1) equals arg2.
+                                        if let Some(script_uid) = args[0] {
+                                            if script_uid != u32::MAX && script_uid != 0x0400_0000 {
+                                                state.set_handler_script_override(Some(script_uid));
+                                            } else if let (
+                                                Some(mission_uid),
+                                                Some(expected_status),
+                                                Some(conditional_script_uid),
+                                            ) = (args[1], args[2], args[3])
+                                            {
+                                                let valid_script = conditional_script_uid != 0
+                                                    && conditional_script_uid != u32::MAX
+                                                    && conditional_script_uid != 0x0400_0000
+                                                    && conditional_script_uid & 0xffff_0000
+                                                        == 0x0400_0000;
+                                                let status_matches = self
+                                                    .native_script_gameplay_state
+                                                    .missions
+                                                    .get(&mission_uid)
+                                                    .is_some_and(|status| {
+                                                        *status as u32 == expected_status
+                                                    });
+                                                if valid_script && status_matches {
+                                                    state.set_handler_script_override(Some(
+                                                        conditional_script_uid,
+                                                    ));
+                                                }
+                                            }
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -3927,6 +4304,15 @@ impl MapFrame {
                     self.native_cutscene_host_runtime
                         .apply_script_effect(effect);
                     match effect {
+                        RobotsCutsceneEffect::MessageRelay => {
+                            // Generic Script 0x16000018 sets creator common bit
+                            // 0x100000. RuntimeTriggerGraphState::deferred_fire is
+                            // that bit and TriggerManager consumes it next pass.
+                            self.native_trigger_graph
+                                .entry(key)
+                                .or_default()
+                                .deferred_fire = true;
+                        }
                         RobotsCutsceneEffect::ShowMessage {
                             message_uid: Some(message_uid),
                             parameter_08: Some(parameter_08),
@@ -3998,6 +4384,80 @@ impl MapFrame {
                                 &self.native_player_item_state,
                                 action,
                             );
+                        }
+                        RobotsCutsceneEffect::PositionCharacter {
+                            owner_selector: Some(0),
+                            position_selector: Some(position_selector),
+                        } if position_selector >= 0 => {
+                            // Native Cutscene 0x1600002B -> 0x004087F0. Shipped
+                            // scripts always select the process-global Player with arg0=0;
+                            // arg1 is one of the creator Trigger's eight links. The native
+                            // helper copies the linked XItem position/quaternion into Player
+                            // XItem +0xD0..+0xEC and mirrors it to CharacterPhysics.
+                            if let Some(player) = self.native_runtime_player_state.as_mut() {
+                                if let Some((_, target)) = trigger
+                                    .links
+                                    .get(position_selector as usize)
+                                    .and_then(|link| map_trigger_by_link(map, *link))
+                                {
+                                    player.position = target.position;
+                                    player.rotation = Quat::from_euler(
+                                        glam::EulerRot::ZXY,
+                                        target.rotation.z,
+                                        target.rotation.x,
+                                        target.rotation.y,
+                                    );
+                                    let mut direction = player.rotation * Vec3::Z;
+                                    if !direction.is_finite()
+                                        || direction.length_squared() <= f32::EPSILON
+                                    {
+                                        direction = Vec3::Z;
+                                    }
+                                    self.native_camera_player_preview
+                                        .set_pose_from_direction(player.position, direction);
+                                    self.native_camera_player_preview_map = Some(map.hashcode);
+                                }
+                            }
+                        }
+                        RobotsCutsceneEffect::AnimationControl {
+                            link_index: Some(link_index),
+                            action: Some(action),
+                            enabled: Some(enabled),
+                        } if link_index >= 0 && action >= 0 => {
+                            // Native Cutscene 0x1600003D resolves arg0 as one of the
+                            // creator Trigger's eight links, obtains that XItem's Handler,
+                            // then calls polymorphic +0xD4(action, enabled). The shipped
+                            // corpus uses this only against XTrigger_NPC. Its concrete
+                            // +0xD4 is 0x00456DC0: both branches select arg1 as the pending
+                            // AnimMode; the true branch additionally forces the animation
+                            // channel restart through common +0x484/+0x47C state.
+                            let linked = trigger
+                                .links
+                                .get(link_index as usize)
+                                .and_then(|link| map_trigger_by_link(map, *link));
+                            if let Some((npc_index, npc)) =
+                                linked.filter(|(_, linked)| linked.ttype == ROBOTS_NPC_TYPE)
+                            {
+                                let npc_key = Self::runtime_event_key(map.hashcode, npc_index);
+                                if let Some(runtime) = self.native_npc_behavior.get_mut(&npc_key) {
+                                    if enabled {
+                                        runtime.animation.setup_idle();
+                                    }
+                                    runtime.requested_anim_mode = Some(action as u32);
+                                    runtime.direct_owner_yaw_write = false;
+                                    if let Some(body) =
+                                        self.runtime_character_bodies.get_mut(&npc_key)
+                                    {
+                                        let _ = runtime.animation.advance(
+                                            body,
+                                            action as u32,
+                                            None,
+                                            ROBOTS_NATIVE_FIXED_SECONDS as f32,
+                                            NativeAiRootMotionPolicy::NONE,
+                                        );
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -4077,6 +4537,134 @@ impl MapFrame {
             .into_iter()
             .flat_map(|(_, members)| members)
             .collect()
+    }
+
+    /// InitialiseTriggers 0x0044B6B0 walks the serialized trigger array in
+    /// order, unlike the later zone-grouped per-frame TriggerManager service.
+    /// Player +0x6C is packed data[0] (0 when absent) and Initialise checks
+    /// it against [0x007B3000], then creates only if no Player owner exists.
+    pub(crate) fn native_player_initialise_candidate(map: &ProcessedMap, context: u32) -> Option<usize> {
+        map.triggers.iter().enumerate().find_map(|(index, trigger)| {
+            (trigger.ttype == ROBOTS_TRIGGER_PLAYER
+                && trigger.data.first().copied().flatten().unwrap_or_default() == context)
+                .then_some(index)
+        })
+    }
+
+    fn set_native_player_owner(
+        &mut self,
+        map_hashcode: u32,
+        player_state: RuntimePlayerState,
+        wall_time: f64,
+    ) {
+        self.native_runtime_player_state = Some(player_state);
+        self.service_native_watchbot_owner();
+        let mut direction = player_state.rotation * Vec3::Z;
+        if !direction.is_finite() || direction.length_squared() <= f32::EPSILON {
+            direction = Vec3::Z;
+        }
+        self.native_camera_player_preview
+            .set_pose_from_direction(player_state.position, direction);
+        self.native_camera_player_preview_map = Some(map_hashcode);
+        self.native_camera_player_preview_last_time = Some(wall_time);
+    }
+
+    /// Diagnostic entry to the native Initialise context/owner gate.
+    /// The engine's automatic active-context provider is not wired yet;
+    /// callers must explicitly supply it, never infer it from map order.
+    pub(super) fn initialise_native_player_for_context(
+        &mut self,
+        map: &ProcessedMap,
+        context: u32,
+        wall_time: f64,
+    ) -> Option<usize> {
+        if self.native_runtime_player_state.is_some() {
+            return None;
+        }
+        let index = Self::native_player_initialise_candidate(map, context)?;
+        let state = runtime_player_trigger_state(index, map.triggers.get(index)?)?;
+        self.set_native_player_owner(map.hashcode, state, wall_time);
+        Some(index)
+    }
+
+    /// Pure selection rule: same-level routing cannot silently switch a map.
+    /// A different sub-map may carry the same context but has its own lifetime.
+    pub(crate) fn native_same_level_player_destination(
+        maps: &[ProcessedMap],
+        active_map: usize,
+        context: u32,
+    ) -> Option<(u32, RuntimePlayerState)> {
+        let map = maps.get(active_map)?;
+        let index = Self::native_player_initialise_candidate(map, context)?;
+        let state = runtime_player_trigger_state(index, map.triggers.get(index)?)?;
+        Some((map.hashcode, state))
+    }
+
+    /// The native 0x0048C6A0 same-level non-forced branch does not reload EDB.
+    /// Only handle a destination Player belonging to the *active* sub-map:
+    /// changing sub-maps requires the yet-unhosted GameWnd streaming handshake.
+    /// XTrigger_Player's routed 0x100 may relocate an existing Player owner;
+    /// preserve all mission, inventory, AI and script runtime objects here.
+    pub(crate) fn relocate_same_level_player_context(
+        &mut self,
+        maps: &[ProcessedMap],
+        context: u32,
+        wall_time: f64,
+    ) -> Option<usize> {
+        if !self.simulate_ai || !self.native_script_trigger_lifecycle_valid
+            || self.native_runtime_player_state.is_none()
+            || self.native_mission_owner.is_some()
+        {
+            return None;
+        }
+        let (map_uid, new_owner) =
+            Self::native_same_level_player_destination(maps, self.selected_map, context)?;
+        if self.native_zone_runtime_map != Some(map_uid) {
+            return None;
+        }
+        self.set_native_player_owner(map_uid, new_owner, wall_time);
+        Some(new_owner.trigger_index)
+    }
+
+    /// A progress-only host checkpoint. This is NOT a complete native game
+    /// save: live XItems, dynamic NPCs, scene timers and Player transform are
+    /// deliberately not serialized until their native SaveRestore contracts
+    /// have been proven. Reuse the exact persistent groups of ChangeLevel.
+    pub(crate) fn gameplay_checkpoint_progress(&self) -> Option<RobotsLevelTransitionProgress> {
+        (self.simulate_ai
+            && self.native_script_trigger_lifecycle_valid
+            && self.native_runtime_player_state.is_some()
+            && self.native_zone_runtime_map.is_some()
+            && self.native_mission_owner.is_none())
+            .then(|| {
+                let mut progress = RobotsLevelTransitionProgress {
+                    gameplay: self.native_script_gameplay_state.clone(),
+                    player_items: self.native_player_item_state.clone(),
+                    health_fraction_bits_58000027: None,
+                    selected_action_uid_58000029: Some(
+                        self.native_player_action_runtime.pending_action_uid_5e8
+                            .unwrap_or(self.native_player_action_runtime.committed_action_uid_5cc),
+                    ),
+                    player_scalar_bits_58000028: Some(self.native_player_action_runtime.player_scalar_590_bits),
+                };
+                progress.capture_health_fraction(
+                    self.native_player_hit_runtime.current_health,
+                    self.native_player_hit_runtime.max_health,
+                );
+                progress
+            })
+    }
+
+    /// Only a live gameplay scene may send its ChangeLevel request to the EDB
+    /// owner. Diagnostic/editor events must never initiate a file transition.
+    pub(crate) fn take_gameplay_change_level_request(
+        &mut self,
+    ) -> Option<(RobotsChangeLevelRequest, RobotsLevelTransitionProgress)> {
+        let (map_uid, _, request) = self.native_change_level_request.take()?;
+        (self.native_zone_runtime_map == Some(map_uid))
+            .then(|| self.gameplay_checkpoint_progress())
+            .flatten()
+            .map(|progress| (request, progress))
     }
 
     fn dispatch_native_group_broadcast(
@@ -4383,6 +4971,41 @@ impl MapFrame {
         }
     }
 
+    fn service_native_cutscene_wait_for_text(
+        &mut self,
+        map: &ProcessedMap,
+        wall_time: f64,
+    ) {
+        let presentation_active = self.native_message_presentation.active.is_some();
+        let choice_result = self.native_message_presentation.active_choice_result;
+        let mut dispatches = Vec::new();
+
+        for (trigger_index, trigger) in map.triggers.iter().enumerate() {
+            if trigger.ttype != ROBOTS_CUTSCENE_TYPE {
+                continue;
+            }
+            let key = Self::runtime_event_key(map.hashcode, trigger_index);
+            let Some(state) = self.native_cutscene_runtime.get_mut(&key) else {
+                continue;
+            };
+            let Some(choice) = state.service_wait_for_text(presentation_active, choice_result) else {
+                continue;
+            };
+            if let Some(target_index) = native_cutscene_wait_for_text_target_index(
+                &map.triggers,
+                trigger,
+                choice,
+                state.creator_runtime_flags_e8,
+            ) {
+                dispatches.push(target_index);
+            }
+        }
+
+        for target_index in dispatches {
+            self.dispatch_runtime_event(map, target_index, ROBOTS_EVENT_ACTIVATE, wall_time);
+        }
+    }
+
     fn advance_native_message_presentation_fixed(&mut self, wall_time: f64) {
         if self.native_message_presentation.pending_destroy {
             self.native_message_presentation.complete_deferred_destroy();
@@ -4407,7 +5030,6 @@ impl MapFrame {
         &mut self,
         map: &ProcessedMap,
         wall_time: f64,
-        player_position: Option<Vec3>,
         creates_this_update: &mut u32,
     ) -> bool {
         self.initialize_native_groups(map, wall_time);
@@ -4417,6 +5039,10 @@ impl MapFrame {
             let Some(trigger) = map.triggers.get(trigger_index) else {
                 continue;
             };
+            // Native manager walks creators in order. Group/Pattern initial
+            // dispatch and earlier trigger events may create or reposition
+            // Player during this *same* pass; later creators must observe it.
+            let player_position = self.native_gameplay_player_pose().map(|(position, _)| position);
             self.advance_native_lightweight_trigger_lifecycle_for_index(
                 map,
                 trigger_index,
@@ -4565,6 +5191,22 @@ impl MapFrame {
                         }
                     }
                 } else {
+                    // Pickup collection finalizer 0x00414100 may arm the source
+                    // XTrigger's common bit0x100000 during the previous XItem phase.
+                    // Consume it on the next TriggerManager pass, not immediately
+                    // from the collection callback.
+                    let deferred_outputs = if self
+                        .native_trigger_graph
+                        .get(&key)
+                        .is_some_and(|state| state.deferred_fire)
+                    {
+                        if let Some(state) = self.native_trigger_graph.get_mut(&key) {
+                            state.deferred_fire = false;
+                        }
+                        native_deferred_trigger_outputs(map, trigger)
+                    } else {
+                        Vec::new()
+                    };
                     let current_lifecycle = self
                         .native_pickup_trigger_lifecycle
                         .get(&key)
@@ -4605,18 +5247,14 @@ impl MapFrame {
                             *creates_this_update = next.creates_this_update;
                             self.native_global_gameplay_rng = next.rng;
                             if let Some(spawned) = next.spawned {
-                                let handler = RobotsPickupHandlerRuntimeState::new(
-                                    spawned.layout.handler_datum_uid,
-                                    spawned.layout.quantity,
+                                let runtime = super::runtime_pickup::native_pickup_xitem_from_spawn(
+                                    trigger.ttype,
+                                    &trigger.data,
+                                    trigger.game_flags,
+                                    spawned,
                                     &mut self.native_pickup_global_scheduler,
                                 );
-                                self.native_pickup_xitems.insert(
-                                    key,
-                                    NativePickupXItemRuntime {
-                                        spawn: spawned,
-                                        handler,
-                                    },
-                                );
+                                self.native_pickup_xitems.insert(key, runtime);
                             }
                             if !next.lifecycle.xitem_exists {
                                 self.native_pickup_xitems.remove(&key);
@@ -4626,6 +5264,9 @@ impl MapFrame {
                             self.native_global_gameplay_rng.invalidate();
                             shared_rng_order_known = false;
                         }
+                    }
+                    for (target_index, event_mask) in deferred_outputs {
+                        self.dispatch_runtime_event(map, target_index, event_mask, wall_time);
                     }
                 }
                 continue;
@@ -4760,17 +5401,7 @@ impl MapFrame {
                 continue;
             }
 
-            let outputs = (0..8usize)
-                .filter_map(|slot| {
-                    let link = trigger.links.get(slot).copied()?;
-                    let (target_index, _) = map_trigger_by_link(map, link)?;
-                    Some((
-                        target_index,
-                        runtime_trigger_deferred_link_event(trigger, slot),
-                    ))
-                })
-                .collect::<Vec<_>>();
-            for (target_index, event_mask) in outputs {
+            for (target_index, event_mask) in native_deferred_trigger_outputs(map, trigger) {
                 self.dispatch_runtime_event(map, target_index, event_mask, wall_time);
             }
         }
@@ -4783,7 +5414,16 @@ impl MapFrame {
             .replace(wall_time)
             .map(|previous| (wall_time - previous).max(0.0))
             .unwrap_or_default();
-        if !self.animate_runtime_paths {
+        // Native TriggerManager is part of the level's 60Hz gameplay loop, NOT
+        // the editor's optional Platform/Lift/Vehicle path animation preview.
+        // With Simulate AI enabled, keep spawning/despawning XItems and serving
+        // missions/events even if Animate Runtime Motion is switched off.
+        if !maps_native_fixed_schedule_enabled(
+            self.simulate_ai,
+            self.animate_runtime_paths,
+            self.native_script_trigger_lifecycle_valid
+                && self.native_zone_runtime_map == Some(map.hashcode),
+        ) {
             self.native_camera_fixed_accumulator = 0.0;
             return;
         }
@@ -4798,15 +5438,16 @@ impl MapFrame {
                 .or_insert_with(|| NativeCameraSequenceRuntime::idle(sequence_index));
         }
 
-        let player_pose = self.native_gameplay_player_pose(map);
-        let player_position = player_pose.map(|(position, _)| position);
-        self.native_camera_fixed_accumulator += delta_seconds;
-        let steps = (self.native_camera_fixed_accumulator / ROBOTS_NATIVE_FIXED_SECONDS)
-            .floor()
-            .min(ROBOTS_NATIVE_MAX_FIXED_STEPS_PER_FRAME as f64) as usize;
-        self.native_camera_fixed_accumulator -= steps as f64 * ROBOTS_NATIVE_FIXED_SECONDS;
+        let steps = budget_maps_fixed_steps(
+            &mut self.native_camera_fixed_accumulator,
+            delta_seconds,
+            ROBOTS_NATIVE_FIXED_SECONDS,
+        );
 
         for _ in 0..steps {
+            // Player can be created or teleported by an earlier script event.
+            // Never retain a pre-event pose across multiple fixed engine ticks.
+            let player_position = self.native_gameplay_player_pose().map(|(position, _)| position);
             // Native order: GameWnd fade first, then XTriggerManager/Camera_Sequence
             // (0x00444CE4 -> 0x0044BE10), then the XItem Handler/Camera phase
             // (0x00444D56 -> manager +0x0C -> Camera +0x34).
@@ -4861,15 +5502,22 @@ impl MapFrame {
                     wall_time,
                 );
             }
+            // CameraSequence targets can deliver a real Player activation.
+            // TriggerManager looks up that owner for each creator in order.
             let mut creates_this_update = 0u32;
             let sweeper_runtime_before_trigger_manager = self.native_sweeper_boss_runtime.clone();
             let shared_rng_order_known = self.advance_native_trigger_graph_fixed(
                 map,
                 wall_time,
-                player_position,
                 &mut creates_this_update,
             );
             self.advance_native_message_presentation_fixed(wall_time);
+            self.service_native_cutscene_wait_for_text(map, wall_time);
+            // Group/Pattern, deferred and Cutscene/Message completion events
+            // may have created or repositioned XTrigger_Player. Its actual
+            // post-event pose owns the Script/Pickup/XItem slice that follows.
+            let player_pose = self.native_gameplay_player_pose();
+            let player_position = player_pose.map(|(position, _)| position);
             if !shared_rng_order_known {
                 // A later TriggerManager RNG boundary cannot leave the boss after its controller
                 // service while the same native frame's XItem slice is still unrepresented.
@@ -4902,8 +5550,26 @@ impl MapFrame {
                 player_position,
                 &mut creates_this_update,
             );
+            if !self.simulate_ai {
+                // With AI simulation disabled this runtime-events clock owns the
+                // generic XItem slice. Existing Script XItems advance before
+                // Pickup can create new children in the same represented tick.
+                self.advance_native_transient_script_xitems_fixed(map, wall_time);
+            }
+            // Script triggers and existing Script XItems may dispatch a Player
+            // relocation event as well. Pickup, focus and boss XItem consumers
+            // must see the owner *after* those event-producing phases.
+            let player_pose = self.native_gameplay_player_pose();
+            let player_position = player_pose.map(|(position, _)| position);
+            // XItemHandler_Pickup participates in the same native XItem slice.
+            // Register periodic candidates before the process-global Pickup tail.
+            self.advance_native_pickup_xitems_fixed(map, player_position);
+            // Non-AI gameplay producers may enqueue GeneratePickupFromHash too.
+            // They join the same Pickup slice and process-global ordinal tail,
+            // never a synthetic serialized trigger lifecycle.
+            self.consume_native_dynamic_pickup_spawns();
+            self.advance_native_dynamic_pickups_fixed(map, player_position);
             if let Some((player_position, player_yaw)) = player_pose {
-                self.advance_native_npc_behavior_fixed(map, player_position);
                 self.advance_native_player_focus_fixed(map, wall_time, player_position, player_yaw);
             }
             let sweeper_xitem_committed = if shared_rng_order_known {
@@ -4963,7 +5629,34 @@ impl MapFrame {
                 }
             }
             self.advance_native_lightweight_trigger_xitems(map);
+            let pickup_tail_exact =
+                self.finish_native_pickup_global_scheduler_fixed(shared_rng_order_known);
+            if !pickup_tail_exact
+                && self
+                    .native_pickup_global_scheduler
+                    .periodic_candidate_count_b8
+                    != 0
+            {
+                // 0x00444E0A requires a process-global gameplay RNG draw when at
+                // least one periodic Pickup candidate registered. Unknown seed
+                // provenance poisons later shared consumers rather than inventing
+                // a selected ordinal.
+                self.native_global_gameplay_rng.invalidate();
+            }
             self.advance_native_sweeper_boss_post_xitem_pickup_tail_fixed(map);
+            if !self.simulate_ai {
+                // When AI simulation is not the active XItem fixed-clock owner,
+                // runtime-events owns generic Script-XItem service. Producers from
+                // this tick materialize only after existing Script XItems advance.
+                self.consume_native_script_xitem_spawns();
+            }
+            // Dynamic AI class hosts run after the Sweeper-owned XItem phase, so their
+            // +0x12C requests can be newer than the boss runtime's internal flush.
+            // Mirror the outer 0x00444E80 unlink here before the next gameplay tick can
+            // count those pending handlers again.
+            if let Some(runtime) = self.native_sweeper_boss_runtime.as_mut() {
+                let _ = runtime.live_ai.flush_pending_destroy_end_of_tick();
+            }
             self.native_camera_fade_transition.fixed_update_camera();
 
             for key in completed {
@@ -4982,6 +5675,7 @@ impl MapFrame {
                 trigger.ttype,
                 0 | 1
                     | 20
+                    | ROBOTS_CHANGE_LEVEL_TYPE
                     | ROBOTS_COUNTER_TYPE
                     | ROBOTS_TIMER_TYPE
                     | ROBOTS_MESSAGE_RELAY_TYPE
@@ -5002,7 +5696,16 @@ impl MapFrame {
         map: &ProcessedMap,
         wall_time: f64,
     ) -> Vec<Option<RuntimeEventPreviewSnapshot>> {
-        if !self.native_runtime_event_gate {
+        // In gameplay, a stale/fly/orbit Camera cannot drive native timer,
+        // mission, pickup and XItem updates from a serialized Player fallback.
+        // In editor preview, only the explicit Native Event Gate is authority.
+        let schedule_enabled = maps_native_fixed_schedule_enabled(
+            self.simulate_ai,
+            self.animate_runtime_paths,
+            self.native_script_trigger_lifecycle_valid
+                && self.native_zone_runtime_map == Some(map.hashcode),
+        );
+        if !schedule_enabled || (!self.simulate_ai && !self.native_runtime_event_gate) {
             self.native_camera_fixed_last_time = Some(wall_time);
             self.native_camera_fixed_accumulator = 0.0;
             return vec![None; map.triggers.len()];
@@ -5011,6 +5714,14 @@ impl MapFrame {
         self.advance_native_camera_schedule(map, wall_time);
 
         let mut node_dispatches = Vec::new();
+        // During gameplay, serialized path speeds run at 1.0 regardless of
+        // the editor's optional playback-speed slider or preview visibility.
+        // Their inactive constructor state remains inactive until an event.
+        let path_speed = if self.simulate_ai {
+            1.0
+        } else {
+            self.runtime_path_playback_speed
+        };
         for (index, trigger) in map.triggers.iter().enumerate() {
             if !Self::runtime_event_supported(map, trigger) {
                 continue;
@@ -5019,13 +5730,13 @@ impl MapFrame {
                 .runtime_event_states
                 .entry(Self::runtime_event_key(map.hashcode, index))
                 .or_default();
-            let before = state.snapshot(trigger, self.runtime_path_playback_speed);
-            if self.animate_runtime_paths {
-                state.advance_runtime(map, trigger, wall_time, self.runtime_path_playback_speed);
+            let before = state.snapshot(trigger, path_speed);
+            if schedule_enabled {
+                state.advance_runtime(map, trigger, wall_time, path_speed);
             } else {
                 state.hold(wall_time);
             }
-            let after = state.snapshot(trigger, self.runtime_path_playback_speed);
+            let after = state.snapshot(trigger, path_speed);
             if before.active && after.active {
                 node_dispatches.extend(
                     runtime_path_node_dispatches_between(
@@ -5167,6 +5878,19 @@ impl MapFrame {
         if common_result.forward_to_class {
             let serialized_data0 = trigger.data.first().copied().flatten().unwrap_or_default();
             match trigger.ttype {
+                ROBOTS_CHANGE_LEVEL_TYPE => {
+                    if let Some(request) =
+                        RobotsChangeLevelRequest::from_trigger_event_when_mission_idle(
+                            event_mask, &trigger.data, self.native_mission_owner.is_some(),
+                        )
+                    {
+                        // Mission ownership (native DAT_007B31CC) has already
+                        // been checked. Record only the admitted event; actual
+                        // level reload is committed by the app-level host.
+                        self.native_change_level_request =
+                            Some((map.hashcode, trigger_index, request));
+                    }
+                }
                 ROBOTS_SHOP_TYPE => {
                     let shop_uid = trigger.data.get(3).copied().flatten().unwrap_or_default();
                     let has_linked_npc =
@@ -5447,21 +6171,11 @@ impl MapFrame {
             return;
         }
 
-        if trigger.ttype == 0 {
+        if trigger.ttype == ROBOTS_TRIGGER_PLAYER && native_player_creation_event(event_mask) {
             if let Some(player_state) = runtime_player_trigger_state(trigger_index, trigger) {
-                self.native_runtime_player_state = Some(player_state);
-                // Player trigger creation calls persistent restore first and then
-                // `0x004AFF80`; if HT_Upgrade_Watchbot is already restored this
-                // creates the Player-owned WatchBot XItem at +0x550 here.
-                self.service_native_watchbot_owner();
-                let mut direction = player_state.rotation * Vec3::Z;
-                if !direction.is_finite() || direction.length_squared() <= f32::EPSILON {
-                    direction = Vec3::Z;
-                }
-                self.native_camera_player_preview
-                    .set_pose_from_direction(player_state.position, direction);
-                self.native_camera_player_preview_map = Some(map.hashcode);
-                self.native_camera_player_preview_last_time = Some(wall_time);
+                // Routed 0x100/0x101 can relocate an existing owner. Unlike
+                // Initialise, this class event is not singleton-create gated.
+                self.set_native_player_owner(map.hashcode, player_state, wall_time);
             }
         }
 
@@ -5662,6 +6376,8 @@ impl MapFrame {
         self.native_camera_fixed_last_time = None;
         self.native_camera_fixed_accumulator = 0.0;
         self.native_runtime_player_state = None;
+        self.native_change_level_request = None;
+        self.native_player_context_diagnostic = None;
         self.native_player_focus_runtime = NativePlayerFocusRuntimeState::default();
         self.native_game_control_runtime = RobotsGameControlRuntime::default();
         self.native_script_trigger_lifecycle.clear();
@@ -5671,7 +6387,6 @@ impl MapFrame {
         self.native_ai_last_hit_source_yaw.clear();
         self.native_ai_creator_runtime.clear();
         self.native_ai_deferred_destroy.clear();
-        self.native_npc_behavior.clear();
         self.native_cutscene_runtime.clear();
         self.native_cutscene_host_runtime = RobotsCutsceneHostRuntimeState::default();
         self.native_message_presentation = NativeMessagePresentationState::default();
@@ -5684,9 +6399,8 @@ impl MapFrame {
         self.native_trigger_graph.clear();
         self.native_mission_owner = None;
         self.native_script_gameplay_state.clear();
-        // Runtime character owner poses are XItem/Physics state. A full runtime
-        // reset must discard them so the next preview bootstraps from Trigger pose.
-        self.runtime_character_bodies.clear();
+        // AI bodies, class runtimes, physics and RNG reset as one lifetime.
+        self.reset_native_ai_runtime_state();
 
         self.native_monster_transporter_lifecycle.clear();
         self.native_monster_transporters.clear();
@@ -5706,6 +6420,58 @@ impl MapFrame {
 mod tests {
     use super::*;
     use crate::maps::{ProcessedPath, ProcessedPathNode};
+
+    #[test]
+    fn player_activation_does_not_accept_group_initialisation_or_toggle_events() {
+        // All shipped routed Player targets use 0x100/0x101. In particular,
+        // Group's 0x10000 initialise phase must never create the Player XItem.
+        assert!(native_player_creation_event(0x100));
+        assert!(native_player_creation_event(0x101));
+        for event in [0, 1, 2, 4, 5, 8, 0xA, 0x200, 0x1000, 0x10000] {
+            assert!(!native_player_creation_event(event), "{event:#x}");
+        }
+    }
+
+    #[test]
+    fn player_initialise_matches_first_native_context_owner_not_first_player() {
+        let mut context_zero = trigger_with_links(ROBOTS_TRIGGER_PLAYER, [-1; 8]);
+        // The native base loader zeros +0x6C when the slot is absent.
+        context_zero.data[0] = None;
+        let mut context_seven = trigger_with_links(ROBOTS_TRIGGER_PLAYER, [-1; 8]);
+        context_seven.data[0] = Some(7);
+        let mut later_same_context = context_seven.clone();
+        later_same_context.data[1] = Some(2);
+        let map = ProcessedMap {
+            triggers: vec![
+                context_zero,
+                trigger_with_links(ROBOTS_GROUP_TYPE, [-1; 8]),
+                context_seven,
+                later_same_context,
+            ],
+            ..Default::default()
+        };
+        assert_eq!(MapFrame::native_player_initialise_candidate(&map, 0), Some(0));
+        assert_eq!(MapFrame::native_player_initialise_candidate(&map, 7), Some(2));
+        assert_eq!(MapFrame::native_player_initialise_candidate(&map, 8), None);
+    }
+
+    #[test]
+    fn native_level_clock_requires_valid_game_scene_not_editor_camera() {
+        // Real TriggerManager runs independently of editor path preview only
+        // when Camera and MapZone describe a valid native gameplay frame.
+        assert!(maps_native_fixed_schedule_enabled(true, false, true));
+        assert!(maps_native_fixed_schedule_enabled(true, true, true));
+        assert!(!maps_native_fixed_schedule_enabled(true, false, false));
+        assert!(!maps_native_fixed_schedule_enabled(true, true, false));
+        // Fly/Orbit diagnostic paths retain their independent edit controls.
+        assert!(maps_native_fixed_schedule_enabled(false, true, false));
+        assert!(maps_native_fixed_schedule_enabled(false, true, true));
+        assert!(!maps_native_fixed_schedule_enabled(false, false, false));
+        assert!(!maps_native_fixed_schedule_enabled(false, false, true));
+        // No all-at-once activation: event-owned paths begin inactive.
+        let inactive_path = RuntimeEventPreviewState::default();
+        assert!(!inactive_path.active);
+    }
     use eurochef_edb::robots_ball_track::{
         RobotsBallPathEntry, RobotsBallTrackPair, RobotsBallTrackSchedule,
     };
@@ -5718,6 +6484,10 @@ mod tests {
         },
         hit_reaction_watchbot::{
             ROBOTS_WATCHBOT_COMPONENT_SHARED_IGNORE_STATE, ROBOTS_WATCHBOT_HIT_ANIMATION_MODE_UID,
+        },
+        message_presentation::{
+            RobotsMessageFinishTiming, RobotsMessageQueueRecord, ROBOTS_MESSAGE_INPUT_CONFIRM,
+            ROBOTS_MESSAGE_INPUT_SELECT_SECOND,
         },
     };
 
@@ -5752,6 +6522,80 @@ mod tests {
         trigger.data = vec![None; 16];
         trigger.links = links.to_vec();
         trigger
+    }
+
+    #[test]
+    fn wait_for_text_end_to_end_message_choice_resolves_typed_routes() {
+        let triggers = vec![
+            trigger_with_links(
+                ROBOTS_CUTSCENE_TYPE,
+                [1, 2, -1, -1, -1, -1, -1, -1],
+            ),
+            trigger_with_links(ROBOTS_CHANGE_LEVEL_TYPE, [-1; 8]),
+            trigger_with_links(ROBOTS_CUTSCENE_TYPE, [-1; 8]),
+        ];
+        let creator = &triggers[0];
+        let record = RobotsMessageQueueRecord {
+            message_uid: 0x4500_0027,
+            finish_timing: RobotsMessageFinishTiming::Untimed,
+            parameter_08: 0,
+            parameter_0c: -1,
+            parameter_10: -1,
+            parameter_14: -1,
+            ui_flags: 0,
+            sound_uid: u32::MAX,
+        };
+
+        let mut first_presentation = NativeMessagePresentationState::default();
+        first_presentation.enqueue(record);
+        first_presentation.dequeue_front_into_active();
+        assert_eq!(
+            first_presentation.apply_logical_input(ROBOTS_MESSAGE_INPUT_CONFIRM),
+            eurochef_shared::robots_runtime::message_presentation::RobotsMessageInputResult::ChoiceCommitted {
+                choice: 0,
+            }
+        );
+        let mut first_cutscene = NativeCutsceneRuntimeState::default();
+        first_cutscene.wait_for_text_runtime.arm(8, 2);
+        first_cutscene.script_scheduler.frame = 10.0;
+        let first_choice = first_cutscene
+            .service_wait_for_text(
+                first_presentation.active.is_some(),
+                first_presentation.active_choice_result,
+            )
+            .expect("choice 0 must complete WaitForText");
+        assert_eq!(
+            native_cutscene_wait_for_text_target_index(&triggers, creator, first_choice, 0x02),
+            Some(1)
+        );
+        assert_eq!(
+            native_cutscene_wait_for_text_target_index(&triggers, creator, first_choice, 0x00),
+            None
+        );
+
+        let mut second_presentation = NativeMessagePresentationState::default();
+        second_presentation.enqueue(record);
+        second_presentation.dequeue_front_into_active();
+        second_presentation.apply_logical_input(ROBOTS_MESSAGE_INPUT_SELECT_SECOND);
+        second_presentation.apply_logical_input(ROBOTS_MESSAGE_INPUT_CONFIRM);
+        assert_eq!(second_presentation.active_choice_result, 1);
+        let mut second_cutscene = NativeCutsceneRuntimeState::default();
+        second_cutscene.wait_for_text_runtime.arm(8, 2);
+        second_cutscene.script_scheduler.frame = 10.0;
+        let second_choice = second_cutscene
+            .service_wait_for_text(
+                second_presentation.active.is_some(),
+                second_presentation.active_choice_result,
+            )
+            .expect("choice 1 must complete WaitForText");
+        assert_eq!(
+            native_cutscene_wait_for_text_target_index(&triggers, creator, second_choice, 0x04),
+            Some(2)
+        );
+        assert_eq!(
+            native_cutscene_wait_for_text_target_index(&triggers, creator, second_choice, 0x02),
+            None
+        );
     }
 
     #[test]
@@ -6096,6 +6940,7 @@ mod tests {
             capability_flags: ROBOTS_AI_HIT_CAPABILITY_FLAG,
             health: 9,
             got_hit_latch: false,
+            turretbot_zero_health_latch_60c: false,
             owner_category: 1,
         };
         let hit = RobotsAcceptedHitReactionInput {
@@ -6140,6 +6985,7 @@ mod tests {
             capability_flags: ROBOTS_AI_HIT_CAPABILITY_FLAG,
             health: 9,
             got_hit_latch: false,
+            turretbot_zero_health_latch_60c: false,
             owner_category: 1,
         };
         let missing = apply_native_boss_sewer_hit_runtime(

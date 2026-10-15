@@ -2,7 +2,7 @@ use std::io::{Seek, SeekFrom};
 
 use anyhow::Context;
 use eurochef_edb::{binrw::BinReaderExt, edb::EdbFile};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::spreadsheets::UXGeoSpreadsheet;
 
@@ -71,7 +71,7 @@ pub fn read_robots_mission_definitions(
     Ok(definitions)
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum RobotsMissionStatus {
     #[default]
@@ -95,13 +95,13 @@ impl RobotsMissionStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RobotsMissionStatusValue {
     pub mission_uid: u32,
     pub status: RobotsMissionStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RobotsMissionState {
     pub values: Vec<RobotsMissionStatusValue>,
 }

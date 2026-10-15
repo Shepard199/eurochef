@@ -564,6 +564,9 @@ impl RenderStore {
     // }
 
     pub fn is_object_loaded(&self, file: Hashcode, hashcode: Hashcode) -> bool {
+        // 0xFFFFFFFF is a shipped sentinel for an unbound resource (for
+        // example Animation.skin). There is nothing to load or classify.
+        if hashcode == u32::MAX { return true; }
         match hashcode.base() {
             HC_BASE_ENTITY | HC_BASE_SCRIPT | HC_BASE_TEXTURE | HC_BASE_ANIMSKIN
             | HC_BASE_PARTICLE => {}
@@ -658,6 +661,13 @@ mod tests {
     use super::*;
     use eurochef_edb::versions::Platform;
     use eurochef_shared::script::UXGeoScriptCommand;
+
+    #[test]
+    fn missing_resource_sentinel_never_becomes_unknown_render_object() {
+        let store = RenderStore::new();
+        assert!(store.is_object_loaded(0x0100_0042, u32::MAX));
+        assert!(!store.is_object_loaded(0x0100_0042, 0x0200_0001));
+    }
 
     fn entity_command(hashcode: Hashcode) -> UXGeoScriptCommand {
         UXGeoScriptCommand {

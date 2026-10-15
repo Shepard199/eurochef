@@ -13,20 +13,156 @@ fn robots_surface_debug_colour(surface_mask: u16) -> Vec3 {
     }
 }
 
-fn robots_ai_character_render_pose(
+fn robots_ai_character_render_transform(
     runtime_controls_presence: bool,
-    ai_state: Option<(bool, Option<(Vec3, Quat)>)>,
+    ai_state: Option<(
+        bool,
+        Option<(Vec3, Quat, Vec3, f32)>,
+        Option<NativeAiAnimationPresentationSample>,
+    )>,
     serialized_position: Vec3,
     serialized_rotation: Quat,
-) -> Option<(Vec3, Quat)> {
+    serialized_scale: Vec3,
+) -> Option<(Vec3, Quat, Vec3)> {
     if !runtime_controls_presence {
-        return Some((serialized_position, serialized_rotation));
+        return Some((serialized_position, serialized_rotation, serialized_scale));
     }
-    let (xitem_live, live_pose) = ai_state?;
+    let (xitem_live, live_transform, _) = ai_state?;
     if !xitem_live {
         return None;
     }
-    Some(live_pose.unwrap_or((serialized_position, serialized_rotation)))
+    let (position, rotation, runtime_scale, _) = live_transform.unwrap_or((
+        serialized_position,
+        serialized_rotation,
+        Vec3::ONE,
+        0.0,
+    ));
+    Some((position, rotation, serialized_scale * runtime_scale))
+}
+
+/// Trigger markers and picking follow the same live owner pose as the
+/// NPC/Monster mesh. Ordinary triggers keep their editor/path-preview position.
+fn robots_ai_trigger_marker_position(
+    runtime_controls_presence: bool,
+    live_transform: Option<(Vec3, Quat, Vec3, f32)>,
+    fallback_position: Vec3,
+) -> Vec3 {
+    if runtime_controls_presence {
+        if let Some((owner_position, _, _, _)) = live_transform {
+            return owner_position;
+        }
+    }
+    fallback_position
+}
+
+#[derive(Clone, Copy)]
+struct QueuedAiAnimationTransition {
+    outgoing_animation: Hashcode,
+    outgoing_raw_frame: f32,
+    incoming_weight: f32,
+}
+
+#[derive(Clone, Copy)]
+struct QueuedAiAnimationRender {
+    animation_file: Hashcode,
+    animation: Hashcode,
+    skin_file: Hashcode,
+    skin: Hashcode,
+    raw_frame: f32,
+    transition: Option<QueuedAiAnimationTransition>,
+    position: Vec3,
+    rotation: Quat,
+    scale: Vec3,
+}
+
+fn queue_runtime_ai_character_visual(
+    character: &crate::maps::ProcessedCharacterVisual,
+    position: Vec3,
+    rotation: Quat,
+    scale: Vec3,
+    initial_animation_seconds: Option<f32>,
+    animation_sample: Option<NativeAiAnimationPresentationSample>,
+    render_store: &RenderStore,
+    render_queue: &mut Vec<QueuedEntityRender>,
+    ai_animation_queue: &mut Vec<QueuedAiAnimationRender>,
+) -> bool {
+    let active_animation = animation_sample
+        .and_then(|sample| {
+            let track = character.animation_modes.get(&sample.anim_mode)?;
+            let raw_frame = crate::map_runtime::runtime_character_track_frame_position(
+                track,
+                sample.pose_seconds,
+            )?;
+            let transition = sample.transition_from.and_then(|(outgoing_mode, outgoing_seconds)| {
+                if track.transition_fixed_ticks == 0 {
+                    return None;
+                }
+                let outgoing = character.animation_modes.get(&outgoing_mode)?;
+                let outgoing_raw_frame = crate::map_runtime::runtime_character_track_frame_position(
+                    outgoing,
+                    outgoing_seconds,
+                )?;
+                let transition_seconds = track.transition_fixed_ticks as f32
+                    / crate::map_runtime::ROBOTS_CHARACTER_ANIMATION_FIXED_HZ;
+                let incoming_weight =
+                    (sample.transition_elapsed_seconds.max(0.0) / transition_seconds).clamp(0.0, 1.0);
+                (incoming_weight < 1.0).then_some(QueuedAiAnimationTransition {
+                    outgoing_animation: outgoing.animation,
+                    outgoing_raw_frame,
+                    incoming_weight,
+                })
+            });
+            Some((track.animation, track.animskin, raw_frame, transition))
+        })
+        .or_else(|| {
+            let initial_animation_seconds = initial_animation_seconds?;
+            let track = character.initial_animation.as_ref()?;
+            let raw_frame = crate::map_runtime::runtime_character_track_frame_position(
+                track,
+                initial_animation_seconds,
+            )?;
+            Some((track.animation, track.animskin, raw_frame, None))
+        });
+
+    let render_start = render_queue.len();
+    let animation_start = ai_animation_queue.len();
+    if let Some((animation, skin, raw_frame, transition)) = active_animation {
+        render_static_script_without_animations(
+            position,
+            rotation,
+            scale,
+            character.file,
+            character.script,
+            0.0,
+            render_store,
+            &mut |queued| render_queue.push(queued),
+            vec![],
+        );
+        ai_animation_queue.push(QueuedAiAnimationRender {
+            animation_file: character.file,
+            animation,
+            skin_file: character.file,
+            skin,
+            raw_frame,
+            transition,
+            position,
+            rotation,
+            scale,
+        });
+    } else {
+        render_static_script(
+            position,
+            rotation,
+            scale,
+            character.file,
+            character.script,
+            0.0,
+            render_store,
+            &mut |queued| render_queue.push(queued),
+            vec![],
+        );
+    }
+    render_queue.len() > render_start || ai_animation_queue.len() > animation_start
 }
 
 impl MapFrame {
@@ -41,59 +177,45 @@ impl MapFrame {
             egui::Sense::click_and_drag(),
         );
         let time: f64 = ui.input(|input| input.time);
+        // Physical/default input stays host-owned. Shared runtime only consumes
+        // recovered logical actions. Native Player interaction is action4, whose
+        // shipped PC binding is DIK_Q (0x10); message presentation keeps its
+        // Apostrophe / NumPad0 / NumPad3 defaults.
+        let gameplay_input = if self.native_message_presentation.active.is_none()
+            && !self.textfield_focused
+        {
+            ui.input(|input| {
+                super::runtime_input::robots_gameplay_input_from_egui(&input.events)
+            })
+        } else {
+            super::runtime_input::RobotsGameplayHostInputFrame::default()
+        };
+        let gameplay_events = ui.input(|input| {
+            super::runtime_input::robots_gameplay_input_from_egui(&input.events)
+        });
+        let watchbot_input = if self.native_message_presentation.active.is_none()
+            && !self.textfield_focused
+        {
+            ui.input(|input| super::runtime_input::robots_watchbot_input_from_egui(input))
+        } else {
+            super::runtime_input::RobotsGameplayHostInputFrame::default()
+        };
+        self.native_watchbot_host_input = watchbot_input;
+        self.native_watchbot_host_input.interact = gameplay_events.interact
+            && self.native_message_presentation.active.is_none()
+            && !self.textfield_focused;
+        if self.native_message_presentation.active.is_some() && !self.textfield_focused {
+            let input_frame = ui.input(|input| {
+                super::runtime_input::robots_message_input_from_egui(&input.events)
+            });
+            for action in input_frame.ordered_actions().into_iter().flatten() {
+                self.native_message_presentation.apply_logical_input(action);
+            }
+        }
         let runtime_start = *self.runtime_motion_start_time.get_or_insert(time);
         let runtime_time = (time - runtime_start).max(0.0) as f32;
         self.sync_native_sweeper_boss_runtime_map(map);
         self.sync_runtime_character_bodies(map, runtime_time);
-        let runtime_event_snapshots = self.runtime_event_snapshots(map, time);
-        // Runtime events own Sweeper factory creation. Sync dynamic character
-        // bodies after that phase so same-frame spawned XItems are visible to the
-        // common AI/body host without fabricating serialized Trigger records.
-        self.sync_runtime_dynamic_character_bodies(map);
-        if !self.apply_native_camera_viewport || !self.native_camera_viewpoint_valid {
-            self.native_script_trigger_lifecycle_valid = false;
-        }
-        self.advance_native_ai_simulation(map, time);
-        let script_start = *self.script_animation_start_time.get_or_insert(time);
-        let script_global_time = (time - script_start).max(0.0) as f32;
-
-        if response.clicked() && (self.show_triggers || self.show_sounds) {
-            if let Some(pointer_pos) = response.interact_pointer_pos() {
-                self.render_pickbuffer(rect.size(), map, runtime_time, &runtime_event_snapshots);
-                let mut pixel = [0u8; 4];
-                if let Some((x, y)) = pickbuffer_pixel_position(response.rect, pointer_pos) {
-                    unsafe {
-                        self.gl
-                            .bind_framebuffer(glow::FRAMEBUFFER, self.pickbuffer.framebuffer);
-                        self.gl.read_buffer(glow::COLOR_ATTACHMENT0);
-                        self.gl.read_pixels(
-                            x,
-                            y,
-                            1,
-                            1,
-                            glow::RGBA,
-                            glow::UNSIGNED_BYTE,
-                            glow::PixelPackData::Slice(Some(&mut pixel)),
-                        );
-                        self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                    }
-                }
-
-                let picked = decode_pick_value(pixel);
-                self.selected_trigger = picked
-                    .filter(|(ty, _)| *ty == PickBufferType::Trigger as u32)
-                    .map(|(_, id)| id as usize)
-                    .filter(|id| *id < map.triggers.len());
-                self.selected_sound = picked
-                    .filter(|(ty, _)| *ty == PickBufferType::Sound as u32)
-                    .map(|(_, id)| id as usize)
-                    .filter(|id| *id < map.sounds.len());
-            }
-        }
-
-        self.draw_trigger_inspector(context, map);
-        self.draw_sound_inspector(context, map);
-
         if self.animate_scripts || self.animate_runtime_paths || self.simulate_ai {
             context.request_repaint();
         }
@@ -196,6 +318,121 @@ impl MapFrame {
         // state and must never masquerade as gameplay MapZone +0x6B input.
         self.native_script_trigger_lifecycle_valid =
             self.apply_native_camera_viewport && self.native_camera_viewpoint_valid;
+        // Game frame order: commit the current Player/Camera MapZone first,
+        // then service TriggerManager/XItem/AI. Using the previous visual
+        // frame here delayed spawn/despawn and player-proximity events and
+        // could apply a native tick after the game view became invalid.
+        let runtime_event_snapshots = self.runtime_event_snapshots(map, time);
+        // Focus is refreshed by runtime_event_snapshots above. Consume the native
+        // action4 edge afterwards so an ActivationPad selected this frame can enter
+        // WatchBot control without a one-frame editor-only lag.
+        if gameplay_input.interact {
+            let _ = self.interact_native_watchbot_focus_from_map(map);
+        }
+        // Runtime events own Sweeper factory creation. Sync dynamic character
+        // bodies after that phase so same-frame spawned XItems are visible to the
+        // common AI/body host without fabricating serialized Trigger records.
+        self.sync_runtime_dynamic_character_bodies(map);
+        if !self.apply_native_camera_viewport || !self.native_camera_viewpoint_valid {
+            self.native_script_trigger_lifecycle_valid = false;
+        }
+        self.advance_native_ai_simulation(map, time);
+        // Snapshot AI render poses after the fixed-step simulation, not before it.
+        // Otherwise the renderer is permanently one AI tick behind the owner body.
+        let runtime_ai_render_state = map
+            .triggers
+            .iter()
+            .enumerate()
+            .map(|(trigger_index, trigger)| {
+                robots_character_runtime_type(trigger.ttype).map(|_| {
+                    (
+                        self.runtime_ai_character_xitem_live(map.hashcode, trigger_index),
+                        self.runtime_ai_character_live_transform(map.hashcode, trigger_index),
+                        self.native_ai_animation_presentation_sample_by_key(Self::runtime_character_body_key(
+                            map.hashcode,
+                            trigger_index,
+                        )),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let runtime_dynamic_ai_render_state = self
+            .runtime_dynamic_ai_snapshots(map)
+            .into_iter()
+            .filter(|snapshot| !snapshot.pending_destroy)
+            .filter_map(|snapshot| {
+                let body = self.runtime_character_bodies.get(&snapshot.key)?;
+                Some((
+                    snapshot.selector,
+                    (
+                        body.owner_position,
+                        body.owner_rotation,
+                        body.native_transform_scale_xyz(),
+                        body.initial_animation_seconds,
+                    ),
+                    self.native_ai_animation_presentation_sample_by_key(snapshot.key),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let runtime_ai_entity_attachment_presentations =
+            self.native_ai_entity_attachment_presentations(map);
+        let runtime_ai_animator_attachment_presentations =
+            self.native_ai_attached_animator_presentations(map);
+        let runtime_monster_transporter_render_state = map
+            .triggers
+            .iter()
+            .enumerate()
+            .map(|(trigger_index, trigger)| {
+                if trigger.ttype != 73 {
+                    return None;
+                }
+                let key = Self::runtime_event_key(map.hashcode, trigger_index);
+                self.native_monster_transporters
+                    .get(&key)
+                    .map(|runtime| (runtime.position, runtime.rotation))
+            })
+            .collect::<Vec<_>>();
+        let script_start = *self.script_animation_start_time.get_or_insert(time);
+        let script_global_time = (time - script_start).max(0.0) as f32;
+
+        if response.clicked() && (self.show_triggers || self.show_sounds) {
+            if let Some(pointer_pos) = response.interact_pointer_pos() {
+                self.render_pickbuffer(rect.size(), map, runtime_time, &runtime_event_snapshots);
+                let mut pixel = [0u8; 4];
+                if let Some((x, y)) = pickbuffer_pixel_position(response.rect, pointer_pos) {
+                    unsafe {
+                        self.gl
+                            .bind_framebuffer(glow::FRAMEBUFFER, self.pickbuffer.framebuffer);
+                        self.gl.read_buffer(glow::COLOR_ATTACHMENT0);
+                        self.gl.read_pixels(
+                            x,
+                            y,
+                            1,
+                            1,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelPackData::Slice(Some(&mut pixel)),
+                        );
+                        self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                    }
+                }
+
+                let picked = decode_pick_value(pixel);
+                self.selected_trigger = picked
+                    .filter(|(ty, _)| *ty == PickBufferType::Trigger as u32)
+                    .map(|(_, id)| id as usize)
+                    .filter(|id| *id < map.triggers.len());
+                self.selected_sound = picked
+                    .filter(|(ty, _)| *ty == PickBufferType::Sound as u32)
+                    .map(|(_, id)| id as usize)
+                    .filter(|id| *id < map.sounds.len());
+            }
+        }
+
+        self.draw_trigger_inspector(context, map);
+        self.draw_sound_inspector(context, map);
+
+
         let active_visual_zones = visual_frame
             .ordered
             .iter()
@@ -365,8 +602,14 @@ impl MapFrame {
         let show_triggers = self.show_triggers;
         let show_sounds = self.show_sounds;
         let show_runtime_path = self.show_runtime_path;
-        let animate_runtime_paths = self.animate_runtime_paths;
-        let runtime_path_playback_speed = self.runtime_path_playback_speed;
+        // Gameplay paths obey XItem/event snapshots, never the editor's
+        // free-running preview clock or playback-speed slider.
+        let animate_runtime_paths = self.animate_runtime_paths && !self.simulate_ai;
+        let runtime_path_playback_speed = if self.simulate_ai {
+            1.0
+        } else {
+            self.runtime_path_playback_speed
+        };
         let platform_rotation_speed_scale = self.platform_rotation_speed_scale;
         let animate_scripts = self.animate_scripts;
         let script_playback_speed = self.script_playback_speed;
@@ -387,22 +630,25 @@ impl MapFrame {
 
         let render_store = self.render_store.clone();
         let current_file = self.file;
-        let native_ai_runtime_controls_presence =
-            self.native_script_trigger_lifecycle_valid || self.simulate_ai;
-        let runtime_ai_render_state = map
+        let transient_script_xitems = self.native_transient_script_xitems.clone();
+        // Pickups in gameplay are XItems, not always-visible EDB decorations.
+        let native_pickup_runtime_controls_presence =
+            self.simulate_ai || (self.native_runtime_event_gate && self.animate_runtime_paths);
+        let runtime_pickup_render_state = map
             .triggers
             .iter()
             .enumerate()
             .map(|(trigger_index, trigger)| {
-                robots_character_runtime_type(trigger.ttype).map(|_| {
+                is_robots_pickup_serialized_type(trigger.ttype).then(|| {
                     (
-                        self.runtime_ai_character_xitem_live(map.hashcode, trigger_index),
-                        self.runtime_ai_character_live_pose(map.hashcode, trigger_index),
+                        self.native_pickup_runtime_live(map.hashcode, trigger_index),
+                        self.native_pickup_runtime_rotation(&map, trigger_index),
                     )
                 })
             })
             .collect::<Vec<_>>();
-
+        let native_ai_runtime_controls_presence =
+            self.native_script_trigger_lifecycle_valid || self.simulate_ai;
         let collision_renderer = self.collision_renderer.clone();
         let renderers = self.ref_renderers.clone();
         let cb = egui_glow::CallbackFn::new(move |info, painter| unsafe {
@@ -540,8 +786,61 @@ impl MapFrame {
             let sky_world_queue = sky_queue;
 
             let mut render_queue = Vec::<QueuedEntityRender>::new();
+            let mut ai_animation_queue = Vec::<QueuedAiAnimationRender>::new();
             let mut particle_queue = vec![];
             let mut dynamic_light_queue = vec![];
+
+            // Gameplay-created XItemHandler_Script instances use the same
+            // RenderStore adapters as serialized Scripts, but their time comes
+            // from the native Script scheduler rather than editor wall time.
+            {
+                let store = render_store.read();
+                for runtime in &transient_script_xitems {
+                    let Some(script) = store.get_script(runtime.file_uid, runtime.script_uid)
+                    else {
+                        continue;
+                    };
+                    let position = Vec3::new(
+                        runtime.position_xyzw[0],
+                        runtime.position_xyzw[1],
+                        runtime.position_xyzw[2],
+                    );
+                    let script_time = runtime.script_time_seconds(script);
+                    render_script(
+                        position,
+                        runtime.rotation,
+                        Vec3::ONE,
+                        runtime.file_uid,
+                        runtime.script_uid,
+                        script_time,
+                        &store,
+                        &mut |queued| render_queue.push(queued),
+                        vec![],
+                    );
+                    collect_script_particles(
+                        position,
+                        runtime.rotation,
+                        Vec3::ONE,
+                        runtime.file_uid,
+                        runtime.script_uid,
+                        script_time,
+                        &store,
+                        &mut particle_queue,
+                        vec![],
+                    );
+                    collect_script_dynamic_lights(
+                        position,
+                        runtime.rotation,
+                        Vec3::ONE,
+                        runtime.file_uid,
+                        runtime.script_uid,
+                        script_time,
+                        &store,
+                        &mut dynamic_light_queue,
+                        vec![],
+                    );
+                }
+            }
 
             // Render base (ref) entities
             if render_filter.contains(RenderFilter::MapZone) {
@@ -629,25 +928,49 @@ impl MapFrame {
             if render_filter.contains(RenderFilter::Triggers) {
                 for (i, t) in map.triggers.iter().enumerate() {
                     let trigger_queue_start = render_queue.len();
+                    // Hide inactive Pickup world geometry in gameplay, but keep
+                    // trigger editor icons/selection available below.
+                    if native_pickup_runtime_controls_presence
+                        && is_robots_pickup_serialized_type(t.ttype)
+                        && !runtime_pickup_render_state
+                            .get(i)
+                            .copied()
+                            .flatten()
+                            .is_some_and(|(live, _)| live)
+                    {
+                        continue;
+                    }
                     let event_snapshot = runtime_event_snapshots.get(i).copied().flatten();
-                    let trigger_position = runtime_path_preview_position_with_event(
-                        &map,
-                        t,
-                        runtime_time,
-                        animate_runtime_paths,
-                        runtime_path_playback_speed,
-                        event_snapshot,
-                    );
+                    let transporter_transform = runtime_monster_transporter_render_state
+                        .get(i)
+                        .copied()
+                        .flatten();
+                    let trigger_position = transporter_transform
+                        .map(|(position, _)| position)
+                        .unwrap_or_else(|| {
+                            runtime_path_preview_position_with_event(
+                                &map,
+                                t,
+                                runtime_time,
+                                animate_runtime_paths,
+                                runtime_path_playback_speed,
+                                event_snapshot,
+                            )
+                        });
                     if let Some(v) = t.engine_options.visual_object {
-                        let rotation = runtime_trigger_preview_rotation_with_event(
-                            &map,
-                            t,
-                            runtime_time,
-                            animate_runtime_paths,
-                            runtime_path_playback_speed,
-                            platform_rotation_speed_scale,
-                            event_snapshot,
-                        );
+                        let rotation = transporter_transform
+                            .map(|(_, rotation)| rotation)
+                            .unwrap_or_else(|| {
+                                runtime_trigger_preview_rotation_with_event(
+                                    &map,
+                                    t,
+                                    runtime_time,
+                                    animate_runtime_paths,
+                                    runtime_path_playback_speed,
+                                    platform_rotation_speed_scale,
+                                    event_snapshot,
+                                )
+                            });
 
                         match v.base() {
                             0x02000000 => {
@@ -847,13 +1170,25 @@ impl MapFrame {
                     // Scripts own multi-Entity assemblies and idle particles; direct
                     // entities remain for the few PC assets without a world Script.
                     if !resolved_trigger_visuals[i] {
-                        if let Some(pickup) = robots_pickup_visual(t.ttype, &t.data) {
-                            let rotation = Quat::from_euler(
+                        let pickup_runtime_state =
+                            runtime_pickup_render_state.get(i).copied().flatten();
+                        if let Some(pickup) = robots_pickup_visual(t.ttype, &t.data).filter(|_| {
+                            !native_pickup_runtime_controls_presence
+                                || pickup_runtime_state.is_some_and(|(live, _)| live)
+                        }) {
+                            let serialized_rotation = Quat::from_euler(
                                 glam::EulerRot::ZXY,
                                 t.rotation[2],
                                 t.rotation[0],
                                 t.rotation[1],
                             );
+                            let rotation = if native_pickup_runtime_controls_presence {
+                                pickup_runtime_state
+                                    .and_then(|(_, runtime_rotation)| runtime_rotation)
+                                    .unwrap_or(serialized_rotation)
+                            } else {
+                                serialized_rotation
+                            };
                             match pickup.object.base() {
                                 0x04000000 => {
                                     // Frame 1 is the uncollected idle state. Advancing
@@ -939,27 +1274,45 @@ impl MapFrame {
                             );
                             let runtime_controls_presence =
                                 ai_state.is_some() && native_ai_runtime_controls_presence;
-                            if let Some((character_position, character_rotation)) =
-                                robots_ai_character_render_pose(
+                            if let Some((character_position, character_rotation, character_scale)) =
+                                robots_ai_character_render_transform(
                                     runtime_controls_presence,
                                     ai_state,
                                     trigger_position,
                                     serialized_rotation,
+                                    t.scale,
                                 )
                             {
-                                let queue_start = render_queue.len();
-                                render_static_script(
-                                    character_position,
-                                    character_rotation,
-                                    t.scale,
-                                    character.file,
-                                    character.script,
-                                    0.0,
-                                    &render_store.read(),
-                                    &mut |queued| render_queue.push(queued),
-                                    vec![],
-                                );
-                                resolved_trigger_visuals[i] = render_queue.len() > queue_start;
+                                if runtime_controls_presence {
+                                    let initial_animation_seconds = ai_state
+                                        .and_then(|(_, live_transform, _)| live_transform)
+                                        .map(|(_, _, _, seconds)| seconds);
+                                    resolved_trigger_visuals[i] = queue_runtime_ai_character_visual(
+                                        character,
+                                        character_position,
+                                        character_rotation,
+                                        character_scale,
+                                        initial_animation_seconds,
+                                        ai_state.and_then(|(_, _, sample)| sample),
+                                        &render_store.read(),
+                                        &mut render_queue,
+                                        &mut ai_animation_queue,
+                                    );
+                                } else {
+                                    let queue_start = render_queue.len();
+                                    render_static_script(
+                                        character_position,
+                                        character_rotation,
+                                        character_scale,
+                                        character.file,
+                                        character.script,
+                                        0.0,
+                                        &render_store.read(),
+                                        &mut |queued| render_queue.push(queued),
+                                        vec![],
+                                    );
+                                    resolved_trigger_visuals[i] = render_queue.len() > queue_start;
+                                }
                             }
                         }
                     }
@@ -981,6 +1334,71 @@ impl MapFrame {
                             angle,
                         );
                     }
+                }
+            }
+
+            if render_filter.contains(RenderFilter::Triggers) {
+                let store = render_store.read();
+                for (selector, (position, rotation, scale, initial_seconds), animation_sample) in
+                    &runtime_dynamic_ai_render_state
+                {
+                    let Some(character) = map
+                        .runtime_character_visuals
+                        .get(&(ROBOTS_SWEEPER_MONSTER_RUNTIME_TYPE, *selector))
+                    else {
+                        continue;
+                    };
+                    let _ = queue_runtime_ai_character_visual(
+                        character,
+                        *position,
+                        *rotation,
+                        *scale,
+                        Some(*initial_seconds),
+                        *animation_sample,
+                        &store,
+                        &mut render_queue,
+                        &mut ai_animation_queue,
+                    );
+                }
+                for attachment in &runtime_ai_entity_attachment_presentations {
+                    if store
+                        .get_entity(attachment.file_uid, attachment.entity_uid)
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    render_queue.push(QueuedEntityRender {
+                        entity: (attachment.file_uid, attachment.entity_uid),
+                        entity_alt: None,
+                        position: attachment.position,
+                        rotation: attachment.rotation,
+                        scale: attachment.scale,
+                    });
+                }
+                for attachment in &runtime_ai_animator_attachment_presentations {
+                    let Some(runtime) = store.get_animation_runtime(attachment.animation_file) else {
+                        continue;
+                    };
+                    let Some(skin) = runtime.bound_skin_hashcode(attachment.animation_uid) else {
+                        continue;
+                    };
+                    let Some(raw_frame) = runtime.cyclic_raw_frame_at_seconds(
+                        attachment.animation_uid,
+                        attachment.animation_seconds,
+                    ) else {
+                        continue;
+                    };
+                    ai_animation_queue.push(QueuedAiAnimationRender {
+                        animation_file: attachment.animation_file,
+                        animation: attachment.animation_uid,
+                        skin_file: attachment.animation_file,
+                        skin,
+                        raw_frame,
+                        transition: None,
+                        position: attachment.position,
+                        rotation: attachment.rotation,
+                        scale: attachment.scale,
+                    });
                 }
             }
 
@@ -1051,6 +1469,52 @@ impl MapFrame {
                             time,
                             &render_store.read(),
                         )
+                    }
+                }
+            }
+
+            if render_filter.contains(RenderFilter::Opaque) {
+                for (animation_index, animation) in ai_animation_queue.iter().enumerate() {
+                    let keyed_context = RenderContext {
+                        shaders: render_context.shaders,
+                        uniforms: render_context.uniforms,
+                        lighting_key: ((map.hashcode as u64) << 32)
+                            | ((render_queue.len() + animation_index) as u64 + 1),
+                    };
+                    let store = render_store.read();
+                    if let Some(runtime) = store.get_animation_runtime(animation.animation_file) {
+                        if let Some(transition) = animation.transition {
+                            runtime.draw_cyclic_frame_blended(
+                                painter.gl(),
+                                &keyed_context,
+                                &store,
+                                transition.outgoing_animation,
+                                transition.outgoing_raw_frame,
+                                animation.animation,
+                                animation.raw_frame,
+                                transition.incoming_weight,
+                                animation.skin_file,
+                                animation.skin,
+                                animation.position,
+                                animation.rotation,
+                                animation.scale,
+                                time,
+                            );
+                        } else {
+                            runtime.draw_cyclic_frame(
+                                painter.gl(),
+                                &keyed_context,
+                                &store,
+                                animation.animation,
+                                animation.skin_file,
+                                animation.skin,
+                                animation.raw_frame,
+                                animation.position,
+                                animation.rotation,
+                                animation.scale,
+                                time,
+                            );
+                        }
                     }
                 }
             }
@@ -1169,13 +1633,29 @@ impl MapFrame {
                         .and_then(|index| runtime_event_snapshots.get(index))
                         .copied()
                         .flatten();
-                    let trig_position = runtime_path_preview_position_with_event(
-                        &map,
-                        trig,
-                        runtime_time,
-                        animate_runtime_paths,
-                        runtime_path_playback_speed,
-                        event_snapshot,
+                    let trig_position = selected_trigger
+                        .and_then(|index| runtime_monster_transporter_render_state.get(index))
+                        .copied()
+                        .flatten()
+                        .map(|(position, _)| position)
+                        .unwrap_or_else(|| {
+                            runtime_path_preview_position_with_event(
+                                &map,
+                                trig,
+                                runtime_time,
+                                animate_runtime_paths,
+                                runtime_path_playback_speed,
+                                event_snapshot,
+                            )
+                        });
+                    let trig_position = robots_ai_trigger_marker_position(
+                        native_ai_runtime_controls_presence && trig.character_visual.is_some(),
+                        selected_trigger
+                            .and_then(|index| runtime_ai_render_state.get(index))
+                            .copied()
+                            .flatten()
+                            .and_then(|(_, live, _)| live),
+                        trig_position,
                     );
                     if show_runtime_path {
                         for (_, _, path) in map_trigger_path_matches(&map, trig) {
@@ -1283,10 +1763,13 @@ impl MapFrame {
                         .and_then(|p| trigger_icons.get(&p))
                         .unwrap_or(&default_trigger_icon);
 
-                    billboard_renderer.render(
-                        painter.gl(),
-                        &render_context,
-                        trigger_texture,
+                    let marker_position = robots_ai_trigger_marker_position(
+                        native_ai_runtime_controls_presence && t.character_visual.is_some(),
+                        runtime_ai_render_state
+                            .get(i)
+                            .copied()
+                            .flatten()
+                            .and_then(|(_, live, _)| live),
                         runtime_path_preview_position_with_event(
                             &map,
                             t,
@@ -1295,6 +1778,12 @@ impl MapFrame {
                             runtime_path_playback_speed,
                             runtime_event_snapshots.get(i).copied().flatten(),
                         ),
+                    );
+                    billboard_renderer.render(
+                        painter.gl(),
+                        &render_context,
+                        trigger_texture,
+                        marker_position,
                         trigger_scale,
                     );
                 }
@@ -1476,17 +1965,34 @@ impl MapFrame {
         let render_context = viewer.render_context();
         if self.show_triggers {
             for (i, t) in map.triggers.iter().enumerate() {
-                self.billboard_renderer.render_pickbuffer(
-                    &self.gl,
-                    &render_context,
+                let transporter_position = if t.ttype == 73 {
+                    let key = Self::runtime_event_key(map.hashcode, i);
+                    self.native_monster_transporters
+                        .get(&key)
+                        .map(|runtime| runtime.position)
+                } else {
+                    None
+                };
+                let pick_position = transporter_position.unwrap_or_else(|| {
                     runtime_path_preview_position_with_event(
                         map,
                         t,
                         time,
-                        self.animate_runtime_paths,
-                        self.runtime_path_playback_speed,
+                        self.animate_runtime_paths && !self.simulate_ai,
+                        if self.simulate_ai { 1.0 } else { self.runtime_path_playback_speed },
                         runtime_event_snapshots.get(i).copied().flatten(),
-                    ),
+                    )
+                });
+                let pick_position = robots_ai_trigger_marker_position(
+                    (self.native_script_trigger_lifecycle_valid || self.simulate_ai)
+                        && t.character_visual.is_some(),
+                    self.runtime_ai_character_live_transform(map.hashcode, i),
+                    pick_position,
+                );
+                self.billboard_renderer.render_pickbuffer(
+                    &self.gl,
+                    &render_context,
+                    pick_position,
                     self.trigger_scale,
                     (PickBufferType::Trigger, i as u32),
                     &self.pickbuffer,
@@ -1513,42 +2019,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ai_character_render_pose_switches_from_editor_preview_to_live_xitem_ownership() {
+    fn ai_character_render_transform_switches_from_editor_preview_to_live_xitem_ownership() {
         let serialized_position = Vec3::new(1.0, 2.0, 3.0);
         let serialized_rotation = Quat::from_rotation_y(0.25);
+        let serialized_scale = Vec3::new(1.5, 2.0, 0.5);
         let live_position = Vec3::new(9.0, 4.0, -2.0);
         let live_rotation = Quat::from_rotation_y(-0.5);
+        let runtime_scale = Vec3::splat(2.0);
 
         assert_eq!(
-            robots_ai_character_render_pose(false, None, serialized_position, serialized_rotation,),
-            Some((serialized_position, serialized_rotation))
-        );
-        assert_eq!(
-            robots_ai_character_render_pose(
-                true,
-                Some((false, None)),
+            robots_ai_character_render_transform(
+                false,
+                None,
                 serialized_position,
                 serialized_rotation,
+                serialized_scale,
+            ),
+            Some((serialized_position, serialized_rotation, serialized_scale))
+        );
+        assert_eq!(
+            robots_ai_character_render_transform(
+                true,
+                Some((false, None, None)),
+                serialized_position,
+                serialized_rotation,
+                serialized_scale,
             ),
             None
         );
         assert_eq!(
-            robots_ai_character_render_pose(
+            robots_ai_character_render_transform(
                 true,
-                Some((true, None)),
+                Some((true, None, None)),
                 serialized_position,
                 serialized_rotation,
+                serialized_scale,
             ),
-            Some((serialized_position, serialized_rotation))
+            Some((serialized_position, serialized_rotation, serialized_scale))
         );
         assert_eq!(
-            robots_ai_character_render_pose(
+            robots_ai_character_render_transform(
                 true,
-                Some((true, Some((live_position, live_rotation)))),
+                Some((
+                    true,
+                    Some((live_position, live_rotation, runtime_scale, 1.25)),
+                    Some(NativeAiAnimationPresentationSample {
+                        anim_mode: 0x0900_0003,
+                        pose_seconds: 1.25,
+                        transition_from: None,
+                        transition_elapsed_seconds: 0.0,
+                    }),
+                )),
                 serialized_position,
                 serialized_rotation,
+                serialized_scale,
             ),
-            Some((live_position, live_rotation))
+            Some((live_position, live_rotation, serialized_scale * runtime_scale))
+        );
+        // The visible owner, editor marker and mouse pick target must stay at
+        // exactly the same position after native AI/root-motion updates.
+        let live = Some((live_position, live_rotation, runtime_scale, 1.25));
+        assert_eq!(
+            robots_ai_trigger_marker_position(true, live, serialized_position),
+            live_position
+        );
+        assert_eq!(
+            robots_ai_trigger_marker_position(false, live, serialized_position),
+            serialized_position
+        );
+        assert_eq!(
+            robots_ai_trigger_marker_position(true, None, serialized_position),
+            serialized_position
         );
     }
 }

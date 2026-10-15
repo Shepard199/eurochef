@@ -143,6 +143,10 @@ pub struct RobotsPlayerActionRuntime {
     pub pending_action_uid_5e8: Option<u32>,
     /// XItemHandler_Player +0x5CC. Constructor initializes 0x48000000.
     pub committed_action_uid_5cc: u32,
+    /// XItemHandler_Player +0x590 numeric meter, initialized at 100.0 by
+    /// 0x004AD46D. Saved under 0x58000028 and restored with bounds 0..100/200.
+    /// Keep as raw f32 bits to preserve Eq and the native scalar encoding.
+    pub player_scalar_590_bits: u32,
     /// XItemHandler_Player +0x6EC object, projected without native pointers.
     pub active_action: Option<RobotsPlayerActionInstance>,
     /// XItemHandler_Player +0x6D4. Ordinary `0x004AFDF0` clears bit0x4000 first.
@@ -160,6 +164,7 @@ impl Default for RobotsPlayerActionRuntime {
         Self {
             pending_action_uid_5e8: None,
             committed_action_uid_5cc: ROBOTS_PLAYER_ACTION_48000000,
+            player_scalar_590_bits: 100.0f32.to_bits(),
             active_action: None,
             handler_flags_6d4: 0,
             global_input_lock_7b3170: false,

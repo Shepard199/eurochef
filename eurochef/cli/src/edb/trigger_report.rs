@@ -704,6 +704,16 @@ fn classify_runtime_preview(
             "monster_transporter_path_context",
             "data[1] is parsed into the Transporter route and data[4] reaches monster-controller setup; actor traversal and spawn timing are not simulated",
         ),
+        74
+            if has_path_slot(2)
+                && data[0].and_then(|selector| {
+                    ai_runtime_type_for_serialized_trigger_type(trigger_type)
+                        .and_then(|runtime_type| ai_handler_class_for_runtime_selector(runtime_type, selector))
+                }) == Some(RobotsAiHandlerClass::Ef01Mine) => (
+            "motion_preview_supported",
+            "monster_ef01_flying_path_runtime",
+            "type74 selector1 resolves EF01 Mine; the existing fixed-step StandardMonster host binds data[2] to native AI_FollowFlyingPath (3 units/s, spline endpoint turn/reversal) when a live Player pose and XItem exist; other Monster selectors do not inherit this runtime",
+        ),
         10 | 11 | 18 | 33 | 74 if has_path_slot(2) => (
             "native_context_diagnostic",
             "monster_path_context",
@@ -1349,6 +1359,11 @@ mod tests {
         assert_eq!(transporter.status, "native_context_diagnostic");
         assert_eq!(transporter.mode, "monster_transporter_path_context");
 
+        let mut ef01_data = [None; 16];
+        ef01_data[0] = Some(1);
+        let ef01 = classify_runtime_preview(74, &ef01_data, &[path_match(2)]);
+        assert_eq!(ef01.status, "motion_preview_supported");
+        assert_eq!(ef01.mode, "monster_ef01_flying_path_runtime");
         let monster = classify_runtime_preview(74, &[None; 16], &[path_match(2)]);
         assert_eq!(monster.status, "native_context_diagnostic");
         assert_eq!(monster.mode, "monster_path_context");

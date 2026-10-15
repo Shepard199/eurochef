@@ -1,8 +1,7 @@
 use serde::Serialize;
 
 use super::{
-    ai_character::RobotsAiHandlerClass,
-    attachment_rotation::postmultiply_local_z_rotation,
+    ai_character::RobotsAiHandlerClass, attachment_rotation::postmultiply_local_z_rotation,
 };
 
 pub const ROBOTS_MINION_ATTACHMENT_ENTITY_UID: u32 = 0x0200_0039;
@@ -10,10 +9,8 @@ pub const ROBOTS_MINION_ATTACHMENT_ROOT_DATUM: u32 = 0x0E00_0070;
 pub const ROBOTS_MINION_ATTACHMENT_PRIMARY_DATUM: u32 = 0x1000_0019;
 pub const ROBOTS_MINION_ATTACHMENT_SECONDARY_DATUM: u32 = 0x1000_001A;
 
-pub const ROBOTS_EB14_ATTACHMENT_SPIN_RADIANS_PER_TICK: f32 =
-    -std::f32::consts::PI / 60.0;
-pub const ROBOTS_EW10_ATTACHMENT_SPIN_RADIANS_PER_TICK: f32 =
-    -std::f32::consts::TAU / 60.0;
+pub const ROBOTS_EB14_ATTACHMENT_SPIN_RADIANS_PER_TICK: f32 = -std::f32::consts::PI / 60.0;
+pub const ROBOTS_EW10_ATTACHMENT_SPIN_RADIANS_PER_TICK: f32 = -std::f32::consts::TAU / 60.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct RobotsMinionAttachmentConfig {

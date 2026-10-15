@@ -67,8 +67,9 @@ pub const fn npc_follow_network_path_config() -> RobotsFollowNetworkPathConfig {
 }
 
 /// Exact `XItemHandler_Npc::0x0046B5BB..0x0046B5E3` diner-profile
-/// CharacterPhysics bootstrap. Handler+0x604 is cleared by the native caller too,
-/// but that byte has no recovered NPC consumer yet and therefore remains host-side.
+/// CharacterPhysics bootstrap. Handler+0x604 is also cleared by the native caller;
+/// its recovered common consumer is `0x00452120`, where the byte gates the
+/// CharacterPhysics/NavMesh flag-service lane rather than defining a Diner-only behavior.
 pub fn bootstrap_npc_diner_physics(state: &mut RobotsCharacterPhysicsRuntimeState) {
     state.apply_handler_606_mode(false);
     state.set_object_flag_bit2(true);

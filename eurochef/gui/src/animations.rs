@@ -88,6 +88,16 @@ pub struct AnimationPoseCache {
 }
 
 impl AnimationPoseCache {
+    fn cyclic_frame_components(&self, raw_frame: f32) -> Option<(usize, usize, f32)> {
+        if self.frame_count == 0 || !raw_frame.is_finite() {
+            return None;
+        }
+        let wrapped = raw_frame.max(0.0) % self.frame_count as f32;
+        let current_frame = wrapped.floor() as usize;
+        let next_frame = (current_frame + 1) % self.frame_count;
+        Some((current_frame, next_frame, wrapped.fract()))
+    }
+
     fn frame_at_phase(&self, phase: f32) -> f32 {
         if self.frame_count <= 1 {
             return 0.0;
@@ -135,6 +145,31 @@ impl AnimationPoseCache {
         )
     }
 
+    fn sample_scalar_cyclic_frame(&self, raw_frame: f32) -> Option<Vec<f32>> {
+        if self.scalar_count == 0 {
+            return Some(Vec::new());
+        }
+        if self.scalars.len() != self.frame_count.checked_mul(self.scalar_count)? {
+            return None;
+        }
+        let (current_frame, next_frame, fraction) = self.cyclic_frame_components(raw_frame)?;
+        let current_start = current_frame.checked_mul(self.scalar_count)?;
+        let next_start = next_frame.checked_mul(self.scalar_count)?;
+        let current = self
+            .scalars
+            .get(current_start..current_start.checked_add(self.scalar_count)?)?;
+        let next = self
+            .scalars
+            .get(next_start..next_start.checked_add(self.scalar_count)?)?;
+        Some(
+            current
+                .iter()
+                .zip(next)
+                .map(|(current, next)| current + (next - current) * fraction)
+                .collect(),
+        )
+    }
+
     fn sample_frame(&self, raw_frame: f32) -> Option<Vec<AnimationBonePose>> {
         if self.frame_count == 0
             || self.bone_count == 0
@@ -149,6 +184,44 @@ impl AnimationPoseCache {
         let next_frame = (current_frame + 1).min(self.frame_count - 1);
         let fraction = clamped.fract();
 
+        let current_start = current_frame.checked_mul(self.bone_count)?;
+        let next_start = next_frame.checked_mul(self.bone_count)?;
+        let current = self
+            .poses
+            .get(current_start..current_start.checked_add(self.bone_count)?)?;
+        let next = self
+            .poses
+            .get(next_start..next_start.checked_add(self.bone_count)?)?;
+        Some(
+            current
+                .iter()
+                .zip(next)
+                .map(|(current, next)| {
+                    let mut next_rotation = next.rotation;
+                    if current.rotation.dot(next_rotation) < 0.0 {
+                        next_rotation = Quat::from_xyzw(
+                            -next_rotation.x,
+                            -next_rotation.y,
+                            -next_rotation.z,
+                            -next_rotation.w,
+                        );
+                    }
+                    AnimationBonePose {
+                        position: current.position.lerp(next.position, fraction),
+                        rotation: current.rotation.slerp(next_rotation, fraction).normalize(),
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    fn sample_cyclic_frame(&self, raw_frame: f32) -> Option<Vec<AnimationBonePose>> {
+        if self.bone_count == 0
+            || self.poses.len() != self.frame_count.checked_mul(self.bone_count)?
+        {
+            return None;
+        }
+        let (current_frame, next_frame, fraction) = self.cyclic_frame_components(raw_frame)?;
         let current_start = current_frame.checked_mul(self.bone_count)?;
         let next_start = next_frame.checked_mul(self.bone_count)?;
         let current = self
@@ -261,6 +334,9 @@ pub struct AnimationClipRecord {
     pub motion: AnimationMotionData,
     pub pose_cache: Option<AnimationPoseCache>,
     pub pose_cache_error: Option<String>,
+    /// Robots v248 EXGeoAnim +0x0C rate byte. Native animator advances by rate/60
+    /// per fixed tick, so at 60 Hz presentation raw_frame = seconds * rate.
+    pub native_clip_rate: Option<u8>,
     pub usages: Vec<AnimationUsage>,
     pub preview_duration: f32,
 }
@@ -796,6 +872,14 @@ pub fn read_from_file(edb: &mut EdbFile) -> anyhow::Result<AnimationCatalog> {
             animation.motiondata_info_addr,
             animation.datasize,
         );
+        let native_clip_rate = if header.version == 248 && edb.platform == Platform::Pc {
+            animation
+                .read_robots_v248_exgeoanim(edb, edb.endian)
+                .ok()
+                .map(|serialized| serialized.raw_byte_0c)
+        } else {
+            None
+        };
         let (pose_cache, pose_cache_error) = if let Some(skin_index) = skin_index {
             let skin = &skins[skin_index];
             let (rapc_cache, rapc_error) = load_pose_cache(
@@ -849,6 +933,7 @@ pub fn read_from_file(edb: &mut EdbFile) -> anyhow::Result<AnimationCatalog> {
             motion,
             pose_cache,
             pose_cache_error,
+            native_clip_rate,
             usages: Vec::new(),
             preview_duration: DEFAULT_PREVIEW_SECONDS,
         });
@@ -1342,6 +1427,18 @@ pub struct AnimationRuntime {
     skin_renderers: Arc<RwLock<Vec<Vec<AnimationSkinnedEntity>>>>,
 }
 
+#[derive(Clone, Copy)]
+enum AnimationRuntimeSample {
+    Phase(f32),
+    CyclicFrame(f32),
+    CyclicBlend {
+        outgoing_animation: Hashcode,
+        outgoing_raw_frame: f32,
+        incoming_raw_frame: f32,
+        incoming_weight: f32,
+    },
+}
+
 impl AnimationRuntime {
     pub fn new(
         file: Hashcode,
@@ -1365,6 +1462,19 @@ impl AnimationRuntime {
 
     pub fn bound_skin_hashcode(&self, animation_hashcode: Hashcode) -> Option<Hashcode> {
         self.catalog.bound_skin_hashcode(animation_hashcode)
+    }
+
+    pub fn cyclic_raw_frame_at_seconds(
+        &self,
+        animation_hashcode: Hashcode,
+        seconds: f32,
+    ) -> Option<f32> {
+        if !seconds.is_finite() {
+            return None;
+        }
+        let clip_index = resolve_clip_index(&self.catalog.clips, animation_hashcode)?;
+        let rate = self.catalog.clips.get(clip_index)?.native_clip_rate?;
+        Some(seconds.max(0.0) * f32::from(rate))
     }
 
     fn resolve_skin_index(&self, hashcode: Hashcode) -> Option<usize> {
@@ -1574,6 +1684,104 @@ impl AnimationRuntime {
         scale: Vec3,
         time: f64,
     ) -> AnimationRuntimeStatus {
+        self.draw_sample(
+            gl,
+            render_context,
+            render_store,
+            animation_hashcode,
+            skin_file,
+            skin_hashcode,
+            AnimationRuntimeSample::Phase(phase),
+            position,
+            rotation,
+            scale,
+            time,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn draw_cyclic_frame(
+        &self,
+        gl: &glow::Context,
+        render_context: &RenderContext<'_>,
+        render_store: &RenderStore,
+        animation_hashcode: Hashcode,
+        skin_file: Hashcode,
+        skin_hashcode: Hashcode,
+        raw_frame: f32,
+        position: Vec3,
+        rotation: Quat,
+        scale: Vec3,
+        time: f64,
+    ) -> AnimationRuntimeStatus {
+        self.draw_sample(
+            gl,
+            render_context,
+            render_store,
+            animation_hashcode,
+            skin_file,
+            skin_hashcode,
+            AnimationRuntimeSample::CyclicFrame(raw_frame),
+            position,
+            rotation,
+            scale,
+            time,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn draw_cyclic_frame_blended(
+        &self,
+        gl: &glow::Context,
+        render_context: &RenderContext<'_>,
+        render_store: &RenderStore,
+        outgoing_animation: Hashcode,
+        outgoing_raw_frame: f32,
+        incoming_animation: Hashcode,
+        incoming_raw_frame: f32,
+        incoming_weight: f32,
+        skin_file: Hashcode,
+        skin_hashcode: Hashcode,
+        position: Vec3,
+        rotation: Quat,
+        scale: Vec3,
+        time: f64,
+    ) -> AnimationRuntimeStatus {
+        self.draw_sample(
+            gl,
+            render_context,
+            render_store,
+            incoming_animation,
+            skin_file,
+            skin_hashcode,
+            AnimationRuntimeSample::CyclicBlend {
+                outgoing_animation,
+                outgoing_raw_frame,
+                incoming_raw_frame,
+                incoming_weight,
+            },
+            position,
+            rotation,
+            scale,
+            time,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_sample(
+        &self,
+        gl: &glow::Context,
+        render_context: &RenderContext<'_>,
+        render_store: &RenderStore,
+        animation_hashcode: Hashcode,
+        skin_file: Hashcode,
+        skin_hashcode: Hashcode,
+        sample: AnimationRuntimeSample,
+        position: Vec3,
+        rotation: Quat,
+        scale: Vec3,
+        time: f64,
+    ) -> AnimationRuntimeStatus {
         let Some(clip_index) = resolve_clip_index(&self.catalog.clips, animation_hashcode) else {
             return AnimationRuntimeStatus::MissingAnimation;
         };
@@ -1602,11 +1810,81 @@ impl AnimationRuntime {
                 .map(|_| AnimationRuntimeStatus::SkinMismatchRemappable)
                 .unwrap_or(AnimationRuntimeStatus::SkinMismatch);
         };
-        let Some(poses) = cache.sample_phase(phase) else {
-            return AnimationRuntimeStatus::InvalidPose;
-        };
-        let Some(morph_scalars) = cache.sample_scalar_phase(phase) else {
-            return AnimationRuntimeStatus::InvalidPose;
+        let (poses, morph_scalars) = match sample {
+            AnimationRuntimeSample::Phase(phase) => {
+                let Some(poses) = cache.sample_phase(phase) else {
+                    return AnimationRuntimeStatus::InvalidPose;
+                };
+                let Some(morph_scalars) = cache.sample_scalar_phase(phase) else {
+                    return AnimationRuntimeStatus::InvalidPose;
+                };
+                (poses, morph_scalars)
+            }
+            AnimationRuntimeSample::CyclicFrame(raw_frame) => {
+                let Some(poses) = cache.sample_cyclic_frame(raw_frame) else {
+                    return AnimationRuntimeStatus::InvalidPose;
+                };
+                let Some(morph_scalars) = cache.sample_scalar_cyclic_frame(raw_frame) else {
+                    return AnimationRuntimeStatus::InvalidPose;
+                };
+                (poses, morph_scalars)
+            }
+            AnimationRuntimeSample::CyclicBlend {
+                outgoing_animation,
+                outgoing_raw_frame,
+                incoming_raw_frame,
+                incoming_weight,
+            } => {
+                let Some(incoming_poses) = cache.sample_cyclic_frame(incoming_raw_frame) else {
+                    return AnimationRuntimeStatus::InvalidPose;
+                };
+                let Some(incoming_scalars) = cache.sample_scalar_cyclic_frame(incoming_raw_frame)
+                else {
+                    return AnimationRuntimeStatus::InvalidPose;
+                };
+                let outgoing = resolve_clip_index(&self.catalog.clips, outgoing_animation)
+                    .and_then(|outgoing_clip_index| {
+                        self.pose_cache_for_skin(outgoing_clip_index, target_skin_hashcode)
+                    })
+                    .and_then(|outgoing_cache| {
+                        Some((
+                            outgoing_cache.sample_cyclic_frame(outgoing_raw_frame)?,
+                            outgoing_cache.sample_scalar_cyclic_frame(outgoing_raw_frame)?,
+                        ))
+                    });
+                let Some((outgoing_poses, outgoing_scalars)) = outgoing else {
+                    return AnimationRuntimeStatus::InvalidPose;
+                };
+                if outgoing_poses.len() != incoming_poses.len()
+                    || outgoing_scalars.len() != incoming_scalars.len()
+                {
+                    return AnimationRuntimeStatus::InvalidPose;
+                }
+                let alpha = incoming_weight.clamp(0.0, 1.0);
+                let poses = outgoing_poses
+                    .iter()
+                    .zip(&incoming_poses)
+                    .map(|(outgoing, incoming)| {
+                        let mut incoming_rotation = incoming.rotation;
+                        if outgoing.rotation.dot(incoming_rotation) < 0.0 {
+                            incoming_rotation = -incoming_rotation;
+                        }
+                        AnimationBonePose {
+                            position: outgoing.position.lerp(incoming.position, alpha),
+                            rotation: outgoing
+                                .rotation
+                                .slerp(incoming_rotation, alpha)
+                                .normalize(),
+                        }
+                    })
+                    .collect();
+                let morph_scalars = outgoing_scalars
+                    .iter()
+                    .zip(&incoming_scalars)
+                    .map(|(outgoing, incoming)| outgoing + (incoming - outgoing) * alpha)
+                    .collect();
+                (poses, morph_scalars)
+            }
         };
         let Some(skin) = target_runtime
             .catalog
@@ -2740,6 +3018,43 @@ impl AnimationListPanel {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cyclic_pose_sampling_interpolates_last_frame_back_to_first() {
+        let cache = AnimationPoseCache {
+            source: AnimationPoseSource::EmbeddedEdb,
+            source_path: PathBuf::new(),
+            frame_count: 3,
+            bone_count: 1,
+            scalar_count: 1,
+            motion_checksum: 0,
+            poses: vec![
+                AnimationBonePose {
+                    position: Vec3::ZERO,
+                    rotation: Quat::IDENTITY,
+                },
+                AnimationBonePose {
+                    position: Vec3::new(10.0, 0.0, 0.0),
+                    rotation: Quat::IDENTITY,
+                },
+                AnimationBonePose {
+                    position: Vec3::new(100.0, 0.0, 0.0),
+                    rotation: Quat::IDENTITY,
+                },
+            ],
+            scalars: vec![0.0, 10.0, 100.0],
+        };
+
+        let pose = cache.sample_cyclic_frame(2.5).expect("cyclic pose");
+        let scalars = cache
+            .sample_scalar_cyclic_frame(2.5)
+            .expect("cyclic scalars");
+        assert!((pose[0].position.x - 50.0).abs() < 1.0e-6);
+        assert!((scalars[0] - 50.0).abs() < 1.0e-6);
+
+        let wrapped = cache.sample_cyclic_frame(3.5).expect("wrapped pose");
+        assert!((wrapped[0].position.x - 5.0).abs() < 1.0e-6);
+    }
+
     fn clip(index: usize, hashcode: Hashcode) -> AnimationClipRecord {
         AnimationClipRecord {
             index,
@@ -2758,6 +3073,7 @@ mod tests {
             },
             pose_cache: None,
             pose_cache_error: None,
+            native_clip_rate: None,
             usages: Vec::new(),
             preview_duration: DEFAULT_PREVIEW_SECONDS,
         }

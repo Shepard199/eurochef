@@ -8,6 +8,16 @@ pub const ROBOTS_MESSAGE_VOICE_PADDING_SECONDS: f32 = 0.5;
 pub const ROBOTS_MESSAGE_VOICE_VOLUME: f32 = 0.5;
 pub const ROBOTS_MESSAGE_MINIMUM_SECONDS: f32 = 2.4;
 pub const ROBOTS_MESSAGE_FIXED_FRAMES_PER_SECOND: f32 = 60.0;
+pub const ROBOTS_MESSAGE_INPUT_CONFIRM: u32 = 0x25;
+pub const ROBOTS_MESSAGE_INPUT_SELECT_FIRST: u32 = 0x2c;
+pub const ROBOTS_MESSAGE_INPUT_SELECT_SECOND: u32 = 0x2d;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum RobotsMessageInputResult {
+    Ignored,
+    SelectionChanged { state: u8 },
+    ChoiceCommitted { choice: u8 },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum RobotsMessagePresentationEffect {
@@ -168,12 +178,19 @@ pub fn resolve_message_sound_duration(
     true
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NativeMessagePresentationState {
     /// Global native 32-byte queue (`DAT_007B2C44`, count `DAT_007B2C40`).
     pub queue: VecDeque<RobotsMessageQueueRecord>,
     /// Message record copied by `0x004A67E0` into presentation +0x114..+0x130.
     pub active: Option<RobotsMessageQueueRecord>,
+    /// Active-record `+0x0C`, physically presentation `+0x120`. Native input
+    /// handling writes 0 for UI action/state 1 and 1 for action/state 2; -1 is
+    /// the unresolved sentinel consumed by Cutscene `WaitForText`.
+    pub active_choice_result: i32,
+    /// Native message-box state at +0xC4. State 1 is the first choice and state 2
+    /// is the second choice; action 0x25 commits these as result 0/1 respectively.
+    pub selection_state_c4: u8,
     /// HUD manager +0x1C / native message-box object existence.
     pub message_box_exists: bool,
     /// `0x0049B170(8)` marks the message-box XItem for deferred destruction.
@@ -188,7 +205,64 @@ pub struct NativeMessagePresentationState {
     pub clear_requests: u32,
 }
 
+impl Default for NativeMessagePresentationState {
+    fn default() -> Self {
+        Self {
+            queue: VecDeque::new(),
+            active: None,
+            active_choice_result: -1,
+            selection_state_c4: 0,
+            message_box_exists: false,
+            pending_destroy: false,
+            pending_effects: VecDeque::new(),
+            enqueue_requests: 0,
+            wake_requests: 0,
+            dequeue_requests: 0,
+            clear_requests: 0,
+        }
+    }
+}
+
 impl NativeMessagePresentationState {
+    /// Exact logical-input boundary recovered from native `0x004A6AE0`.
+    /// The game queries logical actions through the input manager; raw keyboard or
+    /// gamepad bindings stay outside this engine-neutral runtime.
+    pub fn apply_logical_input(&mut self, action: u32) -> RobotsMessageInputResult {
+        if self.active.is_none() {
+            return RobotsMessageInputResult::Ignored;
+        }
+        match action {
+            ROBOTS_MESSAGE_INPUT_SELECT_FIRST if self.selection_state_c4 == 2 => {
+                self.selection_state_c4 = 1;
+                RobotsMessageInputResult::SelectionChanged { state: 1 }
+            }
+            ROBOTS_MESSAGE_INPUT_SELECT_SECOND if self.selection_state_c4 == 1 => {
+                self.selection_state_c4 = 2;
+                RobotsMessageInputResult::SelectionChanged { state: 2 }
+            }
+            ROBOTS_MESSAGE_INPUT_CONFIRM => {
+                let choice = match self.selection_state_c4 {
+                    1 => 0,
+                    2 => 1,
+                    _ => return RobotsMessageInputResult::Ignored,
+                };
+                self.active_choice_result = choice;
+                RobotsMessageInputResult::ChoiceCommitted {
+                    choice: choice as u8,
+                }
+            }
+            _ => RobotsMessageInputResult::Ignored,
+        }
+    }
+
+    pub fn set_active_choice_result(&mut self, result: i32) -> bool {
+        if self.active.is_none() || !matches!(result, 0 | 1) {
+            return false;
+        }
+        self.active_choice_result = result;
+        true
+    }
+
     /// `0x0049BEA0`: ensure HUD bit8/message-box exists, append one record, then
     /// invoke presentation vslot +0x90 (`0x004A7120`) to wake idle presentation.
     pub fn enqueue(&mut self, record: RobotsMessageQueueRecord) {
@@ -207,6 +281,8 @@ impl NativeMessagePresentationState {
         }
         let record = self.queue.pop_front()?;
         self.active = Some(record);
+        self.active_choice_result = record.parameter_0c;
+        self.selection_state_c4 = 1;
         if record.sound_uid != u32::MAX {
             self.pending_effects
                 .push_back(RobotsMessagePresentationEffect::StartVoice {
@@ -228,7 +304,10 @@ impl NativeMessagePresentationState {
     /// Presentation completion boundary. Visual state0..4 fades remain a host/UI
     /// concern; the engine-neutral runtime only releases the active native record.
     pub fn complete_active(&mut self) -> Option<RobotsMessageQueueRecord> {
-        self.active.take()
+        let completed = self.active.take();
+        self.active_choice_result = -1;
+        self.selection_state_c4 = 0;
+        completed
     }
 
     /// Native focus-loss cleanup `0x0049C240`: stop/inactivate the current
@@ -244,6 +323,8 @@ impl NativeMessagePresentationState {
                 .push_back(RobotsMessagePresentationEffect::StopVoice);
         }
         self.active = None;
+        self.active_choice_result = -1;
+        self.selection_state_c4 = 0;
         // 0x0049C240 recomputes the HUD destruction mask and sets bit8 for an
         // existing message-box object that is not already marked for destroy.
         if self.message_box_exists {
@@ -398,6 +479,54 @@ mod tests {
             build_cutscene_show_message_record(&definition, 0.0, 30.0, 84, false, 0, -1, -1,)
                 .is_none()
         );
+    }
+
+
+    #[test]
+    fn logical_message_input_matches_native_choice_mapping() {
+        let mut state = NativeMessagePresentationState::default();
+        let first = build_npc_simple_text_record(&message(u32::MAX), 0.0, None);
+        state.enqueue(first);
+        state.dequeue_front_into_active();
+
+        assert_eq!(state.selection_state_c4, 1);
+        assert_eq!(state.active_choice_result, -1);
+        assert_eq!(
+            state.apply_logical_input(ROBOTS_MESSAGE_INPUT_CONFIRM),
+            RobotsMessageInputResult::ChoiceCommitted { choice: 0 }
+        );
+        assert_eq!(state.active_choice_result, 0);
+
+        state.active_choice_result = -1;
+        assert_eq!(
+            state.apply_logical_input(ROBOTS_MESSAGE_INPUT_SELECT_SECOND),
+            RobotsMessageInputResult::SelectionChanged { state: 2 }
+        );
+        assert_eq!(state.active_choice_result, -1);
+        assert_eq!(
+            state.apply_logical_input(ROBOTS_MESSAGE_INPUT_CONFIRM),
+            RobotsMessageInputResult::ChoiceCommitted { choice: 1 }
+        );
+        assert_eq!(state.active_choice_result, 1);
+
+        state.active_choice_result = -1;
+        assert_eq!(
+            state.apply_logical_input(ROBOTS_MESSAGE_INPUT_SELECT_FIRST),
+            RobotsMessageInputResult::SelectionChanged { state: 1 }
+        );
+        assert_eq!(state.apply_logical_input(0x7fff), RobotsMessageInputResult::Ignored);
+        assert_eq!(state.active_choice_result, -1);
+    }
+
+    #[test]
+    fn logical_message_input_ignores_without_active_record() {
+        let mut state = NativeMessagePresentationState::default();
+        assert_eq!(
+            state.apply_logical_input(ROBOTS_MESSAGE_INPUT_CONFIRM),
+            RobotsMessageInputResult::Ignored
+        );
+        assert_eq!(state.selection_state_c4, 0);
+        assert_eq!(state.active_choice_result, -1);
     }
 
     #[test]
